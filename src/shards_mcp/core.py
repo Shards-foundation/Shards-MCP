@@ -429,11 +429,12 @@ class Gateway:
                 db.execute("""INSERT INTO tasks (id,creator,assignee,state,input,created,updated)
                               VALUES (?,'scheduler',?,'queued',?,?,?)""",
                            (tid, sch["assignee"], sch["input"], timestamp, timestamp))
-                next_due = (datetime.fromisoformat(sch["next_due"]) +
-                            timedelta(seconds=sch["interval_seconds"])).isoformat(timespec="microseconds")
-                while next_due <= now():
-                    next_due = (datetime.fromisoformat(next_due) +
-                                timedelta(seconds=sch["interval_seconds"])).isoformat(timespec="microseconds")
+                # Skip missed intervals in O(1); do not iterate millions of overdue ticks.
+                previous_due = datetime.fromisoformat(sch["next_due"])
+                elapsed = max(0.0, (datetime.now(timezone.utc) - previous_due).total_seconds())
+                intervals = int(elapsed // sch["interval_seconds"]) + 1
+                next_due = (previous_due + timedelta(
+                    seconds=intervals * sch["interval_seconds"])).isoformat(timespec="microseconds")
                 db.execute("UPDATE schedules SET next_due=? WHERE id=?", (next_due, sch["id"]))
                 self.audit(db, actor.agent_id, "schedule.dispatch", tid, {"schedule_id": sch["id"]})
                 created.append(tid)
