@@ -11,6 +11,7 @@
 
 - Durable operational events with topic filters and monotonic cursor polling, separate from security audit entries.
 
+- MCP stdio bridge for compatible local AI runtimes, forwarding to the authenticated HTTP server.
 - MCP JSON-RPC 2.0 stateless HTTP at POST /mcp: initialize, ping, tools/list, tools/call. Authenticated generic HTTP clients may instead invoke POST /v1/tools/{name} with JSON arguments, or discover GET /v1/tools.
 - Scoped bearer-credential agent registration, agent enumeration, revocation and heartbeat.
 - Durable agent-to-agent messaging, idempotency and recipient isolation.
@@ -55,6 +56,10 @@ Then issue method tools/list with an empty params object. To register an agent, 
 The package also installs the shards-worker command. Register a worker agent with scopes agent:heartbeat, task:read, task:claim, task:update and checkpoint:write. Export its issued token as SHARDS_AGENT_TOKEN and set SHARDS_GATEWAY_URL to the gateway base URL. Then run shards-worker --once for one poll cycle or shards-worker for continuous polling.
 
 Supported example tasks have an input JSON object with action set to echo, sha256 or health. The worker will never execute arbitrary shell commands or external service actions. If a worker is interrupted, an operator must reconcile the expired task lease before retry.
+
+## Local stdio MCP bridge
+
+For Claude Desktop and other environments supporting stdio MCP clients, run shards-mcp-stdio as a local process with SHARDS_GATEWAY_URL pointing to the running service and SHARDS_AGENT_TOKEN containing a **least-privileged agent token**. The bridge forwards newline-delimited MCP JSON-RPC messages to the shared authenticated HTTP gateway. It does not use administrator credentials and does not bypass policy checks. Local stdio MCP support is separate from ChatGPT's hosted remote MCP connection requirements.
 
 ## Execution and safety model
 
