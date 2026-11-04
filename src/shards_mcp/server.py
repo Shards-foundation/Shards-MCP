@@ -115,7 +115,8 @@ TOOL_SCOPES = {
     "schedule_list": "*", "schedule_disable": "*",
     "system_status": "*", "system_sanity_check": "*",
 }
-assert set(TOOL_SCOPES) == set(SCHEMAS), "every tool requires an explicit permission map"
+if set(TOOL_SCOPES) != set(SCHEMAS):
+    raise RuntimeError("every tool requires an explicit permission map")
 
 
 def visible_tools(principal: Principal) -> list[dict[str, Any]]:
@@ -264,7 +265,7 @@ def make_handler(gateway: Gateway, allowed_origins: set[str]):
                 return self.respond(200, {"status": "alive", "version": __version__})
             if self.path == "/health/ready":
                 try:
-                    with gateway.tx() as db:
+                    with gateway.read_tx() as db:
                         db.execute("SELECT 1").fetchone()
                     return self.respond(200, {"status": "ready"})
                 except sqlite3.Error:
@@ -289,9 +290,8 @@ def make_handler(gateway: Gateway, allowed_origins: set[str]):
             is_rest = self.path.startswith("/v1/tools/") and len(self.path) > len("/v1/tools/")
             if self.path != "/mcp" and not is_rest:
                 return self.respond(404, {"error": "not found"})
-            # Version negotiation happens in initialize; the client may probe with
-            # a newer header before accepting our supported version in the result.
-            version = self.headers.get("MCP-Protocol-Version")
+            # A client may probe with a newer version; initialize advertises the
+            # version this implementation actually implements.
             origin = self.headers.get("Origin")
             if origin and origin not in allowed_origins:
                 return self.respond(403, {"error": "origin denied"})
@@ -302,7 +302,12 @@ def make_handler(gateway: Gateway, allowed_origins: set[str]):
             length_header = self.headers.get("Content-Length")
             if length_header is None or not re.fullmatch(r"[0-9]+", length_header):
                 return self.respond(411, {"error": "valid ASCII Content-Length required"})
-            length = int(length_header)
+            if len(length_header) > 10:
+                return self.respond(400, {"error": "Content-Length digit count exceeded"})
+            try:
+                length = int(length_header)
+            except ValueError:
+                return self.respond(400, {"error": "invalid Content-Length"})
             if length > 262144:
                 return self.respond(413, {"error": "request body exceeds 256 KiB"})
             token = decode_auth(self.headers.get("Authorization", ""))
