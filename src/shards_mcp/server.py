@@ -115,7 +115,7 @@ TOOL_SCOPES = {
     "checkpoint_write": "checkpoint:write", "checkpoint_get": "task:read",
     "task_scan_expired": "*", "task_reconcile": "*",
     "event_publish": "event:write", "event_poll": "event:read",
-    "audit_list": "audit:read", "audit_verify": "audit:read",
+    "audit_list": "audit:read", "audit_verify": "*",
     "schedule_create": "*", "schedule_tick": "*",
     "schedule_list": "*", "schedule_disable": "*",
     "system_status": "*", "system_sanity_check": "*",
