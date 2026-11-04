@@ -14,7 +14,7 @@
 - MCP JSON-RPC 2.0 stateless HTTP at POST /mcp: initialize, ping, tools/list, tools/call. Authenticated generic HTTP clients may instead invoke POST /v1/tools/{name} with JSON arguments, or discover GET /v1/tools.
 - Scoped bearer-credential agent registration, agent enumeration, revocation and heartbeat.
 - Durable agent-to-agent messaging, idempotency and recipient isolation.
-- Assigned tasks with leases, checkpoint persistence and conservative failure recovery.
+- Assigned tasks with leases, checkpoint persistence, conservative failure recovery and independent task verification gate.
 - SQLite-backed transactionally appended audit hash chain and verification tool.
 - Interval task schedules dispatched by explicit schedule_tick calls.
 - Local readiness and liveness endpoints; Python standard library runtime; automated tests.
@@ -58,7 +58,7 @@ Supported example tasks have an input JSON object with action set to echo, sha25
 
 ## Execution and safety model
 
-A sender submits a task with an idempotency key and assignee. Only the assignee may claim that queued task and receive a finite lease. While the lease is valid, the agent can checkpoint, renew and complete its work. When a lease expires, an operator must explicitly mark the task blocked, reconcile any uncertain external effects, and approve requeueing. A saved checkpoint is task metadata, not a running model-process snapshot.
+A sender submits a task with an idempotency key and assignee. Only the assignee may claim that queued task and receive a finite lease. While the lease is valid, the agent can checkpoint, renew and report its result. **A worker's positive completion does not establish verified success**: it enters reported state until a separately authorised reviewer uses task_verify with verification evidence. The worker's own credentials cannot self-verify. When a lease expires, an operator must explicitly mark the task blocked, reconcile any uncertain external effects, and approve requeueing. A saved checkpoint is task metadata, not a running model-process snapshot.
 
 No arbitrary commands, deployments, trades, transfers or external requests are executed by the gateway.
 
