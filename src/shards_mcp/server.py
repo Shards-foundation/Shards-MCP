@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import sqlite3
 import os
 import sys
 from typing import Any, Callable
