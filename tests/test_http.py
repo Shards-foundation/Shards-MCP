@@ -110,8 +110,13 @@ class HttpTests(unittest.TestCase):
         status, result = self.req("POST", "/v1/tools/task_get",
                                   {"task_id": task["result"]["task_id"]}, self.token)
         self.assertEqual(status, 200)
-        self.assertEqual(result["result"]["state"], "succeeded")
+        self.assertEqual(result["result"]["state"], "reported")
         self.assertIn("sha256", result["result"]["result"])
+        status, verified = self.req("POST", "/v1/tools/task_verify",
+                                    {"task_id": task["result"]["task_id"], "approved": True,
+                                     "evidence": {"sha256": result["result"]["result"]["sha256"]}}, self.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(verified["result"]["state"], "succeeded")
         self.assertEqual(process_once(client), 0)
         with self.assertRaises(ValueError):
             AgentClient("http://untrusted.example", worker["token"])
