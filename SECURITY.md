@@ -43,3 +43,7 @@ A2A card discovery requires authenticated `agent:read` authority. An A2A SendMes
 
 Unsupported A2A features are disabled rather than advertised. As with MCP, the adapter must not be exposed remotely without OAuth and a TLS reverse proxy.
 
+
+## Operations safeguards
+
+The metrics exporter is restricted to the operator credential from a local loopback peer and the Caddy reference ingress denies `/metrics` publicly. Metrics labels use finite route/status/method categories; request paths, tokens, agent IDs and user data are not emitted. Snapshots are local-only, exclusively created in an operator-protected destination directory with 0600 permissions, validated by SQLite and local audit-chain checks, and must be exported to encrypted off-host storage. Snapshot restoration never reverts external agent side effects. The independent scheduler quarantines expired leases and must not be deployed in multiple copies without leader election. The reference Compose stack uses a secret file, SQLite named volume and TLS proxy; it is not a managed or hardened production hosting service.
