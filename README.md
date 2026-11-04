@@ -48,6 +48,12 @@ Then issue method tools/list with an empty params object. To register an agent, 
 
 **Do not connect ChatGPT using the administrator token.** Standard remote OAuth support, HTTPS deployment and platform testing are separate release gates.
 
+### Reference worker (safe deterministic operations)
+
+The package also installs the shards-worker command. Register a worker agent with scopes agent:heartbeat, task:read, task:claim, task:update and checkpoint:write. Export its issued token as SHARDS_AGENT_TOKEN and set SHARDS_GATEWAY_URL to the gateway base URL. Then run shards-worker --once for one poll cycle or shards-worker for continuous polling.
+
+Supported example tasks have an input JSON object with action set to echo, sha256 or health. The worker will never execute arbitrary shell commands or external service actions. If a worker is interrupted, an operator must reconcile the expired task lease before retry.
+
 ## Execution and safety model
 
 A sender submits a task with an idempotency key and assignee. Only the assignee may claim that queued task and receive a finite lease. While the lease is valid, the agent can checkpoint, renew and complete its work. When a lease expires, an operator must explicitly mark the task blocked, reconcile any uncertain external effects, and approve requeueing. A saved checkpoint is task metadata, not a running model-process snapshot.
