@@ -23,6 +23,7 @@ from .core import Gateway, GatewayError, Principal, canonical
 from .oauth import OAuthResourceServer
 from .a2a import A2AAdapter
 from .observability import RequestMetrics, route_class
+from .config import admin_token_from_environment
 
 
 def schema(properties: dict[str, dict[str, Any]], required: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -462,9 +463,10 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
 
 
 def main() -> None:
-    token = os.getenv("SHARDS_ADMIN_TOKEN", "")
-    if len(token) < 32 or len(set(token)) < 12:
-        raise SystemExit("Refusing to start: SHARDS_ADMIN_TOKEN must be >=32 characters with >=12 distinct characters")
+    try:
+        token = admin_token_from_environment()
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise SystemExit(f"Refusing to start: {exc}") from None
     host = os.getenv("SHARDS_BIND", "127.0.0.1")
     remote = host not in ("127.0.0.1", "localhost", "::1")
     if remote and os.getenv("SHARDS_ALLOW_REMOTE") != "1":
