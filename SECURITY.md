@@ -23,3 +23,11 @@
 - Use test credentials and non-consequential operations only. Backup and restore the SQLite file using the SQLite backup API, with encrypted off-host storage.
 
 Report vulnerabilities using private GitHub reporting when enabled. Never post real credentials or exploit details in public issues.
+
+
+## Event-topic and audit isolation (review follow-up)
+
+- Non-admin principals can publish and read only their own \`agent.<authenticated_agent_id>.<topic>\` event namespaces and the organisation-wide \`shared.<topic>\` broadcast namespace.
+- \`system.*\` event topics are administrator-only. Any shared event is untrusted, not an authoritative system instruction.
+- Agent-scoped audit readers see only the audit rows they authored. Operators with bootstrap credentials may inspect all rows.
+- This is **single-organisation** topic separation, not a multi-tenant security model. No per-topic subscriptions or topic permission grants beyond these namespaces are implemented.
