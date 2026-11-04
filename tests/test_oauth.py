@@ -146,6 +146,16 @@ class OAuthTests(unittest.TestCase):
                     OAuthResourceServer(self.gateway, issuer, resource, jwks,
                                         key_resolver=lambda _: self.public)
 
+    def test_oauth_issuer_uri_is_compared_exactly_including_trailing_slash(self):
+        issuer = self.ISSUER + "/"
+        oauth = OAuthResourceServer(self.gateway, issuer, self.RESOURCE, self.JWKS,
+                                    key_resolver=lambda _: self.public)
+        self.assertEqual(oauth.issuer, issuer)
+        token = self.jwt_token(iss=issuer)
+        self.assertEqual(oauth.authenticate(token).agent_id, self.agent_id)
+        with self.assertRaises(GatewayError):
+            oauth.authenticate(self.jwt_token(iss=self.ISSUER))
+
     def test_duplicate_oauth_subject_is_rejected(self):
         with self.assertRaises(GatewayError) as raised:
             self.gateway.register(self.admin, "other-agent", "test", [], ["agent:read"],
