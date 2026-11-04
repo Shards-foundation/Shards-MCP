@@ -20,6 +20,7 @@ shards-mcp = "shards_mcp.server:main"
 shards-worker = "shards_mcp.worker:main"
 shards-mcp-stdio = "shards_mcp.stdio:main"
 shards-mcp-admin = "shards_mcp.admin:main"
+shards-scheduler = "shards_mcp.scheduler:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

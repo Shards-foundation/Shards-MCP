@@ -10,9 +10,9 @@ Environment:
 
 GET /health/live checks process liveness. GET /health/ready checks a database transaction. Neither proves external integrations are healthy.
 
-This version exposes an interval scheduler, not a cron-expression parser. A trusted authenticated operator must trigger schedule_tick periodically via an external scheduler. An overdue interval coalesces missed intervals into one dispatched task.
+The gateway implements interval schedules (not cron expressions). Use the new `shards-scheduler` process for continuous single-host dispatch and expired-lease quarantine, or call `schedule_tick` explicitly from a trusted local operator. An overdue interval coalesces missed intervals into one task. Do not run multiple independent schedulers without distributed leader election.
 
-After crash or outage, run task_scan_expired. Inspect downstream effects, then requeue blocked tasks only using task_reconcile with explicit evidence. A SQLite backup should be created through the backup API, encrypted and restored in a test environment regularly.
+After crash or outage, the scheduler or operator runs `task_scan_expired`. Inspect downstream effects and requeue blocked tasks only with `task_reconcile` plus explicit evidence. `shards-mcp-admin backup --output NEW_FILE` uses the SQLite backup API, verifies SQLite integrity and the local audit chain, and logs a successful snapshot; `verify-snapshot --input FILE` works offline. Keep snapshots encrypted off-host and rehearse restores. See [persistent deployment runbook](../deploy/README.md).
 
 Keep the database on persistent protected storage. Do not bind the container directly to a public address without an independent security gateway.
 

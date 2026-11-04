@@ -13,6 +13,8 @@ from pathlib import Path
 import sys
 
 from .core import Gateway, GatewayError, SCOPES
+from .snapshots import create_snapshot, inspect_snapshot
+from .config import admin_token_from_environment
 
 
 def main() -> None:
@@ -30,11 +32,24 @@ def main() -> None:
     revoke = sub.add_parser("revoke", help="Revoke an agent ID")
     revoke.add_argument("agent_id")
     sub.add_parser("list", help="List agent IDs and scopes without tokens")
+    backup = sub.add_parser("backup", help="Create an exclusive consistent online SQLite snapshot")
+    backup.add_argument("--output", required=True, help="New file in an owner-only backup directory")
+    check = sub.add_parser("verify-snapshot", help="Verify an offline snapshot without starting a gateway")
+    check.add_argument("--input", required=True)
     args = parser.parse_args()
 
-    admin_token = os.getenv("SHARDS_ADMIN_TOKEN", "")
-    if not admin_token:
-        parser.error("SHARDS_ADMIN_TOKEN must be supplied through the environment or secrets manager")
+    if args.action == "verify-snapshot":
+        try:
+            print(json.dumps(inspect_snapshot(args.input), sort_keys=True))
+            return
+        except (GatewayError, OSError, ValueError) as exc:
+            print(f"shards-mcp-admin: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
+
+    try:
+        admin_token = admin_token_from_environment()
+    except (OSError, UnicodeError, ValueError) as exc:
+        parser.error(str(exc))
     gateway = Gateway(os.getenv("SHARDS_DB", "shards.db"), admin_token)
     root = gateway.authenticate(admin_token)
 
@@ -70,6 +85,8 @@ def main() -> None:
                 raise
         elif args.action == "revoke":
             print(json.dumps(gateway.revoke(root, args.agent_id)))
+        elif args.action == "backup":
+            print(json.dumps(create_snapshot(gateway, root, args.output), sort_keys=True))
         else:
             print(json.dumps(gateway.agents(root), sort_keys=True))
     except (GatewayError, OSError, ValueError) as exc:

@@ -11,3 +11,6 @@ build/
 *.db-shm
 *.db-wal
 .venv/
+
+# Local deployment and operator credentials
+/secrets/

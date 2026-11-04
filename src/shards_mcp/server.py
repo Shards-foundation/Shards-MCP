@@ -14,12 +14,16 @@ import json
 import sqlite3
 import os
 import sys
+import secrets
+import time
 from typing import Any, Callable
 
 from . import __version__
 from .core import Gateway, GatewayError, Principal, canonical
 from .oauth import OAuthResourceServer
 from .a2a import A2AAdapter
+from .observability import RequestMetrics, route_class
+from .config import admin_token_from_environment
 
 
 def schema(properties: dict[str, dict[str, Any]], required: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -225,7 +229,7 @@ def dispatch(gateway: Gateway, principal: Principal, name: str, args: Any) -> An
 
 def status(gateway: Gateway, principal: Principal) -> dict[str, Any]:
     principal.require("*")
-    with gateway.tx() as db:
+    with gateway.read_tx() as db:
         return {
             "version": __version__,
             "agents": db.execute("SELECT COUNT(*) FROM agents WHERE revoked=0").fetchone()[0],
@@ -239,7 +243,9 @@ def status(gateway: Gateway, principal: Principal) -> dict[str, Any]:
 
 def make_handler(gateway: Gateway, allowed_origins: set[str],
                  oauth: OAuthResourceServer | None = None,
-                 a2a: A2AAdapter | None = None):
+                 a2a: A2AAdapter | None = None,
+                 metrics: RequestMetrics | None = None):
+    meter = metrics if metrics is not None else RequestMetrics()
     # Only one token format is accepted per server mode. In OAuth mode, local
     # bootstrap/agent credentials cannot authenticate any network request.
     authenticate = oauth.authenticate if oauth is not None else gateway.authenticate
@@ -251,25 +257,60 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
         def setup(self) -> None:
             super().setup()
             self.connection.settimeout(10)
+            self._started = time.monotonic()
+            self._request_id = secrets.token_hex(8)
 
         def log_message(self, format: str, *args: Any) -> None:
-            # Do not log request headers (particularly bearer tokens).
-            sys.stderr.write("%s %s\n" % (self.address_string(), format % args))
+            # BaseHTTPRequestHandler can log raw paths, including user-controlled query
+            # strings. We emit one sanitised structured event from respond() instead.
+            return None
 
-        def respond(self, status_code: int, data: Any, headers: dict[str, str] | None = None) -> None:
-            raw = canonical(data).encode("utf-8") if data is not None else b""
+        def respond(self, status_code: int, data: Any,
+                    headers: dict[str, str] | None = None,
+                    content_type: str = "application/json") -> None:
+            raw = (data.encode("utf-8") if content_type.startswith("text/plain")
+                   else canonical(data).encode("utf-8")) if data is not None else b""
             self.send_response(status_code)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Request-ID", self._request_id)
             self.send_header("Content-Length", str(len(raw)))
             for key, value in (headers or {}).items():
                 self.send_header(key, value)
             self.end_headers()
             if raw:
                 self.wfile.write(raw)
+            elapsed = max(0.0, time.monotonic() - self._started)
+            meter.observe(self.command, self.path, status_code, elapsed)
+            # Fixed labels only: never emit request headers, tokens, actor IDs,
+            # message bodies, task payloads or arbitrary query paths.
+            sys.stderr.write(json.dumps({
+                "event": "http_response", "request_id": self._request_id,
+                "method": self.command if self.command in ("GET", "POST") else "OTHER",
+                "route": route_class(self.path), "status": status_code,
+                "elapsed_ms": round(elapsed * 1000, 2),
+            }, separators=(",", ":")) + "\n")
 
         def do_GET(self) -> None:
+            if self.path == "/metrics":
+                if self.client_address[0] not in ("127.0.0.1", "::1"):
+                    return self.respond(404, {"error": "not found"})
+                token = decode_auth(self.headers.get("Authorization", ""))
+                if not token:
+                    return self.respond(401, {"error": "operator credential required"})
+                try:
+                    principal = gateway.authenticate(token)
+                    principal.require("*")
+                except GatewayError:
+                    return self.respond(403, {"error": "permission denied"})
+                try:
+                    with gateway.read_tx() as db:
+                        exposed = meter.render(db)
+                    return self.respond(200, exposed,
+                                        content_type="text/plain; version=0.0.4; charset=utf-8")
+                except sqlite3.Error:
+                    return self.respond(503, {"error": "metrics storage unavailable"})
             if oauth and self.path in ("/.well-known/oauth-protected-resource",
                                       "/.well-known/oauth-protected-resource/mcp"):
                 return self.respond(200, oauth.metadata())
@@ -422,9 +463,10 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
 
 
 def main() -> None:
-    token = os.getenv("SHARDS_ADMIN_TOKEN", "")
-    if len(token) < 32 or len(set(token)) < 12:
-        raise SystemExit("Refusing to start: SHARDS_ADMIN_TOKEN must be >=32 characters with >=12 distinct characters")
+    try:
+        token = admin_token_from_environment()
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise SystemExit(f"Refusing to start: {exc}") from None
     host = os.getenv("SHARDS_BIND", "127.0.0.1")
     remote = host not in ("127.0.0.1", "localhost", "::1")
     if remote and os.getenv("SHARDS_ALLOW_REMOTE") != "1":

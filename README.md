@@ -18,10 +18,14 @@
 - Durable agent-to-agent messaging, idempotency and recipient isolation.
 - Assigned tasks with leases, checkpoint persistence, conservative failure recovery and independent task verification gate.
 - SQLite-backed transactionally appended audit hash chain and verification tool.
-- Interval task schedules dispatched by explicit schedule_tick calls.
+- Durable interval schedules dispatched by explicit ticks or the independent `shards-scheduler` supervisor; expired leases are quarantined.
+- Operator-only Prometheus metrics and redacted structured HTTP access logs.
+- Local-only consistent SQLite snapshots with integrity/audit verification and recovery rehearsal.
+- Optional external OAuth JWT mode and constrained A2A v1.0 agent delegation interface.
+- Docker Compose reference stack for persistent single-host deployment with Caddy HTTPS and protected secret files.
 - Local readiness and liveness endpoints; Python standard library runtime; automated tests.
 
-**Not yet implemented:** OAuth 2.1 resource-server flow, A2A protocol, remote tool federation, streaming events, advanced rate limiting, high-availability database, independent audit anchoring, production observability, distributed cron, automatic snapshots/rollback, native dashboard, ChatGPT Apps SDK UI, external service integrations.
+**Not yet implemented:** complete OAuth provider/client-flow interoperability, full A2A conformance, remote tool federation, server-pushed events, production rate limiting/alerting, multi-host Postgres, independent audit anchoring, distributed leader election, automatic external-effect rollback, hosted service and ChatGPT Apps SDK UI. The snapshot feature backs up local SQLite state only.
 
 ## Run locally
 
@@ -139,6 +143,7 @@ No arbitrary commands, deployments, trades, transfers or external requests are e
 - [Operations and recovery](docs/operations.md)
 - [Release roadmap](docs/roadmap.md)
 - [Portable plugin manifests and installation](docs/plugin-packaging.md)
+- [Persistent Docker Compose deployment and recovery runbook](deploy/README.md)
 
 ## Test
 

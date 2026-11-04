@@ -28,3 +28,7 @@ Do not mark as production-ready until the applicable phases have independent evi
 
 An authenticated, explicitly opt-in JSON-RPC v1.0 adapter implements per-agent cards and text-only SendMessage/GetTask mapped to durable Shards tasks. This is a **partial adapter**, not a claim of full A2A compliance or compatibility with every AI platform. The A2A conformance and live multi-runtime interoperability gate remains open, along with streaming, push notification and cancellation.
 
+
+## Operations and observability progress
+
+A bounded-label Prometheus exporter, redacted structured HTTP logs, online SQLite snapshot creation/verification, a single-host scheduling supervisor and persistent Docker Compose reference deployment are implemented. These provide local operational utility but are **not** evidence of high availability, a running public service, external audit immutability, alert delivery, off-host automated backup or disaster recovery readiness. The related release gates remain open.

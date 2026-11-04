@@ -1,0 +1,101 @@
+name: shards-mcp
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: shards-mcp-local:0.1
+    restart: unless-stopped
+    init: true
+    environment:
+      SHARDS_DB: /data/state.db
+      SHARDS_BIND: 0.0.0.0
+      SHARDS_PORT: "8787"
+      SHARDS_ALLOW_REMOTE: "1"
+      SHARDS_AUTH_MODE: oauth
+      SHARDS_ADMIN_TOKEN_FILE: /run/secrets/admin_token
+      SHARDS_OAUTH_ISSUER: ${SHARDS_OAUTH_ISSUER:?Set trusted HTTPS OAuth issuer}
+      SHARDS_OAUTH_JWKS_URI: ${SHARDS_OAUTH_JWKS_URI:?Set trusted HTTPS JWKS URL}
+      SHARDS_PUBLIC_URL: https://${SHARDS_GATEWAY_DOMAIN:?Set gateway hostname}/mcp
+      SHARDS_ALLOWED_ORIGINS: ${SHARDS_ALLOWED_ORIGINS:-}
+    secrets:
+      - admin_token
+    volumes:
+      - gateway_data:/data
+    expose:
+      - "8787"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=16m
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  scheduler:
+    image: shards-mcp-local:0.1
+    command: ["shards-scheduler", "--interval-seconds", "30"]
+    restart: unless-stopped
+    init: true
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      SHARDS_DB: /data/state.db
+      SHARDS_ADMIN_TOKEN_FILE: /run/secrets/admin_token
+    volumes:
+      - gateway_data:/data
+    secrets:
+      - admin_token
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=16m
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  caddy:
+    image: caddy:2.11.7-alpine
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      SHARDS_GATEWAY_DOMAIN: ${SHARDS_GATEWAY_DOMAIN:?Set gateway hostname}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+secrets:
+  admin_token:
+    file: ../secrets/admin_token
+
+volumes:
+  gateway_data:
+  caddy_data:
+  caddy_config:
