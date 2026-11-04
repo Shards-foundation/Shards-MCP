@@ -391,8 +391,8 @@ def make_handler(gateway: Gateway, allowed_origins: set[str]):
 
 def main() -> None:
     token = os.getenv("SHARDS_ADMIN_TOKEN", "")
-    if len(token) < 32:
-        raise SystemExit("Refusing to start: SHARDS_ADMIN_TOKEN must be >=32 characters")
+    if len(token) < 32 or len(set(token)) < 12:
+        raise SystemExit("Refusing to start: SHARDS_ADMIN_TOKEN must be >=32 characters with >=12 distinct characters")
     host = os.getenv("SHARDS_BIND", "127.0.0.1")
     if host not in ("127.0.0.1", "localhost", "::1") and os.getenv("SHARDS_ALLOW_REMOTE") != "1":
         raise SystemExit("Refusing non-loopback binding without SHARDS_ALLOW_REMOTE=1")
