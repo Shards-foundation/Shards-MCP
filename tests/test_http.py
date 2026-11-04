@@ -90,5 +90,34 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(rejected["error"]["code"], "FORBIDDEN")
 
+    def test_reference_worker_end_to_end(self):
+        from shards_mcp.worker import AgentClient, process_once, safe_operation
+        base = "http://127.0.0.1:%d" % self.server.server_port
+        status, created = self.req("POST", "/v1/tools/agent_register",
+                                   {"name": "reference-worker", "provider": "local",
+                                    "capabilities": ["sha256"],
+                                    "scopes": ["agent:heartbeat", "task:read", "task:claim",
+                                               "task:update", "checkpoint:write"]}, self.token)
+        self.assertEqual(status, 200)
+        worker = created["result"]
+        status, task = self.req("POST", "/v1/tools/task_create",
+                                {"assignee": worker["agent_id"],
+                                 "payload": {"action": "sha256", "data": "abc"},
+                                 "idempotency_key": "worker-1"}, self.token)
+        self.assertEqual(status, 200)
+        client = AgentClient(base, worker["token"])
+        self.assertEqual(process_once(client), 1)
+        status, result = self.req("POST", "/v1/tools/task_get",
+                                  {"task_id": task["result"]["task_id"]}, self.token)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["result"]["state"], "succeeded")
+        self.assertIn("sha256", result["result"]["result"])
+        self.assertEqual(process_once(client), 0)
+        with self.assertRaises(ValueError):
+            AgentClient("http://untrusted.example", worker["token"])
+        with self.assertRaises(ValueError):
+            safe_operation({"action": "shell", "command": "rm -rf /"})
+
+
 if __name__ == "__main__":
     unittest.main()
