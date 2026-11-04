@@ -33,11 +33,6 @@ BOOL = {"type": "boolean"}
 
 # Tool descriptions deliberately state authority boundaries. They do not grant authority.
 TOOL_DEFS = [
-    ("agent_register", "Admin only: register an agent and issue a credential exactly once.",
-     schema({"name": S, "provider": S, "capabilities": ARR, "scopes": ARR},
-            ("name", "provider", "capabilities", "scopes")), False),
-    ("agent_revoke", "Admin only: invalidate an agent's credential.",
-     schema({"agent_id": S}, ("agent_id",)), False),
     ("agent_list", "List registered agents (credentials never returned).",
      schema({}), True),
     ("agent_heartbeat", "Record authenticated agent liveness.", schema({}), False),
@@ -104,7 +99,7 @@ TOOL_LIST = [
 ]
 SCHEMAS = {item["name"]: item["inputSchema"] for item in TOOL_LIST}
 TOOL_SCOPES = {
-    "agent_register": "*", "agent_revoke": "*", "agent_list": "agent:read",
+    "agent_list": "agent:read",
     "agent_heartbeat": "agent:heartbeat",
     "message_send": "message:send", "message_inbox": "message:read",
     "message_ack": "message:read", "message_poll": "message:read",
@@ -190,8 +185,6 @@ def validate_args(name: str, args: Any) -> dict[str, Any]:
 def dispatch(gateway: Gateway, principal: Principal, name: str, args: Any) -> Any:
     a = validate_args(name, args)
     calls: dict[str, Callable[[], Any]] = {
-        "agent_register": lambda: gateway.register(principal, a["name"], a["provider"], a["capabilities"], a["scopes"]),
-        "agent_revoke": lambda: gateway.revoke(principal, a["agent_id"]),
         "agent_list": lambda: gateway.agents(principal),
         "agent_heartbeat": lambda: gateway.heartbeat(principal),
         "message_send": lambda: gateway.send(principal, a["destination"], a["body"], a["idempotency_key"], a.get("task_id")),
