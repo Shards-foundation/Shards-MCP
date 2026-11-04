@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sqlite3
 from pathlib import Path
@@ -60,7 +61,14 @@ class Gateway:
     def __init__(self, path: str, admin_token: str):
         if len(admin_token) < 32:
             raise ValueError("SHARDS_ADMIN_TOKEN must contain at least 32 characters")
-        self.path = str(Path(path).expanduser().resolve())
+        requested = Path(path).expanduser()
+        if requested.is_symlink():
+            raise ValueError("database path must not be a symbolic link")
+        self.path = str(requested.resolve())
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        os.close(fd)
+        if os.name == "posix":
+            os.chmod(self.path, 0o600)
         self.admin_hash = hashlib.sha256(admin_token.encode()).digest()
         with self.tx() as db:
             db.executescript("""
@@ -79,9 +87,13 @@ class Gateway:
                 CREATE TABLE IF NOT EXISTS tasks (
                   id TEXT PRIMARY KEY, creator TEXT NOT NULL, assignee TEXT NOT NULL,
                   state TEXT NOT NULL, input TEXT NOT NULL, result TEXT,
-                  lease_until TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+                  lease_until TEXT, lease_started TEXT, attempts INTEGER NOT NULL DEFAULT 0,
                   idem TEXT, created TEXT NOT NULL, updated TEXT NOT NULL,
                   UNIQUE(creator, idem)
+                );
+                CREATE TABLE IF NOT EXISTS verifications (
+                  task_id TEXT PRIMARY KEY, verifier TEXT NOT NULL,
+                  approved INTEGER NOT NULL, evidence TEXT NOT NULL, created TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS checkpoints (
                   task_id TEXT NOT NULL, version INTEGER NOT NULL, actor TEXT NOT NULL,
@@ -106,6 +118,21 @@ class Gateway:
                   details TEXT NOT NULL, previous_hash TEXT NOT NULL, entry_hash TEXT NOT NULL
                 );
             """)
+            # Migration from existing experimental 0.1 databases.
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
+            if "lease_started" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN lease_started TEXT")
+
+    @contextmanager
+    def read_tx(self) -> Iterator[sqlite3.Connection]:
+        # Read-only authentication never waits behind BEGIN IMMEDIATE writer locks.
+        db = sqlite3.connect(self.path, timeout=1, isolation_level=None)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA query_only = ON")
+            yield db
+        finally:
+            db.close()
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -142,7 +169,7 @@ class Gateway:
         digest = hashlib.sha256(token.encode()).digest()
         if hmac.compare_digest(digest, self.admin_hash):
             return Principal("operator", ("*",))
-        with self.tx() as db:
+        with self.read_tx() as db:
             row = db.execute(
                 "SELECT id,scopes,revoked FROM agents WHERE token_hash=?",
                 (digest.hex(),)).fetchone()
@@ -152,7 +179,10 @@ class Gateway:
 
     @staticmethod
     def limit(value: Any, max_bytes: int = 131072) -> str:
-        encoded = canonical(value)
+        try:
+            encoded = canonical(value)
+        except (ValueError, RecursionError, TypeError) as exc:
+            raise GatewayError("invalid or excessively nested JSON payload") from exc
         if len(encoded.encode("utf-8")) > max_bytes:
             raise GatewayError("payload too large", "PAYLOAD_TOO_LARGE")
         return encoded
@@ -338,7 +368,7 @@ class Gateway:
 
     def task_claim(self, actor: Principal, task_id: str, lease_seconds: int = 60) -> dict[str, Any]:
         actor.require("task:claim")
-        if not isinstance(lease_seconds, int) or not 15 <= lease_seconds <= 3600:
+        if type(lease_seconds) is not int or not 15 <= lease_seconds <= 3600:
             raise GatewayError("lease_seconds must be 15..3600")
         with self.tx() as db:
             row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -346,23 +376,31 @@ class Gateway:
                 raise GatewayError("task not assigned to caller", "FORBIDDEN")
             if row["state"] != "queued":
                 raise GatewayError("task not claimable", "CONFLICT")
+            started = now()
             expiry = after(lease_seconds)
-            db.execute("""UPDATE tasks SET state='running', lease_until=?,
+            db.execute("""UPDATE tasks SET state='running', lease_until=?, lease_started=?,
                           attempts=attempts+1, updated=? WHERE id=?""",
-                       (expiry, now(), task_id))
+                       (expiry, started, started, task_id))
             self.audit(db, actor.agent_id, "task.claim", task_id, {"lease_until": expiry})
         return {"task_id": task_id, "state": "running", "lease_until": expiry}
 
     def task_renew(self, actor: Principal, task_id: str, lease_seconds: int = 60) -> dict[str, Any]:
         actor.require("task:update")
-        if not isinstance(lease_seconds, int) or not 15 <= lease_seconds <= 3600:
+        if type(lease_seconds) is not int or not 15 <= lease_seconds <= 3600:
             raise GatewayError("lease_seconds must be 15..3600")
-        expiry = after(lease_seconds)
         with self.tx() as db:
             row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if not row or row["assignee"] != actor.agent_id or row["state"] != "running" or row["lease_until"] <= now():
                 raise GatewayError("lease invalid or expired", "CONFLICT")
+            # Hard cap: one claim's lifetime is at most two hours, including renewals.
+            started = datetime.fromisoformat(row["lease_started"] or row["updated"])
+            deadline = started + timedelta(hours=2)
+            requested = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
+            if requested > deadline:
+                raise GatewayError("maximum task lease lifetime exceeded", "CONFLICT")
+            expiry = requested.isoformat(timespec="microseconds")
             db.execute("UPDATE tasks SET lease_until=?, updated=? WHERE id=?", (expiry, now(), task_id))
+            self.audit(db, actor.agent_id, "task.renew", task_id, {"lease_until": expiry})
         return {"task_id": task_id, "lease_until": expiry}
 
     def task_complete(self, actor: Principal, task_id: str, success: bool, result: Any) -> dict[str, Any]:
@@ -387,10 +425,12 @@ class Gateway:
         actor.require("task:verify")
         if type(approved) is not bool:
             raise GatewayError("approved must be boolean")
+        # Reject vacuous attestations; evidence must remain inspectable.
+        if not ((isinstance(evidence, dict) and bool(evidence))
+                or (isinstance(evidence, list) and bool(evidence))
+                or (isinstance(evidence, str) and len(evidence.strip()) >= 8)):
+            raise GatewayError("non-empty structured or descriptive verification evidence required")
         serialized = self.limit(evidence)
-        # Require meaningful evidence for both acceptance and rejection.
-        if evidence is None or (isinstance(evidence, str) and len(evidence.strip()) < 8):
-            raise GatewayError("verification evidence required")
         with self.tx() as db:
             row = db.execute("SELECT state, assignee FROM tasks WHERE id=?", (task_id,)).fetchone()
             if not row or row["state"] != "reported":
@@ -398,12 +438,28 @@ class Gateway:
             if actor.agent_id == row["assignee"]:
                 raise GatewayError("worker cannot verify its own output", "FORBIDDEN")
             state = "succeeded" if approved else "failed"
+            db.execute("INSERT INTO verifications(task_id,verifier,approved,evidence,created) VALUES (?,?,?,?,?)",
+                       (task_id, actor.agent_id, int(approved), serialized, now()))
             db.execute("UPDATE tasks SET state=?, updated=? WHERE id=?",
                        (state, now(), task_id))
             self.audit(db, actor.agent_id, "task.verify", task_id,
                        {"approved": approved, "state": state, "evidence_sha256":
                         hashlib.sha256(serialized.encode("utf-8")).hexdigest()})
         return {"task_id": task_id, "state": state, "verified_by": actor.agent_id}
+
+    def verification_get(self, actor: Principal, task_id: str) -> dict[str, Any]:
+        actor.require("task:read")
+        with self.read_tx() as db:
+            task = db.execute("SELECT creator,assignee FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not task or (actor.agent_id != "operator" and actor.agent_id not in (task["creator"], task["assignee"])):
+                raise GatewayError("verification not found", "NOT_FOUND")
+            result = db.execute("SELECT * FROM verifications WHERE task_id=?", (task_id,)).fetchone()
+        if result is None:
+            return {"task_id": task_id, "verification": None}
+        item = dict(result)
+        item["approved"] = bool(item["approved"])
+        item["evidence"] = json.loads(item["evidence"])
+        return {"task_id": task_id, "verification": item}
 
     def checkpoint(self, actor: Principal, task_id: str, body: Any) -> dict[str, Any]:
         actor.require("checkpoint:write")
