@@ -104,6 +104,37 @@ class ReviewCoreTests(unittest.TestCase):
         self.assertEqual(json.loads(answer)["error"]["code"], -32600)
 
 
+    def test_cursor_can_reach_oldest_messages_beyond_default_limit(self):
+        for index in range(115):
+            self.g.send(self.a, self.id_b, {"number": index}, "message-" + str(index))
+        cursor = 0
+        received = []
+        for _ in range(4):
+            page = self.g.message_poll(self.b, after_seq=cursor, limit=40)
+            received.extend(m["body"]["number"] for m in page["messages"])
+            cursor = page["next_cursor"]
+        self.assertEqual(received, list(range(115)))
+        self.assertEqual(self.g.message_poll(self.a)["messages"], [])
+        with self.assertRaises(GatewayError):
+            self.g.message_poll(self.b, after_seq=-1)
+        first = self.g.message_poll(self.b, limit=1)["messages"][0]
+        self.g.message_ack(self.b, first["id"])
+        self.assertEqual(self.g.message_poll(self.b, limit=1)["messages"][0]["body"]["number"], 1)
+        self.assertEqual(self.g.message_poll(self.b, limit=1, unread_only=False)["messages"][0]["body"]["number"], 0)
+
+    def test_schedules_can_be_stopped_and_cannot_target_revoked_workers(self):
+        schedule = self.g.schedule_create(self.root, self.id_b, {"action": "health"}, 60)["schedule_id"]
+        self.assertIn(schedule, [x["id"] for x in self.g.schedule_list(self.root)])
+        with self.g.tx() as db:
+            db.execute("UPDATE schedules SET next_due='2000-01-01T00:00:00+00:00' WHERE id=?", (schedule,))
+        self.g.revoke(self.root, self.id_b)
+        self.assertEqual(self.g.schedule_tick(self.root)["dispatched"], [])
+        self.assertEqual(self.g.schedule_disable(self.root, schedule)["enabled"], False)
+        self.assertEqual(self.g.schedule_tick(self.root)["dispatched"], [])
+        with self.assertRaises(GatewayError):
+            self.g.schedule_disable(self.root, schedule)
+
+
 class ReviewHttpTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
