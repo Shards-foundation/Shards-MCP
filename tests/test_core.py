@@ -154,5 +154,16 @@ class GatewayTests(unittest.TestCase):
             self.g.event_poll(self.b, after_seq=-1)
 
 
+    def test_system_sanity_and_heartbeat_state(self):
+        fresh = next(x for x in self.g.agents(self.a) if x["id"] == self.aid)
+        self.assertEqual(fresh["heartbeat_state"], "unobserved")
+        self.g.heartbeat(self.a)
+        seen = next(x for x in self.g.agents(self.a) if x["id"] == self.aid)
+        self.assertEqual(seen["heartbeat_state"], "recent")
+        self.assertTrue(self.g.sanity_check(self.root)["healthy"])
+        with self.assertRaises(GatewayError):
+            self.g.sanity_check(self.a)
+
+
 if __name__ == "__main__":
     unittest.main()
