@@ -64,7 +64,7 @@ class ReviewCoreTests(unittest.TestCase):
         self.g.task_complete(self.b, tid, True, {"ok": True})
         reviewer = self.g.register(self.root, "reviewer", "test", [], ["task:verify", "task:read"])
         verifier = self.g.authenticate(reviewer["token"])
-        for evidence in ({}, [], 0, False, None, "", "short"):
+        for evidence in ({}, [], 0, False, None, "", "short", {"x": None}, [None], {"": ""}, {"outer": [None, {}]}):
             with self.subTest(evidence=evidence):
                 with self.assertRaises(GatewayError):
                     self.g.task_verify(verifier, tid, True, evidence)
@@ -97,6 +97,14 @@ class ReviewCoreTests(unittest.TestCase):
             else:
                 os.environ["SHARDS_ADMIN_TOKEN"] = old
 
+    def test_stdio_rejects_excessively_nested_json(self):
+        class FakeClient:
+            pass
+        nested = "[" * 1300 + "0" + "]" * 1300
+        result = request_line(FakeClient(),
+                              '{"jsonrpc":"2.0","id":7,"method":"tools/list","params":' + nested + '}')
+        self.assertEqual(json.loads(result)["error"]["code"], -32700)
+
     def test_stdio_rejects_nonfinite_without_crashing(self):
         class FakeClient:
             pass
@@ -104,6 +112,28 @@ class ReviewCoreTests(unittest.TestCase):
         answer = request_line(FakeClient(), '{"jsonrpc":"2.0","id":99,"method":"ping","params":{"value":NaN}}')
         self.assertEqual(json.loads(answer)["error"]["code"], -32600)
 
+
+    def test_task_creator_cannot_self_attest(self):
+        origin = self.g.register(self.root, "creator-verifier", "test", [],
+                                 ["task:create", "task:verify", "task:read"])
+        creator = self.g.authenticate(origin["token"])
+        task = self.g.task_create(creator, self.id_b, {"action": "health"}, "creator-self")["task_id"]
+        self.g.task_claim(self.b, task)
+        self.g.task_complete(self.b, task, True, {"ok": True})
+        with self.assertRaises(GatewayError) as denial:
+            self.g.task_verify(creator, task, True, {"summary": "self-confirmation"})
+        self.assertEqual(denial.exception.code, "FORBIDDEN")
+        independent = self.g.register(self.root, "different-verifier", "test", [],
+                                      ["task:verify", "task:read"])
+        self.assertEqual(self.g.task_verify(self.g.authenticate(independent["token"]),
+                                            task, True, {"summary": "checked externally"})["state"],
+                         "succeeded")
+
+    def test_sqlite_cursor_bounds_are_enforced(self):
+        for operation in (lambda: self.g.message_poll(self.b, after_seq=2**70),
+                          lambda: self.g.event_poll(self.root, after_seq=2**70)):
+            with self.assertRaises(GatewayError):
+                operation()
 
     def test_cursor_can_reach_oldest_messages_beyond_default_limit(self):
         for index in range(115):
@@ -193,6 +223,29 @@ class ReviewHttpTests(unittest.TestCase):
         nested = ("[" * 1300 + "0" + "]" * 1300).encode()
         self.assertEqual(self.send("/v1/tools/system_status", nested)[0], 400)
         self.assertEqual(self.send("/mcp", b'{"jsonrpc":"2.0","id":1,')[0], 400)
+
+    def test_ready_does_not_require_database_writer_lock(self):
+        with self.g.tx() as db:
+            db.execute("UPDATE agents SET last_seen=last_seen")
+            c = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+            started = time.monotonic()
+            c.request("GET", "/health/ready")
+            response = c.getresponse()
+            self.assertEqual(response.status, 200)
+            response.read()
+            self.assertLess(time.monotonic() - started, 1.0)
+            c.close()
+
+    def test_large_content_length_header_rejected_cleanly(self):
+        c = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+        c.putrequest("POST", "/mcp")
+        c.putheader("Content-Type", "application/json")
+        c.putheader("Content-Length", "1" * 5000)
+        c.endheaders()
+        response = c.getresponse()
+        self.assertEqual(response.status, 400)
+        response.read()
+        c.close()
 
     def test_malformed_unicode_length_rejected_before_auth(self):
         c = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
