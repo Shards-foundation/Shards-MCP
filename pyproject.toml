@@ -12,6 +12,9 @@ license = "MIT"
 authors = [{name = "Shards Foundation"}]
 keywords = ["mcp", "agents", "gateway", "audit", "orchestration"]
 
+[project.optional-dependencies]
+oauth = ["PyJWT[crypto]>=2.10.1,<3"]
+
 [project.scripts]
 shards-mcp = "shards_mcp.server:main"
 shards-worker = "shards_mcp.worker:main"
