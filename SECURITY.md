@@ -1,8 +1,8 @@
 
 ## Review-identified residual risks
 
-- `agent_register` returns a newly generated bearer token. If called via an LLM holding the bootstrap token, that secret enters its tool transcript. Provision agents out of band and never connect the bootstrap administrator credential to a model.
-- `event:read` and `audit:read` remain global organisational scopes. Event topics lack access-control lists. Do not include secrets in events or assume event contents are trustworthy.
+- Agent creation and revocation are deliberately unavailable on the network MCP/REST tool surfaces. The local `shards-mcp-admin` command writes a new bearer token to an exclusive owner-only file instead of returning it to an LLM. Never connect the bootstrap administrator credential to a model; migrate remote operator workflows to OAuth before deployment.
+- `event:read` and `audit:read` now enforce agent-level isolation for non-admin principals. Shared `shared.*` events remain writable by any agent granted `event:write` and must be treated as untrusted. Fine-grained sharing grants, multi-tenancy and event retention remain unimplemented.
 - Verification evidence is persisted in plaintext SQLite. Add encryption, retention and access policy before accepting sensitive evidence.
 - Audit UPDATE/DELETE triggers stop ordinary modifications, but a database owner can remove them and rehash the ledger. External immutable anchoring remains a production prerequisite.
 - Socket timeouts and a 64-connection bound do not replace reverse proxy rate limiting, quotas and network protections.
