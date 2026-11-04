@@ -177,11 +177,27 @@ def make_handler(gateway: Gateway, allowed_origins: set[str]):
                     return self.respond(503, {"status": "not_ready"})
             if self.path == "/mcp":
                 return self.respond(405, {"error": "GET streaming not supported; use POST"}, {"Allow": "POST"})
+            if self.path == "/v1/tools":
+                origin = self.headers.get("Origin")
+                if origin and origin not in allowed_origins:
+                    return self.respond(403, {"error": "origin denied"})
+                auth_header = self.headers.get("Authorization", "")
+                if not auth_header.startswith("Bearer "):
+                    return self.respond(401, {"error": "bearer authentication required"})
+                try:
+                    gateway.authenticate(auth_header[7:])
+                except GatewayError:
+                    return self.respond(401, {"error": "invalid credentials"})
+                return self.respond(200, {"tools": TOOL_LIST})
             return self.respond(404, {"error": "not found"})
 
         def do_POST(self) -> None:
-            if self.path != "/mcp":
+            is_rest = self.path.startswith("/v1/tools/") and len(self.path) > len("/v1/tools/")
+            if self.path != "/mcp" and not is_rest:
                 return self.respond(404, {"error": "not found"})
+            version = self.headers.get("MCP-Protocol-Version")
+            if not is_rest and version and version not in ("2025-11-25", "2025-03-26"):
+                return self.respond(400, {"error": "unsupported MCP protocol version"})
             origin = self.headers.get("Origin")
             if origin and origin not in allowed_origins:
                 return self.respond(403, {"error": "origin denied"})
@@ -204,6 +220,17 @@ def make_handler(gateway: Gateway, allowed_origins: set[str]):
             except (ValueError, UnicodeDecodeError):
                 return self.respond(400, {"jsonrpc": "2.0", "id": None,
                                           "error": {"code": -32700, "message": "Parse error"}})
+            if is_rest:
+                try:
+                    value = dispatch(gateway, principal, self.path[len("/v1/tools/"):], payload)
+                    return self.respond(200, {"ok": True, "result": value})
+                except GatewayError as exc:
+                    code = {"FORBIDDEN": 403, "NOT_FOUND": 404,
+                            "CONFLICT": 409, "PAYLOAD_TOO_LARGE": 413}.get(exc.code, 400)
+                    return self.respond(code, {"ok": False, "error": {"code": exc.code, "message": str(exc)}})
+                except Exception:
+                    self.log_error("Internal REST tool error")
+                    return self.respond(500, {"ok": False, "error": {"code": "INTERNAL", "message": "Internal error"}})
             if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
                 return self.respond(400, {"jsonrpc": "2.0", "id": None,
                                           "error": {"code": -32600, "message": "Invalid Request"}})
