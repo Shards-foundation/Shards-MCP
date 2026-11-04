@@ -127,6 +127,9 @@ class Gateway:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
             if "lease_started" not in columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN lease_started TEXT")
+            # Pin existing in-flight leases to a persistent, non-sliding timestamp.
+            db.execute("""UPDATE tasks SET lease_started=updated
+                          WHERE state='running' AND lease_started IS NULL""")
 
     @contextmanager
     def read_tx(self) -> Iterator[sqlite3.Connection]:
@@ -307,7 +310,7 @@ class Gateway:
                      unread_only: bool = True) -> dict[str, Any]:
         """Monotonic message cursor; never strand older messages behind a newest-N window."""
         actor.require("message:read")
-        if type(after_seq) is not int or after_seq < 0:
+        if type(after_seq) is not int or not 0 <= after_seq <= 2**62:
             raise GatewayError("after_seq must be non-negative integer")
         if type(limit) is not int or not 1 <= limit <= 100:
             raise GatewayError("limit must be 1..100")
@@ -454,18 +457,37 @@ class Gateway:
         actor.require("task:verify")
         if type(approved) is not bool:
             raise GatewayError("approved must be boolean")
-        # Reject vacuous attestations; evidence must remain inspectable.
-        if not ((isinstance(evidence, dict) and bool(evidence))
-                or (isinstance(evidence, list) and bool(evidence))
-                or (isinstance(evidence, str) and len(evidence.strip()) >= 8)):
-            raise GatewayError("non-empty structured or descriptive verification evidence required")
+        # A non-empty container alone is not evidence: {"x": null} must fail.
+        # Treat evidence as an attestation, not a guarantee of external truth.
+        if isinstance(evidence, str):
+            meaningful = len(evidence.strip()) >= 8
+        elif isinstance(evidence, (dict, list)):
+            meaningful = False
+            pending: list[Any] = [evidence]
+            while pending:
+                element = pending.pop()
+                if isinstance(element, dict):
+                    pending.extend(value for key, value in element.items()
+                                   if isinstance(key, str) and key.strip())
+                elif isinstance(element, list):
+                    pending.extend(element)
+                elif isinstance(element, str):
+                    meaningful = meaningful or bool(element.strip())
+                elif element is not None and type(element) in (bool, int, float):
+                    meaningful = True
+                if meaningful:
+                    break
+        else:
+            meaningful = False
+        if not meaningful:
+            raise GatewayError("meaningful verification evidence required")
         serialized = self.limit(evidence)
         with self.tx() as db:
-            row = db.execute("SELECT state, assignee FROM tasks WHERE id=?", (task_id,)).fetchone()
+            row = db.execute("SELECT state, assignee, creator FROM tasks WHERE id=?", (task_id,)).fetchone()
             if not row or row["state"] != "reported":
                 raise GatewayError("task is not awaiting verification", "CONFLICT")
-            if actor.agent_id == row["assignee"]:
-                raise GatewayError("worker cannot verify its own output", "FORBIDDEN")
+            if actor.agent_id in (row["assignee"], row["creator"]):
+                raise GatewayError("creator or worker cannot verify their own task", "FORBIDDEN")
             state = "succeeded" if approved else "failed"
             db.execute("INSERT INTO verifications(task_id,verifier,approved,evidence,created) VALUES (?,?,?,?,?)",
                        (task_id, actor.agent_id, int(approved), serialized, now()))
@@ -587,7 +609,7 @@ class Gateway:
     def event_poll(self, actor: Principal, after_seq: int = 0, limit: int = 50,
                    topic: str | None = None) -> dict[str, Any]:
         actor.require("event:read")
-        if type(after_seq) is not int or after_seq < 0:
+        if type(after_seq) is not int or not 0 <= after_seq <= 2**62:
             raise GatewayError("after_seq must be a non-negative integer")
         if type(limit) is not int or not 1 <= limit <= 100:
             raise GatewayError("limit must be 1..100")
