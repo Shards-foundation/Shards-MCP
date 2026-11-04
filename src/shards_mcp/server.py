@@ -7,6 +7,9 @@ unless a privileged agent explicitly invokes one of the local gateway tools.
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import re
+import socket
+import threading
 import json
 import sqlite3
 import os
@@ -60,6 +63,8 @@ TOOL_DEFS = [
     ("task_verify", "Independent reviewer: approve or reject a reported worker result.",
      schema({"task_id": S, "approved": BOOL, "evidence": OBJ},
             ("task_id", "approved", "evidence")), False),
+    ("verification_get", "Inspect retained verification evidence for a task.",
+     schema({"task_id": S}, ("task_id",)), True),
     ("checkpoint_write", "Persist a versioned checkpoint for a running owned task.",
      schema({"task_id": S, "body": OBJ}, ("task_id", "body")), False),
     ("checkpoint_get", "Retrieve latest task checkpoint.",
@@ -93,6 +98,64 @@ TOOL_LIST = [
     for name, description, input_schema, read_only in TOOL_DEFS
 ]
 SCHEMAS = {item["name"]: item["inputSchema"] for item in TOOL_LIST}
+TOOL_SCOPES = {
+    "agent_register": "*", "agent_revoke": "*", "agent_list": "agent:read",
+    "agent_heartbeat": "agent:heartbeat",
+    "message_send": "message:send", "message_inbox": "message:read",
+    "message_ack": "message:read",
+    "task_create": "task:create", "task_get": "task:read",
+    "task_inbox": "task:read", "task_claim": "task:claim",
+    "task_renew": "task:update", "task_complete": "task:update",
+    "task_verify": "task:verify", "verification_get": "task:read",
+    "checkpoint_write": "checkpoint:write", "checkpoint_get": "task:read",
+    "task_scan_expired": "*", "task_reconcile": "*",
+    "event_publish": "event:write", "event_poll": "event:read",
+    "audit_list": "audit:read", "audit_verify": "audit:read",
+    "schedule_create": "*", "schedule_tick": "*",
+    "system_status": "*", "system_sanity_check": "*",
+}
+assert set(TOOL_SCOPES) == set(SCHEMAS), "every tool requires an explicit permission map"
+
+
+def visible_tools(principal: Principal) -> list[dict[str, Any]]:
+    if "*" in principal.scopes:
+        return TOOL_LIST
+    return [tool for tool in TOOL_LIST if TOOL_SCOPES[tool["name"]] in principal.scopes]
+
+
+def decode_auth(value: str) -> str:
+    scheme, separator, token = value.partition(" ")
+    return token if separator and scheme.casefold() == "bearer" and token and token == token.strip() else ""
+
+
+def reject_nonfinite(value: str) -> None:
+    raise ValueError("non-finite JSON constant")
+
+
+class BoundedHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        self._slots = threading.BoundedSemaphore(64)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
 
 
 def validate_args(name: str, args: Any) -> dict[str, Any]:
@@ -135,6 +198,7 @@ def dispatch(gateway: Gateway, principal: Principal, name: str, args: Any) -> An
         "task_renew": lambda: gateway.task_renew(principal, a["task_id"], a.get("lease_seconds", 60)),
         "task_complete": lambda: gateway.task_complete(principal, a["task_id"], a["success"], a["result"]),
         "task_verify": lambda: gateway.task_verify(principal, a["task_id"], a["approved"], a["evidence"]),
+        "verification_get": lambda: gateway.verification_get(principal, a["task_id"]),
         "checkpoint_write": lambda: gateway.checkpoint(principal, a["task_id"], a["body"]),
         "checkpoint_get": lambda: gateway.checkpoint_get(principal, a["task_id"]),
         "task_scan_expired": lambda: gateway.expired(principal),
@@ -171,6 +235,10 @@ def make_handler(gateway: Gateway, allowed_origins: set[str]):
     class Handler(BaseHTTPRequestHandler):
         server_version = "ShardsMCP/" + __version__
 
+        def setup(self) -> None:
+            super().setup()
+            self.connection.settimeout(10)
+
         def log_message(self, format: str, *args: Any) -> None:
             # Do not log request headers (particularly bearer tokens).
             sys.stderr.write("%s %s\n" % (self.address_string(), format % args))
@@ -204,51 +272,58 @@ def make_handler(gateway: Gateway, allowed_origins: set[str]):
                 origin = self.headers.get("Origin")
                 if origin and origin not in allowed_origins:
                     return self.respond(403, {"error": "origin denied"})
-                auth_header = self.headers.get("Authorization", "")
-                if not auth_header.startswith("Bearer "):
+                token = decode_auth(self.headers.get("Authorization", ""))
+                if not token:
                     return self.respond(401, {"error": "bearer authentication required"})
                 try:
-                    gateway.authenticate(auth_header[7:])
+                    principal = gateway.authenticate(token)
                 except GatewayError:
                     return self.respond(401, {"error": "invalid credentials"})
-                return self.respond(200, {"tools": TOOL_LIST})
+                return self.respond(200, {"tools": visible_tools(principal)})
             return self.respond(404, {"error": "not found"})
 
         def do_POST(self) -> None:
             is_rest = self.path.startswith("/v1/tools/") and len(self.path) > len("/v1/tools/")
             if self.path != "/mcp" and not is_rest:
                 return self.respond(404, {"error": "not found"})
+            # Version negotiation happens in initialize; the client may probe with
+            # a newer header before accepting our supported version in the result.
             version = self.headers.get("MCP-Protocol-Version")
-            if not is_rest and version and version not in ("2025-11-25", "2025-03-26"):
-                return self.respond(400, {"error": "unsupported MCP protocol version"})
             origin = self.headers.get("Origin")
             if origin and origin not in allowed_origins:
                 return self.respond(403, {"error": "origin denied"})
             if not self.headers.get("Content-Type", "").split(";")[0].strip() == "application/json":
                 return self.respond(415, {"error": "application/json required"})
-            length_header = self.headers.get("Content-Length", "")
-            if not length_header.isdigit() or int(length_header) > 262144:
-                return self.respond(413, {"error": "invalid content length"})
-            auth_header = self.headers.get("Authorization", "")
-            if not auth_header.startswith("Bearer "):
+            if self.headers.get("Transfer-Encoding"):
+                return self.respond(411, {"error": "Content-Length required; chunked transfer unsupported"})
+            length_header = self.headers.get("Content-Length")
+            if length_header is None or not re.fullmatch(r"[0-9]+", length_header):
+                return self.respond(411, {"error": "valid ASCII Content-Length required"})
+            length = int(length_header)
+            if length > 262144:
+                return self.respond(413, {"error": "request body exceeds 256 KiB"})
+            token = decode_auth(self.headers.get("Authorization", ""))
+            if not token:
                 return self.respond(401, {"error": "bearer authentication required"},
                                     {"WWW-Authenticate": 'Bearer realm="Shards-MCP"'})
             try:
-                principal = gateway.authenticate(auth_header[7:])
+                principal = gateway.authenticate(token)
             except GatewayError:
                 return self.respond(401, {"error": "invalid credentials"},
                                     {"WWW-Authenticate": 'Bearer realm="Shards-MCP"'})
             try:
-                payload = json.loads(self.rfile.read(int(length_header)))
-            except (ValueError, UnicodeDecodeError):
+                payload = json.loads(self.rfile.read(length), parse_constant=reject_nonfinite)
+            except (ValueError, UnicodeDecodeError, RecursionError):
                 return self.respond(400, {"jsonrpc": "2.0", "id": None,
                                           "error": {"code": -32700, "message": "Parse error"}})
+            except (TimeoutError, socket.timeout, OSError):
+                return self.respond(408, {"error": "request body timed out"})
             if is_rest:
                 try:
                     value = dispatch(gateway, principal, self.path[len("/v1/tools/"):], payload)
                     return self.respond(200, {"ok": True, "result": value})
                 except GatewayError as exc:
-                    code = {"FORBIDDEN": 403, "NOT_FOUND": 404,
+                    code = {"UNAUTHENTICATED": 401, "FORBIDDEN": 403, "NOT_FOUND": 404,
                             "CONFLICT": 409, "PAYLOAD_TOO_LARGE": 413}.get(exc.code, 400)
                     return self.respond(code, {"ok": False, "error": {"code": exc.code, "message": str(exc)}})
                 except Exception:
@@ -273,11 +348,13 @@ def make_handler(gateway: Gateway, allowed_origins: set[str]):
                 elif method == "ping":
                     result = {}
                 elif method == "tools/list":
-                    result = {"tools": TOOL_LIST}
+                    result = {"tools": visible_tools(principal)}
                 elif method == "tools/call":
                     params = payload.get("params", {})
                     if not isinstance(params, dict) or not isinstance(params.get("name"), str):
                         return self.rpc_error(request_id, -32602, "Invalid params")
+                    if params["name"] not in SCHEMAS:
+                        return self.rpc_error(request_id, -32602, "Unknown tool")
                     try:
                         value = dispatch(gateway, principal, params["name"], params.get("arguments", {}))
                         result = {"content": [{"type": "text", "text": canonical(value)}],
@@ -313,7 +390,7 @@ def main() -> None:
         port = int(os.getenv("SHARDS_PORT", "8787"))
         gateway = Gateway(os.getenv("SHARDS_DB", "shards.db"), token)
         origins = set(filter(None, os.getenv("SHARDS_ALLOWED_ORIGINS", "").split(",")))
-        server = ThreadingHTTPServer((host, port), make_handler(gateway, origins))
+        server = BoundedHTTPServer((host, port), make_handler(gateway, origins))
         print(f"Shards MCP {__version__} serving on {host}:{port}", file=sys.stderr)
         server.serve_forever()
     except KeyboardInterrupt:
