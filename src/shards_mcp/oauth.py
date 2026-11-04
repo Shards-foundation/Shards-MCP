@@ -34,7 +34,8 @@ def https_url(value: str, description: str, *, allow_path: bool = True) -> str:
             or parts.username or parts.password or parts.fragment or parts.query
             or (not allow_path and parts.path not in ("", "/"))):
         raise ValueError(f"{description} must be an absolute HTTPS URL without credentials, query or fragment")
-    return value.rstrip("/")
+    # OAuth issuer identifiers are exact strings. Do not strip trailing '/'.
+    return value
 
 
 class OAuthResourceServer:
