@@ -149,13 +149,13 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.g.task_inbox(self.b, "running")[0]["id"], tid)
 
     def test_durable_event_stream_and_cursor(self):
-        emitted = self.g.event_publish(self.a, "task.progress", {"percent": 25}, "ev1", "trace-1")
+        emitted = self.g.event_publish(self.a, "shared.task.progress", {"percent": 25}, "ev1", "trace-1")
         self.assertFalse(emitted["deduplicated"])
-        again = self.g.event_publish(self.a, "task.progress", {"percent": 25}, "ev1", "trace-1")
+        again = self.g.event_publish(self.a, "shared.task.progress", {"percent": 25}, "ev1", "trace-1")
         self.assertEqual(again["event_seq"], emitted["event_seq"])
         with self.assertRaises(GatewayError):
-            self.g.event_publish(self.a, "task.progress", {"percent": 26}, "ev1", "trace-1")
-        found = self.g.event_poll(self.b, after_seq=0, topic="task.progress")
+            self.g.event_publish(self.a, "shared.task.progress", {"percent": 26}, "ev1", "trace-1")
+        found = self.g.event_poll(self.b, after_seq=0, topic="shared.task.progress")
         self.assertEqual(len(found["events"]), 1)
         self.assertEqual(found["events"][0]["body"], {"percent": 25})
         self.assertEqual(found["next_cursor"], emitted["event_seq"])
