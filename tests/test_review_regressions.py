@@ -153,6 +153,17 @@ class ReviewCoreTests(unittest.TestCase):
         self.assertEqual(self.g.message_poll(self.b, limit=1)["messages"][0]["body"]["number"], 1)
         self.assertEqual(self.g.message_poll(self.b, limit=1, unread_only=False)["messages"][0]["body"]["number"], 0)
 
+    def test_schedule_controls_deny_non_operator_agents(self):
+        for action in (
+            lambda: self.g.schedule_create(self.a, self.id_b, {"action": "health"}, 60),
+            lambda: self.g.schedule_list(self.a),
+            lambda: self.g.schedule_disable(self.a, "sch_unknown"),
+            lambda: self.g.schedule_tick(self.a),
+        ):
+            with self.assertRaises(GatewayError) as rejected:
+                action()
+            self.assertEqual(rejected.exception.code, "FORBIDDEN")
+
     def test_schedules_can_be_stopped_and_cannot_target_revoked_workers(self):
         schedule = self.g.schedule_create(self.root, self.id_b, {"action": "health"}, 60)["schedule_id"]
         self.assertIn(schedule, [x["id"] for x in self.g.schedule_list(self.root)])
