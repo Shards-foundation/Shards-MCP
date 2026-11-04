@@ -48,7 +48,7 @@ jobs:
         if: matrix.python-version == '3.12'
         run: |
           docker build --pull -t shards-mcp:ci .
-          if docker run --rm --network none -e SHARDS_ADMIN_TOKEN=123456789012345678901234567890123456 shards-mcp:ci; then
+          if docker run --rm --network none -e SHARDS_ADMIN_TOKEN=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_ shards-mcp:ci; then
             echo "Docker image unexpectedly permitted remote bind without explicit opt-in"
             exit 1
           fi
