@@ -1,3 +1,4 @@
+import secrets
 import hashlib
 import os
 import sqlite3
@@ -11,7 +12,7 @@ from shards_mcp.server import dispatch, validate_args
 class GatewayTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.secret = "a" * 48
+        self.secret = secrets.token_urlsafe(48)
         self.dbpath = os.path.join(self.temp.name, "state.db")
         self.g = Gateway(self.dbpath, self.secret)
         self.root = self.g.authenticate(self.secret)
@@ -26,6 +27,10 @@ class GatewayTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_reject_weak_bootstrap_secret(self):
+        with self.assertRaises(ValueError):
+            Gateway(self.dbpath, "x" * 48)
 
     def test_credentials_and_scopes(self):
         with self.assertRaises(GatewayError):
