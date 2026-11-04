@@ -25,6 +25,7 @@ def main() -> None:
     create.add_argument("--provider", required=True)
     create.add_argument("--scope", choices=SCOPES, action="append", required=True)
     create.add_argument("--capability", action="append", default=[])
+    create.add_argument("--oauth-subject", help="Exact subject claim from the configured trusted OAuth issuer")
     create.add_argument("--token-file", required=True)
     revoke = sub.add_parser("revoke", help="Revoke an agent ID")
     revoke.add_argument("agent_id")
@@ -46,7 +47,8 @@ def main() -> None:
             fd = os.open(str(token_path), flags, 0o600)
             agent_id = None
             try:
-                created = gateway.register(root, args.name, args.provider, args.capability, args.scope)
+                created = gateway.register(root, args.name, args.provider, args.capability, args.scope,
+                                           oauth_subject=args.oauth_subject)
                 agent_id = created["agent_id"]
                 token = (created["token"] + "\n").encode("ascii")
                 with os.fdopen(fd, "wb") as stream:
