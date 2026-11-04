@@ -1,0 +1,14 @@
+{$SHARDS_GATEWAY_DOMAIN} {
+    # Never publish Prometheus metrics through the public TLS ingress.
+    @private path /metrics
+    respond @private 404
+
+    reverse_proxy gateway:8787 {
+        health_uri /health/ready
+        health_interval 30s
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 30s
+        }
+    }
+}
