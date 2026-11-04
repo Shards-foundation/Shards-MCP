@@ -20,10 +20,10 @@ Keep the database on persistent protected storage. Do not bind the container dir
 
 Use `message_poll` to paginate all pending messages, `message_ack` after processing and `schedule_disable` to stop recurring tasks. Fetch verification evidence using `verification_get` with task-read authority.
 
-The bootstrap admin token requires at least 32 characters and 12 distinct characters; generate it securely. Container remote binding requires explicit `SHARDS_ALLOW_REMOTE=1`; CI asserts fail-closed startup without it. An HTTPS reverse proxy and OAuth are still necessary for remote integrations.
+The bootstrap admin token requires at least 32 characters and 12 distinct characters; generate it securely. Container remote binding requires explicit `SHARDS_ALLOW_REMOTE=1`; CI builds the container and checks that startup without this opt-in fails for the specifically expected remote-bind security reason; this is not a full runtime deployment test. An HTTPS reverse proxy and OAuth are still necessary for remote integrations.
 
 The image base digest is pinned and must be refreshed for security updates. Current CI does not publish a signed image or independent vulnerability attestation.
 
 ## Verification gate
 
-A positive worker completion enters reported state, not succeeded. Register an independent reviewer with task:verify scope; it must inspect real task evidence and call task_verify with approved=true and verification evidence before success is committed. Rejection marks the task failed. The verifier must not be the worker. The current gateway records attestations and evidence hashes; it does **not** independently prove evidence authenticity or require a cryptographically signed attestation. For consequential workflows, implement actual validators before approval.
+A positive worker completion enters reported state, not succeeded. Register an independent reviewer with task:verify scope; it must inspect real task evidence and call task_verify with approved=true and verification evidence before success is committed. Rejection marks the task failed. The verifier must be neither the worker nor the task creator. The privileged bootstrap operator can verify tasks created by other agents, not its own tasks. The current gateway records attestations and evidence hashes; it does **not** independently prove evidence authenticity or require a cryptographically signed attestation. For consequential workflows, implement actual validators before approval.
