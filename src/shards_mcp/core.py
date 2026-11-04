@@ -298,6 +298,30 @@ class Gateway:
         return [{**dict(r), "body": json.loads(r["body"])} for r in rows]
 
 
+    def message_poll(self, actor: Principal, after_seq: int = 0, limit: int = 50,
+                     unread_only: bool = True) -> dict[str, Any]:
+        """Monotonic message cursor; never strand older messages behind a newest-N window."""
+        actor.require("message:read")
+        if type(after_seq) is not int or after_seq < 0:
+            raise GatewayError("after_seq must be non-negative integer")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise GatewayError("limit must be 1..100")
+        if type(unread_only) is not bool:
+            raise GatewayError("unread_only must be boolean")
+        filters = ["rowid > ?"]
+        params: list[Any] = [after_seq]
+        if actor.agent_id != "operator":
+            filters.append("destination=?")
+            params.append(actor.agent_id)
+        if unread_only:
+            filters.append("read_at IS NULL")
+        params.append(limit)
+        query = "SELECT rowid AS sequence,* FROM messages WHERE " + " AND ".join(filters) + " ORDER BY rowid LIMIT ?"
+        with self.read_tx() as db:
+            rows = db.execute(query, params).fetchall()
+        messages = [{**dict(row), "body": json.loads(row["body"])} for row in rows]
+        return {"messages": messages, "next_cursor": messages[-1]["sequence"] if messages else after_seq}
+
     def message_ack(self, actor: Principal, message_id: str) -> dict[str, Any]:
         actor.require("message:read")
         with self.tx() as db:
@@ -606,12 +630,29 @@ class Gateway:
             self.audit(db, actor.agent_id, "schedule.create", sid, {"assignee": assignee, "interval_seconds": interval_seconds})
         return {"schedule_id": sid}
 
+    def schedule_list(self, actor: Principal) -> list[dict[str, Any]]:
+        actor.require("*")
+        with self.read_tx() as db:
+            rows = db.execute("SELECT * FROM schedules ORDER BY created").fetchall()
+        return [{**dict(row), "enabled": bool(row["enabled"]), "input": json.loads(row["input"])}
+                for row in rows]
+
+    def schedule_disable(self, actor: Principal, schedule_id: str) -> dict[str, Any]:
+        actor.require("*")
+        with self.tx() as db:
+            changed = db.execute("UPDATE schedules SET enabled=0 WHERE id=? AND enabled=1", (schedule_id,))
+            if changed.rowcount != 1:
+                raise GatewayError("schedule not active", "NOT_FOUND")
+            self.audit(db, actor.agent_id, "schedule.disable", schedule_id, {})
+        return {"schedule_id": schedule_id, "enabled": False}
+
     def schedule_tick(self, actor: Principal) -> dict[str, Any]:
         actor.require("*")
         created: list[str] = []
         with self.tx() as db:
-            due = db.execute("SELECT * FROM schedules WHERE enabled=1 AND next_due<=? LIMIT 100",
-                             (now(),)).fetchall()
+            due = db.execute("""SELECT * FROM schedules WHERE enabled=1 AND next_due<=?
+                AND EXISTS (SELECT 1 FROM agents WHERE agents.id=schedules.assignee
+                            AND agents.revoked=0) LIMIT 100""", (now(),)).fetchall()
             for sch in due:
                 tid = uid("tsk")
                 timestamp = now()
