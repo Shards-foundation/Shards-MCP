@@ -120,6 +120,27 @@ class HttpTests(unittest.TestCase):
             safe_operation({"action": "shell", "command": "rm -rf /"})
 
 
+
+    def test_worker_runs_in_separate_process(self):
+        import subprocess
+        import sys
+        worker = self.gateway.register(self.gateway.authenticate(self.token), "external-process",
+                                       "local", ["echo"], ["agent:heartbeat", "task:read",
+                                       "task:claim", "task:update", "checkpoint:write"])
+        created = self.gateway.task_create(self.gateway.authenticate(self.token), worker["agent_id"],
+                                           {"action": "echo", "data": {"value": "separate-runtime"}},
+                                           "subprocess-worker")
+        env = {**os.environ, "SHARDS_GATEWAY_URL": "http://127.0.0.1:%d" % self.server.server_port,
+               "SHARDS_AGENT_TOKEN": worker["token"]}
+        env.pop("SHARDS_ADMIN_TOKEN", None)
+        child = subprocess.run([sys.executable, "-m", "shards_mcp.worker", "--once"],
+                               capture_output=True, text=True, env=env, timeout=12)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        state = self.gateway.task_get(self.gateway.authenticate(self.token), created["task_id"])
+        self.assertEqual(state["state"], "reported")
+        self.assertEqual(state["result"], {"echo": {"value": "separate-runtime"}})
+        self.assertNotIn(worker["token"], child.stdout + child.stderr)
+
     def test_stdio_bridge_roundtrip(self):
         import subprocess
         import sys
