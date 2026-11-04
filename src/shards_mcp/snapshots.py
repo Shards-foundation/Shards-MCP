@@ -5,6 +5,7 @@ Never expose snapshot/restore as MCP, REST, or A2A tools.
 """
 from __future__ import annotations
 
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -39,7 +40,7 @@ def inspect_snapshot(path: str) -> dict[str, Any]:
     # Percent-encode URL special characters to enforce immutable mode=ro.
     uri = "file:" + quote(str(target.resolve()), safe="/") + "?mode=ro"
     try:
-        with sqlite3.connect(uri, uri=True, timeout=3) as db:
+        with closing(sqlite3.connect(uri, uri=True, timeout=3)) as db:
             db.row_factory = sqlite3.Row
             integrity = db.execute("PRAGMA integrity_check").fetchone()
             if not integrity or integrity[0] != "ok":
@@ -89,8 +90,10 @@ def create_snapshot(gateway: Gateway, principal: Principal, output: str) -> dict
     try:
         if os.name == "posix":
             os.chmod(path, 0o600)
-        with gateway.read_tx() as source, sqlite3.connect(str(path), timeout=10) as destination:
-            source.backup(destination, pages=64, sleep=0.05)
+        with gateway.read_tx() as source:
+            with closing(sqlite3.connect(str(path), timeout=10)) as destination:
+                source.backup(destination, pages=64, sleep=0.05)
+                destination.commit()
         result = inspect_snapshot(str(path))
         # Record a successful snapshot event, but do not persist the private
         # absolute path or claim the audit entry itself was included in backup.
