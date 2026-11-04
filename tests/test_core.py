@@ -1,0 +1,124 @@
+import hashlib
+import os
+import sqlite3
+import tempfile
+import unittest
+
+from shards_mcp.core import Gateway, GatewayError
+from shards_mcp.server import dispatch, validate_args
+
+
+class GatewayTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.secret = "a" * 48
+        self.dbpath = os.path.join(self.temp.name, "state.db")
+        self.g = Gateway(self.dbpath, self.secret)
+        self.root = self.g.authenticate(self.secret)
+        scope = ["agent:read", "agent:heartbeat", "message:send", "message:read",
+                 "task:create", "task:read", "task:claim", "task:update", "checkpoint:write"]
+        a = self.g.register(self.root, "agent-a", "test", ["messaging"], scope)
+        b = self.g.register(self.root, "agent-b", "test", ["worker"], scope)
+        self.aid, self.bid = a["agent_id"], b["agent_id"]
+        self.a = self.g.authenticate(a["token"])
+        self.b = self.g.authenticate(b["token"])
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_credentials_and_scopes(self):
+        with self.assertRaises(GatewayError):
+            self.g.authenticate("bad-token")
+        with self.assertRaises(GatewayError):
+            self.g.register(self.a, "attacker", "test", [], [])
+        with self.assertRaises(GatewayError):
+            self.g.register(self.root, "bad", "test", [], ["*"])
+        self.g.revoke(self.root, self.aid)
+        with self.assertRaises(GatewayError):
+            self.g.authenticate("bad-token")
+        with self.assertRaises(GatewayError):
+            self.g.heartbeat(self.a)
+
+    def test_agents_do_not_expose_secrets(self):
+        agents = self.g.agents(self.a)
+        self.assertEqual(len(agents), 2)
+        self.assertNotIn("token_hash", agents[0])
+        self.assertNotIn("token", agents[0])
+
+    def test_message_deduplication_and_access(self):
+        first = self.g.send(self.a, self.bid, {"hello": "world"}, "m1")
+        second = self.g.send(self.a, self.bid, {"hello": "world"}, "m1")
+        self.assertEqual(first["message_id"], second["message_id"])
+        self.assertTrue(second["deduplicated"])
+        with self.assertRaises(GatewayError):
+            self.g.send(self.a, self.bid, {"hello": "changed"}, "m1")
+        self.assertEqual(self.g.inbox(self.b)[0]["body"], {"hello": "world"})
+        self.assertEqual(self.g.inbox(self.a), [])
+
+    def test_task_workflow_checkpoint_restart(self):
+        created = self.g.task_create(self.a, self.bid, {"repair": "PR-77"}, "t1")
+        tid = created["task_id"]
+        self.assertTrue(self.g.task_create(self.a, self.bid, {"repair": "PR-77"}, "t1")["deduplicated"])
+        with self.assertRaises(GatewayError):
+            self.g.task_create(self.a, self.bid, {"repair": "other"}, "t1")
+        with self.assertRaises(GatewayError):
+            self.g.task_claim(self.a, tid)
+        self.g.task_claim(self.b, tid)
+        cp = self.g.checkpoint(self.b, tid, {"stage": 1})
+        self.assertEqual(cp["version"], 1)
+        reopened = Gateway(self.dbpath, self.secret)
+        self.assertEqual(reopened.checkpoint_get(self.a, tid)["checkpoint"]["body"], {"stage": 1})
+        reopened.task_renew(self.b, tid)
+        self.assertEqual(reopened.task_complete(self.b, tid, True, {"ok": True})["state"], "succeeded")
+        self.assertEqual(reopened.task_get(self.a, tid)["result"], {"ok": True})
+        with self.assertRaises(GatewayError):
+            reopened.task_complete(self.b, tid, True, {"ok": True})
+
+    def test_expiry_blocks_unsafe_retry(self):
+        tid = self.g.task_create(self.a, self.bid, {}, "t2")["task_id"]
+        self.g.task_claim(self.b, tid)
+        with self.g.tx() as db:
+            db.execute("UPDATE tasks SET lease_until='2000-01-01T00:00:00+00:00' WHERE id=?", (tid,))
+        self.assertIn(tid, self.g.expired(self.root))
+        with self.assertRaises(GatewayError):
+            self.g.task_claim(self.b, tid)
+        with self.assertRaises(GatewayError):
+            self.g.reconcile(self.root, tid, False, "not actually checked")
+        self.g.reconcile(self.root, tid, True, "Verified downstream effects absent")
+        self.assertEqual(self.g.task_claim(self.b, tid)["state"], "running")
+
+    def test_audit_verification_and_tamper_detection(self):
+        self.assertTrue(self.g.audit_verify(self.root)["valid"])
+        self.g.send(self.a, self.bid, {"x": 1}, "m2")
+        self.assertTrue(self.g.audit_verify(self.root)["valid"])
+        with self.g.tx() as db:
+            db.execute("UPDATE audit SET action='forged' WHERE seq=1")
+        self.assertFalse(self.g.audit_verify(self.root)["valid"])
+
+    def test_schedule_tick(self):
+        sch = self.g.schedule_create(self.root, self.bid, {"job": "check"}, 60)
+        self.assertTrue(sch["schedule_id"])
+        self.assertFalse(self.g.schedule_tick(self.root)["dispatched"])
+        with self.g.tx() as db:
+            db.execute("UPDATE schedules SET next_due='2000-01-01T00:00:00+00:00'")
+        first = self.g.schedule_tick(self.root)["dispatched"]
+        self.assertEqual(len(first), 1)
+        self.assertEqual(self.g.task_get(self.root, first[0])["state"], "queued")
+        self.assertFalse(self.g.schedule_tick(self.root)["dispatched"])
+
+    def test_schema_enforcement(self):
+        for name, args in [("task_claim", {"task_id": "x", "lease_seconds": True}),
+                           ("message_send", {"destination": "x", "body": {}, "idempotency_key": "x", "scope": "*"}),
+                           ("task_complete", {"task_id": "x", "success": "true", "result": {}})]:
+            with self.assertRaises(GatewayError):
+                validate_args(name, args)
+        status = dispatch(self.g, self.root, "system_status", {})
+        self.assertEqual(status["agents"], 2)
+
+    def test_payload_limits(self):
+        with self.assertRaises(GatewayError):
+            self.g.send(self.a, self.bid, {"oversize": "a" * 150000}, "big")
+
+
+if __name__ == "__main__":
+    unittest.main()
