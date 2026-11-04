@@ -59,8 +59,8 @@ SCOPES = (
 
 class Gateway:
     def __init__(self, path: str, admin_token: str):
-        if len(admin_token) < 32:
-            raise ValueError("SHARDS_ADMIN_TOKEN must contain at least 32 characters")
+        if len(admin_token) < 32 or len(set(admin_token)) < 12:
+            raise ValueError("SHARDS_ADMIN_TOKEN must be >=32 characters with >=12 distinct characters")
         requested = Path(path).expanduser()
         if requested.is_symlink():
             raise ValueError("database path must not be a symbolic link")
