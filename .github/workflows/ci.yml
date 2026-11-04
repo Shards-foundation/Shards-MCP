@@ -30,3 +30,14 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Import smoke test
         run: python -c "import shards_mcp; from shards_mcp.server import TOOL_LIST; assert len(TOOL_LIST) >= 15"
+      - name: Verify distributable wheel and sdist
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+      - name: Install wheel in isolated fresh environment
+        run: |
+          python -m venv /tmp/shards-wheel-env
+          /tmp/shards-wheel-env/bin/python -m pip install dist/*.whl
+          /tmp/shards-wheel-env/bin/python -c "import shards_mcp; from shards_mcp.server import TOOL_LIST; assert shards_mcp.__version__ == '0.1.0'; assert TOOL_LIST"
+          /tmp/shards-wheel-env/bin/shards-worker --help >/dev/null
