@@ -66,6 +66,11 @@ TOOL_DEFS = [
     ("task_reconcile", "Admin only: requeue blocked task after verified external-effect reconciliation.",
      schema({"task_id": S, "external_effects_checked": BOOL, "explanation": S},
             ("task_id", "external_effects_checked", "explanation")), False),
+    ("event_publish", "Append an idempotent operational event to the shared agent event stream.",
+     schema({"topic": S, "body": OBJ, "idempotency_key": S, "correlation_id": S},
+            ("topic", "body", "idempotency_key")), False),
+    ("event_poll", "Poll the durable event stream by cursor and optional topic.",
+     schema({"after_seq": INT, "limit": INT, "topic": S}), True),
     ("audit_list", "Read recent internal audit events.", schema({"limit": INT}), True),
     ("audit_verify", "Verify internal audit hash chain.", schema({}), True),
     ("schedule_create", "Admin only: create periodic assigned task schedule (interval, not cron expression).",
@@ -128,6 +133,10 @@ def dispatch(gateway: Gateway, principal: Principal, name: str, args: Any) -> An
         "checkpoint_get": lambda: gateway.checkpoint_get(principal, a["task_id"]),
         "task_scan_expired": lambda: gateway.expired(principal),
         "task_reconcile": lambda: gateway.reconcile(principal, a["task_id"], a["external_effects_checked"], a["explanation"]),
+        "event_publish": lambda: gateway.event_publish(principal, a["topic"], a["body"],
+                                                        a["idempotency_key"], a.get("correlation_id")),
+        "event_poll": lambda: gateway.event_poll(principal, a.get("after_seq", 0),
+                                                  a.get("limit", 50), a.get("topic")),
         "audit_list": lambda: gateway.audit_list(principal, a.get("limit", 50)),
         "audit_verify": lambda: gateway.audit_verify(principal),
         "schedule_create": lambda: gateway.schedule_create(principal, a["assignee"], a["payload"], a["interval_seconds"]),
@@ -146,6 +155,7 @@ def status(gateway: Gateway, principal: Principal) -> dict[str, Any]:
             "tasks": {r["state"]: r["count"] for r in
                       db.execute("SELECT state, COUNT(*) AS count FROM tasks GROUP BY state")},
             "messages": db.execute("SELECT COUNT(*) FROM messages").fetchone()[0],
+            "events": db.execute("SELECT COUNT(*) FROM events").fetchone()[0],
             "audit_entries": db.execute("SELECT COUNT(*) FROM audit").fetchone()[0],
         }
 
