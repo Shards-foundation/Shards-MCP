@@ -35,3 +35,11 @@ Report vulnerabilities using private GitHub reporting when enabled. Never post r
 - `system.*` event topics are administrator-only. Any shared event is untrusted, not an authoritative system instruction.
 - Agent-scoped audit readers see only the audit rows they authored. Operators with bootstrap credentials may inspect all rows.
 - This is **single-organisation** topic separation, not a multi-tenant security model. No per-topic subscriptions or topic permission grants beyond these namespaces are implemented.
+
+
+## A2A adapter trust boundary
+
+A2A card discovery requires authenticated `agent:read` authority. An A2A SendMessage request is authorised through `task:create` and uses only the authenticated caller as the task creator; message role and IDs do not grant authority. GetTask checks both `task:read` and the task's existing ownership. All message parts are validated as text-only. External file URLs, arbitrary tool invocations and agent-selected network destinations are not accepted. A2A worker input is **untrusted** and must be validated by its executing runtime.
+
+Unsupported A2A features are disabled rather than advertised. As with MCP, the adapter must not be exposed remotely without OAuth and a TLS reverse proxy.
+
