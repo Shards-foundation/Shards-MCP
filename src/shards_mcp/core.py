@@ -348,7 +348,8 @@ class Gateway:
         self.required(idempotency_key, "idempotency_key")
         data = self.limit(payload)
         with self.tx() as db:
-            previous = db.execute("SELECT * FROM tasks WHERE creator=? AND idem=?",                                  (actor.agent_id, idempotency_key)).fetchone()
+            previous = db.execute("SELECT * FROM tasks WHERE creator=? AND idem=?",
+                                  (actor.agent_id, idempotency_key)).fetchone()
             if previous:
                 if previous["assignee"] != assignee or previous["input"] != data:
                     raise GatewayError("idempotency key reused with different task", "CONFLICT")
