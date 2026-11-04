@@ -94,6 +94,12 @@ class GatewayTests(unittest.TestCase):
         self.g.send(self.a, self.bid, {"x": 1}, "m2")
         self.assertTrue(self.g.audit_verify(self.root)["valid"])
         with self.g.tx() as db:
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("UPDATE audit SET action='forged' WHERE seq=1")
+        # Simulate a compromised database owner, who can drop protective triggers.
+        # The independent hash verification must still detect an altered record.
+        with self.g.tx() as db:
+            db.execute("DROP TRIGGER audit_reject_update")
             db.execute("UPDATE audit SET action='forged' WHERE seq=1")
         self.assertFalse(self.g.audit_verify(self.root)["valid"])
 
