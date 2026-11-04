@@ -21,6 +21,6 @@ The gateway coordinates agents; it does not itself run an AI model. Clients are 
 
 This is a **single-host foundation**. SQLite is not a distributed lock manager. No lease fencing tokens, A2A adapter, OAuth resource server, remote MCP tool federation, true snapshots or checkpointed model-process restoration exist yet.
 
-The server implements basic MCP 2025-11-25 JSON-RPC tool discovery and invocation. It does not claim complete protocol implementation, transport compatibility across every client, or 2026-draft compliance.
+The server implements basic MCP 2025-11-25 JSON-RPC tool discovery and invocation and a simple authenticated REST tool adapter. It does not claim complete protocol implementation, transport compatibility across every client, or 2026-draft compliance.
 
 A future multi-host release must add Postgres, a transactional outbox, fencing tokens, signed delegation, independently anchored audit, asynchronous worker supervisor and fault-injection testing.
