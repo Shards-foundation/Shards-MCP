@@ -11,7 +11,7 @@ The gateway coordinates agents; it does not itself run an AI model. Clients are 
 3. A sender and idempotency key identify one immutable message.
 4. A creator and idempotency key identify one immutable task.
 5. Only the assigned worker can claim, renew, checkpoint or complete a task.
-6. Completed tasks must have had a valid lease.
+6. Worker-reported success requires a distinct authorised verifier before a task enters succeeded state; task verification is separately audited.
 7. Expired leases require operator reconciliation instead of automatic replay.
 8. Material state changes and corresponding audit entries share transactions.
 9. Sensitive credentials are excluded from list and audit results.
