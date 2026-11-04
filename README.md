@@ -61,6 +61,14 @@ Supported example tasks have an input JSON object with action set to echo, sha25
 
 For Claude Desktop and other environments supporting stdio MCP clients, run shards-mcp-stdio as a local process with SHARDS_GATEWAY_URL pointing to the running service and SHARDS_AGENT_TOKEN containing a **least-privileged agent token**. The bridge forwards newline-delimited MCP JSON-RPC messages to the shared authenticated HTTP gateway. It does not use administrator credentials and does not bypass policy checks. Local stdio MCP support is separate from ChatGPT's hosted remote MCP connection requirements.
 
+## Independent review hardening
+
+The review-driven pass added finite two-hour claim lifetimes with audited renewals, persisted verifier attestations, read-only authentication, strict HTTP input handling, bounded connection concurrency, append-only audit triggers, privileged audit verification, permission-filtered tool discovery, cursor-based message polling and stoppable schedules.
+
+Use `message_poll` with `after_seq` for reliable delivery; `message_inbox` is a convenience view, not a cursor. Use `message_ack` after processing each message. Schedules no longer dispatch to revoked agents.
+
+The verification state `succeeded` means a **different credential** with `task:verify` scope attested a result. This does not guarantee evidence authenticity. The bootstrap operator credential can perform verification; never expose it to an AI client.
+
 ## Execution and safety model
 
 A sender submits a task with an idempotency key and assignee. Only the assignee may claim that queued task and receive a finite lease. While the lease is valid, the agent can checkpoint, renew and report its result. **A worker's positive completion does not establish verified success**: it enters reported state until a separately authorised reviewer uses task_verify with verification evidence. The worker's own credentials cannot self-verify. When a lease expires, an operator must explicitly mark the task blocked, reconcile any uncertain external effects, and approve requeueing. A saved checkpoint is task metadata, not a running model-process snapshot.
