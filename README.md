@@ -84,7 +84,7 @@ The review-driven pass added finite two-hour claim lifetimes with audited renewa
 
 Use `message_poll` with `after_seq` for reliable delivery; `message_inbox` is a convenience view, not a cursor. Use `message_ack` after processing each message. Schedules no longer dispatch to revoked agents.
 
-The verification state `succeeded` means a **different credential** with `task:verify` scope attested a result. This does not guarantee evidence authenticity. The bootstrap operator credential can perform verification; never expose it to an AI client.
+The verification state `succeeded` means an authorised principal other than both task creator and worker has attested a result using `task:verify`. This does not guarantee evidence authenticity. The bootstrap operator may verify tasks created by other principals but cannot verify tasks it created itself. Never expose the bootstrap credential to an AI client.
 
 ## Execution and safety model
 
