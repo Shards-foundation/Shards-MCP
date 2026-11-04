@@ -1,3 +1,13 @@
+
+## Review-identified residual risks
+
+- `agent_register` returns a newly generated bearer token. If called via an LLM holding the bootstrap token, that secret enters its tool transcript. Provision agents out of band and never connect the bootstrap administrator credential to a model.
+- `event:read` and `audit:read` remain global organisational scopes. Event topics lack access-control lists. Do not include secrets in events or assume event contents are trustworthy.
+- Verification evidence is persisted in plaintext SQLite. Add encryption, retention and access policy before accepting sensitive evidence.
+- Audit UPDATE/DELETE triggers stop ordinary modifications, but a database owner can remove them and rehash the ledger. External immutable anchoring remains a production prerequisite.
+- Socket timeouts and a 64-connection bound do not replace reverse proxy rate limiting, quotas and network protections.
+- A length/diversity check is not proof of entropy: generate bootstrap secrets using a cryptographically secure source.
+
 # Security policy and threat model
 
 **v0.1.0 is experimental, single-organisation software.** Do not expose to the public internet or attach production wallets, financial accounts, secrets, or infrastructure write privileges.
