@@ -120,5 +120,20 @@ class GatewayTests(unittest.TestCase):
             self.g.send(self.a, self.bid, {"oversize": "a" * 150000}, "big")
 
 
+    def test_recipient_ack_and_assignee_queue(self):
+        sent = self.g.send(self.a, self.bid, {"hello": "worker"}, "ack-key")
+        with self.assertRaises(GatewayError):
+            self.g.message_ack(self.a, sent["message_id"])
+        first = self.g.message_ack(self.b, sent["message_id"])
+        self.assertTrue(first["acknowledged_at"])
+        self.assertEqual(first, self.g.message_ack(self.b, sent["message_id"]))
+        self.assertEqual(self.g.inbox(self.b)[0]["read_at"], first["acknowledged_at"])
+        tid = self.g.task_create(self.a, self.bid, {"job": "demo"}, "queue-key")["task_id"]
+        self.assertEqual([x["id"] for x in self.g.task_inbox(self.b)], [tid])
+        self.assertEqual(self.g.task_inbox(self.a), [])
+        self.g.task_claim(self.b, tid)
+        self.assertFalse(self.g.task_inbox(self.b))
+        self.assertEqual(self.g.task_inbox(self.b, "running")[0]["id"], tid)
+
 if __name__ == "__main__":
     unittest.main()
