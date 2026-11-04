@@ -64,6 +64,18 @@ class AgentClient:
 def safe_operation(payload: object) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("task input must be a JSON object")
+    # Safe demonstration of a real A2A worker. This does not run an LLM or
+    # execute instructions: it only echoes validated text for proof of delivery.
+    if payload.get("protocol") == "a2a/1.0":
+        message = payload.get("message")
+        if not isinstance(message, dict) or message.get("role") != "ROLE_USER":
+            raise ValueError("invalid A2A worker input")
+        parts = message.get("parts")
+        if (not isinstance(parts, list) or not 1 <= len(parts) <= 16
+                or any(not isinstance(p, dict) or not isinstance(p.get("text"), str)
+                       or not p["text"].strip() or len(p) != 1 for p in parts)):
+            raise ValueError("invalid A2A text parts")
+        return {"text": "\n".join(p["text"] for p in parts), "worker": "deterministic-echo"}
     action = payload.get("action")
     if action == "echo":
         return {"echo": payload.get("data")}
