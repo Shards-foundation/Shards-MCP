@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from . import __version__
 from .core import Gateway, GatewayError, Principal, canonical
+from .oauth import OAuthResourceServer
 
 
 def schema(properties: dict[str, dict[str, Any]], required: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -235,7 +236,13 @@ def status(gateway: Gateway, principal: Principal) -> dict[str, Any]:
         }
 
 
-def make_handler(gateway: Gateway, allowed_origins: set[str]):
+def make_handler(gateway: Gateway, allowed_origins: set[str],
+                 oauth: OAuthResourceServer | None = None):
+    # Only one token format is accepted per server mode. In OAuth mode, local
+    # bootstrap/agent credentials cannot authenticate any network request.
+    authenticate = oauth.authenticate if oauth is not None else gateway.authenticate
+    challenge = oauth.challenge() if oauth is not None else 'Bearer realm="Shards-MCP"'
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "ShardsMCP/" + __version__
 
@@ -261,6 +268,9 @@ def make_handler(gateway: Gateway, allowed_origins: set[str]):
                 self.wfile.write(raw)
 
         def do_GET(self) -> None:
+            if oauth and self.path in ("/.well-known/oauth-protected-resource",
+                                      "/.well-known/oauth-protected-resource/mcp"):
+                return self.respond(200, oauth.metadata())
             if self.path == "/health/live":
                 return self.respond(200, {"status": "alive", "version": __version__})
             if self.path == "/health/ready":
@@ -278,11 +288,13 @@ def make_handler(gateway: Gateway, allowed_origins: set[str]):
                     return self.respond(403, {"error": "origin denied"})
                 token = decode_auth(self.headers.get("Authorization", ""))
                 if not token:
-                    return self.respond(401, {"error": "bearer authentication required"})
+                    return self.respond(401, {"error": "bearer authentication required"},
+                                        {"WWW-Authenticate": challenge})
                 try:
-                    principal = gateway.authenticate(token)
+                    principal = authenticate(token)
                 except GatewayError:
-                    return self.respond(401, {"error": "invalid credentials"})
+                    return self.respond(401, {"error": "invalid credentials"},
+                                        {"WWW-Authenticate": challenge})
                 return self.respond(200, {"tools": visible_tools(principal)})
             return self.respond(404, {"error": "not found"})
 
@@ -313,12 +325,12 @@ def make_handler(gateway: Gateway, allowed_origins: set[str]):
             token = decode_auth(self.headers.get("Authorization", ""))
             if not token:
                 return self.respond(401, {"error": "bearer authentication required"},
-                                    {"WWW-Authenticate": 'Bearer realm="Shards-MCP"'})
+                                    {"WWW-Authenticate": challenge})
             try:
-                principal = gateway.authenticate(token)
+                principal = authenticate(token)
             except GatewayError:
                 return self.respond(401, {"error": "invalid credentials"},
-                                    {"WWW-Authenticate": 'Bearer realm="Shards-MCP"'})
+                                    {"WWW-Authenticate": challenge})
             try:
                 payload = json.loads(self.rfile.read(length), parse_constant=reject_nonfinite)
             except (ValueError, UnicodeDecodeError, RecursionError):
@@ -392,13 +404,20 @@ def main() -> None:
     if len(token) < 32 or len(set(token)) < 12:
         raise SystemExit("Refusing to start: SHARDS_ADMIN_TOKEN must be >=32 characters with >=12 distinct characters")
     host = os.getenv("SHARDS_BIND", "127.0.0.1")
-    if host not in ("127.0.0.1", "localhost", "::1") and os.getenv("SHARDS_ALLOW_REMOTE") != "1":
+    remote = host not in ("127.0.0.1", "localhost", "::1")
+    if remote and os.getenv("SHARDS_ALLOW_REMOTE") != "1":
         raise SystemExit("Refusing non-loopback binding without SHARDS_ALLOW_REMOTE=1")
+    auth_mode = os.getenv("SHARDS_AUTH_MODE", "local").lower()
+    if auth_mode not in ("local", "oauth"):
+        raise SystemExit("SHARDS_AUTH_MODE must be local or oauth")
+    if remote and auth_mode != "oauth":
+        raise SystemExit("Refusing remote bearer-only mode: configure SHARDS_AUTH_MODE=oauth")
     try:
         port = int(os.getenv("SHARDS_PORT", "8787"))
         gateway = Gateway(os.getenv("SHARDS_DB", "shards.db"), token)
         origins = set(filter(None, os.getenv("SHARDS_ALLOWED_ORIGINS", "").split(",")))
-        server = BoundedHTTPServer((host, port), make_handler(gateway, origins))
+        oauth = OAuthResourceServer.from_environment(gateway) if auth_mode == "oauth" else None
+        server = BoundedHTTPServer((host, port), make_handler(gateway, origins, oauth=oauth))
         print(f"Shards MCP {__version__} serving on {host}:{port}", file=sys.stderr)
         server.serve_forever()
     except KeyboardInterrupt:
