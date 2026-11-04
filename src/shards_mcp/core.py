@@ -51,7 +51,7 @@ class Principal:
 
 SCOPES = (
     "agent:read", "agent:heartbeat", "message:send", "message:read",
-    "task:create", "task:read", "task:claim", "task:update",
+    "task:create", "task:read", "task:claim", "task:update", "task:verify",
     "checkpoint:write", "audit:read", "event:read", "event:write",
 )
 
@@ -309,7 +309,7 @@ class Gateway:
     def task_inbox(self, actor: Principal, state: str = "queued",
                    limit: int = 50) -> list[dict[str, Any]]:
         actor.require("task:read")
-        if state not in ("queued", "running", "blocked", "succeeded", "failed"):
+        if state not in ("queued", "running", "blocked", "reported", "succeeded", "failed"):
             raise GatewayError("unsupported task state")
         if type(limit) is not int or not 1 <= limit <= 100:
             raise GatewayError("limit must be 1..100")
@@ -374,12 +374,36 @@ class Gateway:
             row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if not row or row["assignee"] != actor.agent_id or row["state"] != "running" or row["lease_until"] <= now():
                 raise GatewayError("task not owned or active lease expired", "CONFLICT")
-            state = "succeeded" if success else "failed"
+            state = "reported" if success else "failed"
             db.execute("UPDATE tasks SET state=?, result=?, lease_until=NULL, updated=? WHERE id=?",
                        (state, data, now(), task_id))
             self.audit(db, actor.agent_id, "task.complete", task_id,
                        {"state": state, "result_sha256": hashlib.sha256(data.encode()).hexdigest()})
         return {"task_id": task_id, "state": state}
+
+    def task_verify(self, actor: Principal, task_id: str, approved: bool,
+                    evidence: Any) -> dict[str, Any]:
+        """Separate verifier must attest a reported result before success."""
+        actor.require("task:verify")
+        if type(approved) is not bool:
+            raise GatewayError("approved must be boolean")
+        serialized = self.limit(evidence)
+        # Require meaningful evidence for both acceptance and rejection.
+        if evidence is None or (isinstance(evidence, str) and len(evidence.strip()) < 8):
+            raise GatewayError("verification evidence required")
+        with self.tx() as db:
+            row = db.execute("SELECT state, assignee FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not row or row["state"] != "reported":
+                raise GatewayError("task is not awaiting verification", "CONFLICT")
+            if actor.agent_id == row["assignee"]:
+                raise GatewayError("worker cannot verify its own output", "FORBIDDEN")
+            state = "succeeded" if approved else "failed"
+            db.execute("UPDATE tasks SET state=?, updated=? WHERE id=?",
+                       (state, now(), task_id))
+            self.audit(db, actor.agent_id, "task.verify", task_id,
+                       {"approved": approved, "state": state, "evidence_sha256":
+                        hashlib.sha256(serialized.encode("utf-8")).hexdigest()})
+        return {"task_id": task_id, "state": state, "verified_by": actor.agent_id}
 
     def checkpoint(self, actor: Principal, task_id: str, body: Any) -> dict[str, Any]:
         actor.require("checkpoint:write")
