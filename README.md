@@ -38,17 +38,33 @@ shards-mcp
 
 The bootstrap secret must be randomly generated (at least 32 characters and 12 distinct characters; these checks alone do not prove cryptographic entropy). The service binds to 127.0.0.1:8787 by default. PowerShell users should set environment variables using the $env: prefix.
 
+## Provision agent credentials locally (never through MCP tools)
+
+Run on the gateway host as the operator, with `SHARDS_ADMIN_TOKEN` and `SHARDS_DB` configured as above:
+
+~~~bash
+mkdir -p "$HOME/.config/shards"
+chmod 700 "$HOME/.config/shards"
+shards-mcp-admin register --name hermes --provider local \
+  --scope agent:heartbeat --scope agent:read \
+  --scope task:read --scope task:claim --scope task:update \
+  --scope checkpoint:write --token-file "$HOME/.config/shards/hermes.token"
+export SHARDS_AGENT_TOKEN="$(cat "$HOME/.config/shards/hermes.token")"
+~~~
+
+`shards-mcp-admin` prints only the new agent ID and the token file location. The token file is created with permission `0600`; registration refuses an existing file. To revoke a credential, run `shards-mcp-admin revoke <agent_id>`. These operations are **not** available as network tools. Supply each AI client with only its scoped agent token using the client's secret configuration mechanism; never copy the bootstrap token into a model transcript.
+
 ## MCP smoke test
 
 ~~~bash
 curl -sS http://127.0.0.1:8787/mcp \
-  -H "Authorization: Bearer $SHARDS_ADMIN_TOKEN" \
+  -H "Authorization: Bearer $SHARDS_AGENT_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
 ~~~
 
-Then issue method tools/list with an empty params object. To register an agent, call tool agent_register with name, provider, capabilities and limited scopes. Save the issued worker token in a secret manager: never expose it in a model prompt or repository. Workers invoke tools with their own credential.
+Then issue method `tools/list` with an empty `params` object. Tool discovery is filtered by the authenticated agent scopes. Agent creation and revocation are deliberately not exposed through MCP or REST; use `shards-mcp-admin` on the host.
 
 **Do not connect ChatGPT using the administrator token.** Standard remote OAuth support, HTTPS deployment and platform testing are separate release gates.
 
