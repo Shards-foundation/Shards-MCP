@@ -22,3 +22,7 @@ References:
 ## Other AI agents
 
 Claude, Grok, Gemini, Manus, Hermes and custom agents may connect **when their specific runtime supports custom MCP HTTP connections and compatible authentication**. Some product UIs do not. For those, build and test an explicit adapter; do not assume universal native support. Tool actions must remain scoped per authenticated agent.
+
+## Operator provisioning
+
+Register agents only from a trusted gateway-host process using `shards-mcp-admin register`, storing each issued credential in a protected local file. Credential issuance and revocation are not network MCP/REST tools. Clients should receive only their own agent token via their runtime secrets mechanism; never use the bootstrap operator token.
