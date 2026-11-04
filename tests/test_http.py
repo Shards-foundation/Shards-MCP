@@ -108,9 +108,11 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(result["result"]["state"], "reported")
         self.assertIn("sha256", result["result"]["result"])
+        reviewer = self.gateway.register(self.gateway.authenticate(self.token), "independent-reviewer",
+                                         "local", ["review"], ["task:verify", "task:read"])
         status, verified = self.req("POST", "/v1/tools/task_verify",
                                     {"task_id": task["result"]["task_id"], "approved": True,
-                                     "evidence": {"sha256": result["result"]["result"]["sha256"]}}, self.token)
+                                     "evidence": {"sha256": result["result"]["result"]["sha256"]}}, reviewer["token"])
         self.assertEqual(status, 200)
         self.assertEqual(verified["result"]["state"], "succeeded")
         self.assertEqual(process_once(client), 0)
