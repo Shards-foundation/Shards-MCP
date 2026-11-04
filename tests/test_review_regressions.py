@@ -136,6 +136,34 @@ class ReviewCoreTests(unittest.TestCase):
             self.g.schedule_disable(self.root, schedule)
 
 
+    def test_event_topic_isolation_and_global_audit_confinement(self):
+        writer = self.g.register(self.root, "event-writer", "test", [],
+                                 ["event:write", "event:read", "audit:read"])
+        actor = self.g.authenticate(writer["token"])
+        outsider = self.g.register(self.root, "event-reader", "test", [],
+                                   ["event:write", "event:read", "audit:read"])
+        reader = self.g.authenticate(outsider["token"])
+
+        own = "agent." + actor.agent_id + ".progress"
+        self.g.event_publish(actor, own, {"private": True}, "private-1")
+        self.g.event_publish(actor, "shared.progress", {"broadcast": True}, "shared-1")
+        self.g.event_publish(self.root, "system.policy", {"internal": True}, "system-1")
+        with self.assertRaises(GatewayError):
+            self.g.event_publish(actor, "system.policy", {"fake": True}, "fake-1")
+        with self.assertRaises(GatewayError):
+            self.g.event_publish(actor, "agent." + reader.agent_id + ".progress", {}, "fake-2")
+        with self.assertRaises(GatewayError):
+            self.g.event_poll(reader, topic=own)
+        seen = self.g.event_poll(reader)["events"]
+        self.assertEqual([x["topic"] for x in seen], ["shared.progress"])
+        self.assertEqual({x["topic"] for x in self.g.event_poll(actor)["events"]},
+                         {own, "shared.progress"})
+        self.assertEqual(len(self.g.event_poll(self.root)["events"]), 3)
+        self.assertEqual(self.g.audit_list(reader), [])
+        actions = {x["action"] for x in self.g.audit_list(actor)}
+        self.assertEqual(actions, {"event.publish"})
+
+
 class ReviewHttpTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
