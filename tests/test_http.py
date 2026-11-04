@@ -1,3 +1,4 @@
+import secrets
 import http.client
 from http.server import ThreadingHTTPServer
 import json
@@ -13,7 +14,7 @@ from shards_mcp.server import make_handler
 class HttpTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.token = "b" * 48
+        self.token = secrets.token_urlsafe(48)
         self.gateway = Gateway(os.path.join(self.tmp.name, "db.sqlite"), self.token)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.gateway, set()))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
