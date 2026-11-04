@@ -70,8 +70,9 @@ class GatewayTests(unittest.TestCase):
         reopened = Gateway(self.dbpath, self.secret)
         self.assertEqual(reopened.checkpoint_get(self.a, tid)["checkpoint"]["body"], {"stage": 1})
         reopened.task_renew(self.b, tid)
-        self.assertEqual(reopened.task_complete(self.b, tid, True, {"ok": True})["state"], "succeeded")
+        self.assertEqual(reopened.task_complete(self.b, tid, True, {"ok": True})["state"], "reported")
         self.assertEqual(reopened.task_get(self.a, tid)["result"], {"ok": True})
+        self.assertEqual(reopened.task_verify(self.root, tid, True, {"checks": ["sha256"]})["state"], "succeeded")
         with self.assertRaises(GatewayError):
             reopened.task_complete(self.b, tid, True, {"ok": True})
 
@@ -163,6 +164,25 @@ class GatewayTests(unittest.TestCase):
         self.assertTrue(self.g.sanity_check(self.root)["healthy"])
         with self.assertRaises(GatewayError):
             self.g.sanity_check(self.a)
+
+
+    def test_independent_verification_gate(self):
+        tid = self.g.task_create(self.a, self.bid, {"action": "health"}, "verify-1")["task_id"]
+        self.g.task_claim(self.b, tid)
+        self.assertEqual(self.g.task_complete(self.b, tid, True, {"status": "ok"})["state"], "reported")
+        with self.assertRaises(GatewayError):
+            self.g.task_verify(self.b, tid, True, {"proof": "self-attested"})
+        with self.assertRaises(GatewayError):
+            self.g.task_verify(self.a, tid, True, {"proof": "not an authorised reviewer"})
+        reviewer = self.g.register(self.root, "reviewer", "test", ["verification"], ["task:verify", "task:read"])
+        reviewer_id = self.g.authenticate(reviewer["token"])
+        self.assertEqual(self.g.task_verify(reviewer_id, tid, True, {"proof": "verified hash"})["state"], "succeeded")
+        with self.assertRaises(GatewayError):
+            self.g.task_verify(self.root, tid, True, {"proof": "duplicate attestation"})
+        other = self.g.task_create(self.a, self.bid, {"action": "health"}, "verify-2")["task_id"]
+        self.g.task_claim(self.b, other)
+        self.g.task_complete(self.b, other, True, {"status": "bad"})
+        self.assertEqual(self.g.task_verify(reviewer_id, other, False, {"proof": "failed evaluation"})["state"], "failed")
 
 
 if __name__ == "__main__":
