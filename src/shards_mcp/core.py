@@ -76,7 +76,7 @@ class Gateway:
                 CREATE TABLE IF NOT EXISTS agents (
                   id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, provider TEXT NOT NULL,
                   capabilities TEXT NOT NULL, scopes TEXT NOT NULL,
-                  token_hash TEXT NOT NULL UNIQUE, created TEXT NOT NULL,
+                  token_hash TEXT NOT NULL UNIQUE, oauth_subject TEXT UNIQUE, created TEXT NOT NULL,
                   last_seen TEXT, revoked INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS messages (
@@ -124,6 +124,10 @@ class Gateway:
                   BEGIN SELECT RAISE(ABORT, 'audit entries are immutable'); END;
             """)
             # Migration from existing experimental 0.1 databases.
+            agent_columns = {row["name"] for row in db.execute("PRAGMA table_info(agents)")}
+            if "oauth_subject" not in agent_columns:
+                db.execute("ALTER TABLE agents ADD COLUMN oauth_subject TEXT")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_oauth_subject ON agents(oauth_subject)")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
             if "lease_started" not in columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN lease_started TEXT")
@@ -185,6 +189,27 @@ class Gateway:
             raise GatewayError("invalid credential", "UNAUTHENTICATED")
         return Principal(row["id"], tuple(json.loads(row["scopes"])))
 
+    def authenticate_oauth(self, subject: str, granted: set[str]) -> Principal:
+        """Map a verified external identity onto an existing, active Shards agent.
+
+        A signed OAuth scope cannot elevate beyond the operator-registered scopes.
+        The special bootstrap operator identity is never available through OAuth.
+        """
+        if not isinstance(subject, str) or not subject or not granted:
+            raise GatewayError("invalid OAuth principal", "UNAUTHENTICATED")
+        with self.read_tx() as db:
+            row = db.execute(
+                "SELECT id,scopes FROM agents WHERE oauth_subject=? AND revoked=0",
+                (subject,),
+            ).fetchone()
+        if not row:
+            raise GatewayError("OAuth subject not enrolled or revoked", "UNAUTHENTICATED")
+        agent_scopes = set(json.loads(row["scopes"]))
+        authorized = sorted(granted & agent_scopes & set(SCOPES))
+        if not authorized:
+            raise GatewayError("OAuth subject has no matching gateway permissions", "FORBIDDEN")
+        return Principal(row["id"], tuple(authorized))
+
     @staticmethod
     def limit(value: Any, max_bytes: int = 131072) -> str:
         try:
@@ -207,7 +232,8 @@ class Gateway:
             raise GatewayError("unknown or revoked agent", "NOT_FOUND")
 
     def register(self, actor: Principal, name: str, provider: str,
-                 capabilities: list[str], scopes: list[str]) -> dict[str, Any]:
+                 capabilities: list[str], scopes: list[str],
+                 oauth_subject: str | None = None) -> dict[str, Any]:
         actor.require("*")
         name = self.required(name, "name")
         provider = self.required(provider, "provider")
@@ -215,19 +241,22 @@ class Gateway:
             raise GatewayError("invalid capabilities")
         if not isinstance(scopes, list) or any(x not in SCOPES for x in scopes):
             raise GatewayError("invalid scopes; cannot create administrative agent credentials")
+        if oauth_subject is not None:
+            self.required(oauth_subject, "oauth_subject")
         token = "shards_" + secrets.token_urlsafe(36)
         agent_id = uid("agt")
         with self.tx() as db:
             try:
                 db.execute("""INSERT INTO agents
-                    (id,name,provider,capabilities,scopes,token_hash,created)
-                    VALUES (?,?,?,?,?,?,?)""",
+                    (id,name,provider,capabilities,scopes,token_hash,oauth_subject,created)
+                    VALUES (?,?,?,?,?,?,?,?)""",
                     (agent_id, name, provider, self.limit(capabilities),
-                     canonical(sorted(set(scopes))), hashlib.sha256(token.encode()).hexdigest(), now()))
+                     canonical(sorted(set(scopes))), hashlib.sha256(token.encode()).hexdigest(),
+                     oauth_subject, now()))
             except sqlite3.IntegrityError as exc:
                 raise GatewayError("agent name already registered", "CONFLICT") from exc
             self.audit(db, actor.agent_id, "agent.register", agent_id,
-                       {"name": name, "scopes": sorted(set(scopes))})
+                       {"name": name, "scopes": sorted(set(scopes)), "oauth_bound": bool(oauth_subject)})
         return {"agent_id": agent_id, "token": token, "scopes": sorted(set(scopes))}
 
     def revoke(self, actor: Principal, agent_id: str) -> dict[str, Any]:
