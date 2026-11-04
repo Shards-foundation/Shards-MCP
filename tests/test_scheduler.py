@@ -64,7 +64,7 @@ class SchedulerTests(unittest.TestCase):
         command = [sys.executable, "-m", "shards_mcp.scheduler", "--once"]
         completed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=12)
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertIn('"event": "scheduler_cycle"', completed.stderr)
+        self.assertIn('"event":"scheduler_cycle"', completed.stderr)
         self.assertNotIn(self.secret, completed.stdout + completed.stderr)
 
     def test_secret_file_and_env_conflict_fail_closed(self):
