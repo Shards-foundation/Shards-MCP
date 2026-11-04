@@ -19,6 +19,7 @@ from typing import Any, Callable
 from . import __version__
 from .core import Gateway, GatewayError, Principal, canonical
 from .oauth import OAuthResourceServer
+from .a2a import A2AAdapter
 
 
 def schema(properties: dict[str, dict[str, Any]], required: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -237,7 +238,8 @@ def status(gateway: Gateway, principal: Principal) -> dict[str, Any]:
 
 
 def make_handler(gateway: Gateway, allowed_origins: set[str],
-                 oauth: OAuthResourceServer | None = None):
+                 oauth: OAuthResourceServer | None = None,
+                 a2a: A2AAdapter | None = None):
     # Only one token format is accepted per server mode. In OAuth mode, local
     # bootstrap/agent credentials cannot authenticate any network request.
     authenticate = oauth.authenticate if oauth is not None else gateway.authenticate
@@ -282,6 +284,21 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                     return self.respond(503, {"status": "not_ready"})
             if self.path == "/mcp":
                 return self.respond(405, {"error": "GET streaming not supported; use POST"}, {"Allow": "POST"})
+            card_target = a2a.route(self.path, card=True) if a2a else None
+            if card_target:
+                origin = self.headers.get("Origin")
+                if origin and origin not in allowed_origins:
+                    return self.respond(403, {"error": "origin denied"})
+                token = decode_auth(self.headers.get("Authorization", ""))
+                if not token:
+                    return self.respond(401, {"error": "bearer authentication required"},
+                                        {"WWW-Authenticate": challenge})
+                try:
+                    principal = authenticate(token)
+                    return self.respond(200, a2a.card(principal, card_target))
+                except GatewayError as exc:
+                    return self.respond(404 if exc.code == "NOT_FOUND" else 403,
+                                        {"error": "agent card not available"})
             if self.path == "/v1/tools":
                 origin = self.headers.get("Origin")
                 if origin and origin not in allowed_origins:
@@ -300,7 +317,8 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
 
         def do_POST(self) -> None:
             is_rest = self.path.startswith("/v1/tools/") and len(self.path) > len("/v1/tools/")
-            if self.path != "/mcp" and not is_rest:
+            a2a_target = a2a.route(self.path) if a2a else None
+            if self.path != "/mcp" and not is_rest and not a2a_target:
                 return self.respond(404, {"error": "not found"})
             # A client may probe with a newer version; initialize advertises the
             # version this implementation actually implements.
@@ -338,6 +356,10 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                                           "error": {"code": -32700, "message": "Parse error"}})
             except (TimeoutError, socket.timeout, OSError):
                 return self.respond(408, {"error": "request body timed out"})
+            if a2a_target:
+                if self.headers.get("A2A-Version") != "1.0":
+                    return self.respond(400, {"error": "A2A-Version: 1.0 required"})
+                return self.respond(200, a2a.process(principal, a2a_target, payload))
             if is_rest:
                 try:
                     value = dispatch(gateway, principal, self.path[len("/v1/tools/"):], payload)
@@ -417,7 +439,11 @@ def main() -> None:
         gateway = Gateway(os.getenv("SHARDS_DB", "shards.db"), token)
         origins = set(filter(None, os.getenv("SHARDS_ALLOWED_ORIGINS", "").split(",")))
         oauth = OAuthResourceServer.from_environment(gateway) if auth_mode == "oauth" else None
-        server = BoundedHTTPServer((host, port), make_handler(gateway, origins, oauth=oauth))
+        a2a_base = os.getenv("SHARDS_A2A_BASE_URL", "").strip()
+        if not a2a_base and oauth:
+            a2a_base = oauth.resource.rsplit("/mcp", 1)[0]
+        a2a = A2AAdapter(gateway, a2a_base) if a2a_base else None
+        server = BoundedHTTPServer((host, port), make_handler(gateway, origins, oauth=oauth, a2a=a2a))
         print(f"Shards MCP {__version__} serving on {host}:{port}", file=sys.stderr)
         server.serve_forever()
     except KeyboardInterrupt:

@@ -97,6 +97,22 @@ The resource server exposes RFC 9728 metadata under `/.well-known/oauth-protecte
 
 **Remote access requires a TLS reverse proxy and a compatible external OAuth provider.** Token issuance, consent/PKCE, refresh tokens and provider-specific integrations are not implemented by this gateway. Local signed-JWT integration tests passing does **not** mean a live ChatGPT plugin, a fully compatible identity-provider flow, or App Directory approval.
 
+## Agent-to-Agent v1.0 adapter (limited preview)
+
+The gateway now provides an opt-in **A2A v1.0 JSON-RPC subset** alongside MCP and REST. A2A is for *agent-to-agent task collaboration*, whereas MCP connects an agent to tools.
+
+Configure `SHARDS_A2A_BASE_URL=http://127.0.0.1:8787` for local testing. Remote OAuth mode automatically derives the A2A HTTPS base address from `SHARDS_PUBLIC_URL` unless overridden.
+
+- `GET /a2a/agents/<agent_id>/card` — authenticated Agent Card describing the target worker. Requires `agent:read`.
+- `POST /a2a/agents/<agent_id>` — A2A JSON-RPC 2.0 with `A2A-Version: 1.0`. `SendMessage` queues a durable task, requiring `task:create`. `GetTask` polls a task requiring `task:read` and creator/assignee ownership.
+- Only the **v1.0** `ROLE_USER` format and non-empty `{"text":"..."}` parts are accepted. The received A2A message is preserved under the task input's `protocol: "a2a/1.0"` field; an independently connected agent worker must process it.
+- Task outputs appear as A2A artifacts only once a separately authorised reviewer has verified them. A pending reported result is not represented as completed work.
+- The included reference worker understands text-only A2A task input and performs **deterministic echo only**. It never treats received text as a shell command, network request, model instruction or trading instruction. A different agent runtime can implement real processing behind its own permission boundary.
+
+`SendStreamingMessage`, `ListTasks`, `CancelTask`, multi-turn messages, push notification support and public well-known card discovery are **not implemented**. The adapter is a constrained subset, **not a full A2A conformance claim**. The per-agent card URL is available via direct configuration (a supported A2A discovery mechanism).
+
+Reference: https://a2a-protocol.org/v1.0.0/specification/
+
 ## Local stdio MCP bridge
 
 For Claude Desktop and other environments supporting stdio MCP clients, run shards-mcp-stdio as a local process with SHARDS_GATEWAY_URL pointing to the running service and SHARDS_AGENT_TOKEN containing a **least-privileged agent token**. The bridge forwards newline-delimited MCP JSON-RPC messages to the shared authenticated HTTP gateway. It does not use administrator credentials and does not bypass policy checks. Local stdio MCP support is separate from ChatGPT's hosted remote MCP connection requirements.

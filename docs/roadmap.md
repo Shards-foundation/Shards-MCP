@@ -22,3 +22,9 @@ B1-B4 addressed in PR #1: audited bounded leases, verified non-empty evidence re
 Still pending: fine-grained per-topic grants beyond the current private/shared/system namespaces, per-agent quotas and retention, OAuth resource-server support, independent audit anchoring, distributed storage, deployment and multi-platform interoperability. Local out-of-band agent provisioning and agent-level audit isolation are implemented.
 
 Do not mark as production-ready until the applicable phases have independent evidence. Implementation presence is not verification.
+
+
+## A2A v1.0 interoperability work
+
+An authenticated, explicitly opt-in JSON-RPC v1.0 adapter implements per-agent cards and text-only SendMessage/GetTask mapped to durable Shards tasks. This is a **partial adapter**, not a claim of full A2A compliance or compatibility with every AI platform. The A2A conformance and live multi-runtime interoperability gate remains open, along with streaming, push notification and cancellation.
+
