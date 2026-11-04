@@ -57,17 +57,17 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         names = {t["name"] for t in listed["result"]["tools"]}
         self.assertIn("message_send", names)
-        call = self.rpc("tools/call", {"name": "agent_register",
-                   "arguments": {"name": "worker", "provider": "test", "capabilities": [],
-                                 "scopes": ["agent:heartbeat"]}})
-        _, response = self.req("POST", "/mcp", call, self.token)
-        self.assertFalse(response["result"]["isError"])
-        cred = response["result"]["structuredContent"]["token"]
+        self.assertNotIn("agent_register", names)
+        self.assertNotIn("agent_revoke", names)
+        worker = self.gateway.register(self.gateway.authenticate(self.token), "worker", "test", [],
+                                       ["agent:heartbeat"])
+        cred = worker["token"]
         _, check = self.req("POST", "/mcp", self.rpc("tools/call",
                             {"name": "agent_heartbeat", "arguments": {}}), cred)
         self.assertFalse(check["result"]["isError"])
-        _, denied = self.req("POST", "/mcp", call, cred)
-        self.assertTrue(denied["result"]["isError"])
+        _, denied = self.req("POST", "/mcp", self.rpc("tools/call",
+                             {"name": "agent_register", "arguments": {}}), self.token)
+        self.assertEqual(denied["error"]["code"], -32602)
 
 
     def test_rest_bridge_and_version_guard(self):
@@ -78,30 +78,24 @@ class HttpTests(unittest.TestCase):
         status, available = self.req("GET", "/v1/tools", token=self.token)
         self.assertEqual(status, 200)
         self.assertIn("message_send", {x["name"] for x in available["tools"]})
-        status, created = self.req("POST", "/v1/tools/agent_register",
-                                   {"name": "rest-agent", "provider": "test", "capabilities": [],
-                                    "scopes": ["agent:heartbeat"]}, self.token)
-        self.assertEqual(status, 200)
-        cred = created["result"]["token"]
+        worker = self.gateway.register(self.gateway.authenticate(self.token), "rest-agent", "test", [],
+                                       ["agent:heartbeat"])
+        cred = worker["token"]
         status, heartbeat = self.req("POST", "/v1/tools/agent_heartbeat", {}, cred)
         self.assertEqual(status, 200)
         self.assertTrue(heartbeat["ok"])
         status, rejected = self.req("POST", "/v1/tools/agent_register",
                                     {"name": "rogue", "provider": "test", "capabilities": [],
                                      "scopes": []}, cred)
-        self.assertEqual(status, 403)
-        self.assertEqual(rejected["error"]["code"], "FORBIDDEN")
+        self.assertEqual(status, 404)
+        self.assertEqual(rejected["error"]["code"], "NOT_FOUND")
 
     def test_reference_worker_end_to_end(self):
         from shards_mcp.worker import AgentClient, process_once, safe_operation
         base = "http://127.0.0.1:%d" % self.server.server_port
-        status, created = self.req("POST", "/v1/tools/agent_register",
-                                   {"name": "reference-worker", "provider": "local",
-                                    "capabilities": ["sha256"],
-                                    "scopes": ["agent:heartbeat", "task:read", "task:claim",
-                                               "task:update", "checkpoint:write"]}, self.token)
-        self.assertEqual(status, 200)
-        worker = created["result"]
+        worker = self.gateway.register(self.gateway.authenticate(self.token), "reference-worker",
+                                       "local", ["sha256"], ["agent:heartbeat", "task:read",
+                                       "task:claim", "task:update", "checkpoint:write"])
         status, task = self.req("POST", "/v1/tools/task_create",
                                 {"assignee": worker["agent_id"],
                                  "payload": {"action": "sha256", "data": "abc"},
@@ -146,7 +140,8 @@ class HttpTests(unittest.TestCase):
         responses = [json.loads(line) for line in proc.stdout.splitlines()]
         self.assertEqual(len(responses), 3, proc.stdout)
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "shards-mcp")
-        self.assertIn("agent_register", {entry["name"] for entry in responses[1]["result"]["tools"]})
+        self.assertNotIn("agent_register", {entry["name"] for entry in responses[1]["result"]["tools"]})
+        self.assertIn("agent_list", {entry["name"] for entry in responses[1]["result"]["tools"]})
         self.assertEqual(responses[2]["result"]["structuredContent"]["agents"], 0)
 
 
