@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "shards-mcp",
+  "version": "0.1.0",
+  "description": "Authenticated durable communication and verification gateway for heterogeneous AI agents",
+  "author": {
+    "name": "Shards Foundation"
+  },
+  "homepage": "https://github.com/Shards-foundation/Shards-MCP",
+  "repository": "https://github.com/Shards-foundation/Shards-MCP",
+  "license": "MIT",
+  "keywords": [
+    "agent",
+    "mcp",
+    "gateway",
+    "communication",
+    "tasks",
+    "audit"
+  ]
+}
