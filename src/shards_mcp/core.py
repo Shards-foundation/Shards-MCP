@@ -211,6 +211,15 @@ class Gateway:
             item["capabilities"] = json.loads(item["capabilities"])
             item["scopes"] = json.loads(item["scopes"])
             item["revoked"] = bool(item["revoked"])
+            if item["revoked"]:
+                item["heartbeat_state"] = "revoked"
+            elif not item["last_seen"]:
+                item["heartbeat_state"] = "unobserved"
+            elif (datetime.now(timezone.utc) - datetime.fromisoformat(
+                    item["last_seen"])).total_seconds() <= 90:
+                item["heartbeat_state"] = "recent"
+            else:
+                item["heartbeat_state"] = "stale"
             result.append(item)
         return result
 
@@ -468,6 +477,18 @@ class Gateway:
                                   (after_seq, topic, limit)).fetchall()
         result = [{**dict(r), "body": json.loads(r["body"])} for r in rows]
         return {"events": result, "next_cursor": result[-1]["seq"] if result else after_seq}
+
+
+    def sanity_check(self, actor: Principal) -> dict[str, Any]:
+        actor.require("*")
+        with self.tx() as db:
+            integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
+            broken_refs = db.execute("PRAGMA foreign_key_check").fetchall()
+        audit_result = self.audit_verify(actor)
+        return {"healthy": integrity == "ok" and len(broken_refs) == 0 and audit_result["valid"],
+                "sqlite_integrity": integrity,
+                "foreign_key_violations": len(broken_refs),
+                "audit": audit_result}
 
     def audit_list(self, actor: Principal, limit: int = 50) -> list[dict[str, Any]]:
         actor.require("audit:read")
