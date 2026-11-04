@@ -27,7 +27,11 @@ def request_line(client: AgentClient, line: str) -> str | None:
     except (ValueError, json.JSONDecodeError):
         return canonical({"jsonrpc": "2.0", "id": None,
                           "error": {"code": -32700, "message": "Parse error"}})
-    raw = canonical(payload).encode("utf-8")
+    try:
+        raw = canonical(payload).encode("utf-8")
+    except (ValueError, RecursionError, TypeError):
+        return canonical({"jsonrpc": "2.0", "id": payload.get("id"),
+                          "error": {"code": -32600, "message": "Invalid JSON request"}})
     if len(raw) > 262144:
         return canonical({"jsonrpc": "2.0", "id": payload.get("id"),
                           "error": {"code": -32600, "message": "Request too large"}})
