@@ -2,7 +2,7 @@
 
 **v0.1.0 is experimental, single-organisation software.** Do not expose to the public internet or attach production wallets, financial accounts, secrets, or infrastructure write privileges.
 
-- All MCP requests require a bearer credential. Administrator token is configured via SHARDS_ADMIN_TOKEN (>=32 characters). Agents receive unique randomly generated bearer tokens stored as SHA-256 digests.
+- All MCP requests require a bearer credential. Administrator token is configured via SHARDS_ADMIN_TOKEN (>=32 characters, >=12 distinct characters; generate randomly). Agents receive unique randomly generated bearer tokens stored as SHA-256 digests.
 - Agent authority derives from the authenticated credential, not arbitrary input. Agents cannot register or elevate their own privileges.
 - Agent registration returns a credential once. Keep it in a secret manager, not a ChatGPT conversation. Revoke exposed credentials promptly.
 - Localhost binding is the default; non-loopback requires SHARDS_ALLOW_REMOTE=1. Remote usage additionally requires a secure reverse proxy, TLS, rate limiting, network restrictions and proper OAuth 2.1 integration.
