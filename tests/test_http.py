@@ -69,5 +69,26 @@ class HttpTests(unittest.TestCase):
         self.assertTrue(denied["result"]["isError"])
 
 
+    def test_rest_bridge_and_version_guard(self):
+        status, data = self.req("POST", "/mcp", self.rpc("initialize"), self.token,
+                                {"MCP-Protocol-Version": "malicious-version"})
+        self.assertEqual(status, 400)
+        status, available = self.req("GET", "/v1/tools", token=self.token)
+        self.assertEqual(status, 200)
+        self.assertIn("message_send", {x["name"] for x in available["tools"]})
+        status, created = self.req("POST", "/v1/tools/agent_register",
+                                   {"name": "rest-agent", "provider": "test", "capabilities": [],
+                                    "scopes": ["agent:heartbeat"]}, self.token)
+        self.assertEqual(status, 200)
+        cred = created["result"]["token"]
+        status, heartbeat = self.req("POST", "/v1/tools/agent_heartbeat", {}, cred)
+        self.assertEqual(status, 200)
+        self.assertTrue(heartbeat["ok"])
+        status, rejected = self.req("POST", "/v1/tools/agent_register",
+                                    {"name": "rogue", "provider": "test", "capabilities": [],
+                                     "scopes": []}, cred)
+        self.assertEqual(status, 403)
+        self.assertEqual(rejected["error"]["code"], "FORBIDDEN")
+
 if __name__ == "__main__":
     unittest.main()
