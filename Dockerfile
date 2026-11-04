@@ -6,7 +6,10 @@ RUN python -m pip install --no-cache-dir . && \
     groupadd --system shards && useradd --system --gid shards --home /app shards && \
     mkdir -p /data && chown shards:shards /data
 USER shards
-ENV SHARDS_DB=/data/state.db SHARDS_BIND=0.0.0.0 SHARDS_PORT=8787 SHARDS_ALLOW_REMOTE=1
+ENV SHARDS_DB=/data/state.db SHARDS_BIND=0.0.0.0 SHARDS_PORT=8787
+# SHARDS_ALLOW_REMOTE=1 must be passed explicitly by a trusted deployer.
 EXPOSE 8787
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health/ready',timeout=2).read()" || exit 1
 # Requires HTTPS/OAuth proxy and SHARDS_ADMIN_TOKEN secret; never expose the port directly.
 CMD ["shards-mcp"]
