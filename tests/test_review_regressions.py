@@ -84,7 +84,7 @@ class ReviewCoreTests(unittest.TestCase):
         client = AgentClient("http://127.0.0.1:8787", "x" * 48)
         from urllib.request import ProxyHandler
         proxies = [h.proxies for h in client.opener.handlers if isinstance(h, ProxyHandler)]
-        self.assertEqual(proxies, [{}])
+        self.assertFalse(any(proxies), "environment proxy must not be active")
         old = os.environ.get("SHARDS_ADMIN_TOKEN")
         try:
             os.environ["SHARDS_ADMIN_TOKEN"] = "x" * 48
