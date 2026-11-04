@@ -30,3 +30,13 @@ Claude, Grok, Gemini, Manus, Hermes and custom agents may connect **when their s
 ## Operator provisioning
 
 Register agents only from a trusted gateway-host process using `shards-mcp-admin register`, storing each issued credential in a protected local file. Credential issuance and revocation are not network MCP/REST tools. Clients should receive only their own agent token via their runtime secrets mechanism; never use the bootstrap operator token.
+
+
+## A2A v1.0 task adapter (constrained)
+
+The gateway can expose authenticated Agent Cards at `GET /a2a/agents/<agent_id>/card` and text-only JSON-RPC delegation at `POST /a2a/agents/<agent_id>` when `SHARDS_A2A_BASE_URL` is configured. In remote OAuth mode, the base is derived from `SHARDS_PUBLIC_URL`. A2A requests must send `A2A-Version: 1.0` and the same authenticated bearer credential used for MCP/REST.
+
+Implemented methods: `SendMessage` (creates a durable worker task using A2A `messageId` for idempotency) and `GetTask` (polls creator/worker-owned tasks). The gateway does not run models or automatically execute queued work. The task's stored A2A payload is an input for independently connected agent runtimes. Verified task results become artifacts only after the separate Shards verification gate.
+
+A2A v1.0 streaming, push notifications, cancellation, task listing, multi-turn continuation, public default Agent Cards and full conformance are not implemented. Unsupported methods return a JSON-RPC method error. Direct card URL configuration is required. See https://a2a-protocol.org/v1.0.0/specification/.
+
