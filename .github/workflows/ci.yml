@@ -48,8 +48,12 @@ jobs:
         if: matrix.python-version == '3.12'
         run: |
           docker build --pull -t shards-mcp:ci .
-          if docker run --rm --network none -e SHARDS_ADMIN_TOKEN=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_ shards-mcp:ci; then
-            echo "Docker image unexpectedly permitted remote bind without explicit opt-in"
+          set +e
+          output="$(docker run --rm --network none -e SHARDS_ADMIN_TOKEN=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_ shards-mcp:ci 2>&1)"
+          exit_code=$?
+          set -e
+          if [ "$exit_code" -eq 0 ] || [[ "$output" != *"Refusing non-loopback binding without SHARDS_ALLOW_REMOTE=1"* ]]; then
+            echo "Docker startup did not fail for the expected remote-bind security reason"
             exit 1
           fi
       - name: Install wheel in isolated fresh environment
