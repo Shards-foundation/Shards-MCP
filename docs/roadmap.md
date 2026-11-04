@@ -11,6 +11,10 @@
 | 6 | Security review, backups, disaster recovery and signed releases | Measured reliability and production release signoff |
 | 7 | Platform distribution | Verified ChatGPT plugin and other runtime compatibility matrix |
 
+## OAuth progress
+
+An optional external JWT resource-server verifier and RFC 9728 metadata endpoint have been added with automated signed-token negative tests. This is partial phase 1 progress. Full provider interoperability, actual ChatGPT connection, HTTPS deployment, OAuth refresh handling and broader production authentication assurance are still pending.
+
 ## Independent review — 4 November 2026
 
 B1-B4 addressed in PR #1: audited bounded leases, verified non-empty evidence retention, read-only authentication and bounded HTTP parsing, and explicit Docker remote binding opt-in. Regression tests exercise these findings, together with cursor-based messaging, scheduling, audit integrity and credential hygiene. This is partial coverage; passing CI is not a complete formal security proof.
