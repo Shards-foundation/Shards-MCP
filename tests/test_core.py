@@ -16,7 +16,8 @@ class GatewayTests(unittest.TestCase):
         self.g = Gateway(self.dbpath, self.secret)
         self.root = self.g.authenticate(self.secret)
         scope = ["agent:read", "agent:heartbeat", "message:send", "message:read",
-                 "task:create", "task:read", "task:claim", "task:update", "checkpoint:write"]
+                 "task:create", "task:read", "task:claim", "task:update", "checkpoint:write",
+                 "event:write", "event:read"]
         a = self.g.register(self.root, "agent-a", "test", ["messaging"], scope)
         b = self.g.register(self.root, "agent-b", "test", ["worker"], scope)
         self.aid, self.bid = a["agent_id"], b["agent_id"]
@@ -134,6 +135,24 @@ class GatewayTests(unittest.TestCase):
         self.g.task_claim(self.b, tid)
         self.assertFalse(self.g.task_inbox(self.b))
         self.assertEqual(self.g.task_inbox(self.b, "running")[0]["id"], tid)
+
+    def test_durable_event_stream_and_cursor(self):
+        emitted = self.g.event_publish(self.a, "task.progress", {"percent": 25}, "ev1", "trace-1")
+        self.assertFalse(emitted["deduplicated"])
+        again = self.g.event_publish(self.a, "task.progress", {"percent": 25}, "ev1", "trace-1")
+        self.assertEqual(again["event_seq"], emitted["event_seq"])
+        with self.assertRaises(GatewayError):
+            self.g.event_publish(self.a, "task.progress", {"percent": 26}, "ev1", "trace-1")
+        found = self.g.event_poll(self.b, after_seq=0, topic="task.progress")
+        self.assertEqual(len(found["events"]), 1)
+        self.assertEqual(found["events"][0]["body"], {"percent": 25})
+        self.assertEqual(found["next_cursor"], emitted["event_seq"])
+        self.assertEqual(self.g.event_poll(self.b, after_seq=found["next_cursor"])["events"], [])
+        reopened = Gateway(self.dbpath, self.secret)
+        self.assertEqual(len(reopened.event_poll(self.b)["events"]), 1)
+        with self.assertRaises(GatewayError):
+            self.g.event_poll(self.b, after_seq=-1)
+
 
 if __name__ == "__main__":
     unittest.main()
