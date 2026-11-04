@@ -56,9 +56,21 @@ jobs:
             echo "Docker startup did not fail for the expected remote-bind security reason"
             exit 1
           fi
+      - name: Verify OAuth image and persistent Compose/Caddy configuration (Python 3.12)
+        if: matrix.python-version == '3.12'
+        run: |
+          docker run --rm --entrypoint python shards-mcp:ci -c "import jwt, cryptography, shards_mcp.scheduler, shards_mcp.snapshots"
+          mkdir -p secrets
+          chmod 700 secrets
+          python -c 'import pathlib,secrets; p=pathlib.Path("secrets/admin_token"); p.write_text(secrets.token_urlsafe(48)); p.chmod(0o600)'
+          SHARDS_GATEWAY_DOMAIN=gateway.example.test SHARDS_OAUTH_ISSUER=https://issuer.example.test/ SHARDS_OAUTH_JWKS_URI=https://issuer.example.test/keys.json docker compose -f deploy/compose.yaml config --quiet
+          docker run --rm -e SHARDS_GATEWAY_DOMAIN=gateway.example.test -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.11.7-alpine validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          rm -f secrets/admin_token
       - name: Install wheel in isolated fresh environment
         run: |
           python -m venv /tmp/shards-wheel-env
           /tmp/shards-wheel-env/bin/python -m pip install dist/*.whl
           /tmp/shards-wheel-env/bin/python -c "import shards_mcp; from shards_mcp.server import TOOL_LIST; assert shards_mcp.__version__ == '0.1.0'; assert TOOL_LIST"
           /tmp/shards-wheel-env/bin/shards-worker --help >/dev/null
+          /tmp/shards-wheel-env/bin/shards-scheduler --help >/dev/null
+          /tmp/shards-wheel-env/bin/shards-mcp-admin --help >/dev/null
