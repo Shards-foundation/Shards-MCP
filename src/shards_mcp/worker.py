@@ -14,7 +14,7 @@ import sys
 import time
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from . import __version__
 from .core import canonical
@@ -36,9 +36,12 @@ class AgentClient:
             raise ValueError("gateway URL must not contain credentials, query or fragment")
         if not token or len(token) < 32:
             raise ValueError("SHARDS_AGENT_TOKEN is required")
+        # Never use a bootstrap administrator credential when it is in the same environment.
+        if os.getenv("SHARDS_ADMIN_TOKEN") and token == os.getenv("SHARDS_ADMIN_TOKEN"):
+            raise ValueError("an administrator token cannot be used by the agent client")
         self.url = url.rstrip("/")
         self.token = token
-        self.opener = build_opener(NoRedirects())
+        self.opener = build_opener(ProxyHandler({}), NoRedirects())
 
     def call(self, name: str, args: dict) -> object:
         body = canonical(args).encode("utf-8")
