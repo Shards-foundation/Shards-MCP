@@ -14,6 +14,7 @@ import sys
 
 from .core import Gateway, GatewayError, SCOPES
 from .snapshots import create_snapshot, inspect_snapshot
+from .config import admin_token_from_environment
 
 
 def main() -> None:
@@ -45,9 +46,10 @@ def main() -> None:
             print(f"shards-mcp-admin: {exc}", file=sys.stderr)
             raise SystemExit(1) from None
 
-    admin_token = os.getenv("SHARDS_ADMIN_TOKEN", "")
-    if not admin_token:
-        parser.error("SHARDS_ADMIN_TOKEN must be supplied through the environment or secrets manager")
+    try:
+        admin_token = admin_token_from_environment()
+    except (OSError, UnicodeError, ValueError) as exc:
+        parser.error(str(exc))
     gateway = Gateway(os.getenv("SHARDS_DB", "shards.db"), admin_token)
     root = gateway.authenticate(admin_token)
 
