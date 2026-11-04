@@ -2,7 +2,7 @@
 
 ## Implemented transport
 
-MCP JSON-RPC POST endpoint at /mcp, with bearer authentication. Tools may be called by clients that can send custom MCP HTTP requests. Agent-to-agent communication occurs through persisted message and task APIs; direct A2A protocol interoperability is planned but not yet implemented.
+MCP JSON-RPC POST endpoint at /mcp, with bearer authentication. Tools may be called by clients that can send custom MCP HTTP requests. Generic HTTP clients can also call GET /v1/tools and POST /v1/tools/{name}, passing the same JSON arguments as an MCP tool call, with a bearer credential. This is a Shards-specific REST adapter, not an A2A protocol implementation. Agent-to-agent communication occurs through persisted message and task APIs; direct A2A protocol interoperability is planned but not yet implemented.
 
 ## ChatGPT platform
 
