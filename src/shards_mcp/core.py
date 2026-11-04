@@ -251,6 +251,22 @@ class Gateway:
                                   (actor.agent_id, limit)).fetchall()
         return [{**dict(r), "body": json.loads(r["body"])} for r in rows]
 
+
+    def message_ack(self, actor: Principal, message_id: str) -> dict[str, Any]:
+        actor.require("message:read")
+        with self.tx() as db:
+            msg = db.execute("SELECT destination,read_at FROM messages WHERE id=?",
+                             (message_id,)).fetchone()
+            if not msg or (actor.agent_id != "operator" and msg["destination"] != actor.agent_id):
+                raise GatewayError("message not found", "NOT_FOUND")
+            if not msg["read_at"]:
+                stamp = now()
+                db.execute("UPDATE messages SET read_at=? WHERE id=?", (stamp, message_id))
+                self.audit(db, actor.agent_id, "message.ack", message_id, {})
+            else:
+                stamp = msg["read_at"]
+        return {"message_id": message_id, "acknowledged_at": stamp}
+
     def task_create(self, actor: Principal, assignee: str, payload: Any,
                     idempotency_key: str) -> dict[str, Any]:
         actor.require("task:create")
@@ -272,6 +288,26 @@ class Gateway:
               (task_id, actor.agent_id, assignee, data, idempotency_key, stamp, stamp))
             self.audit(db, actor.agent_id, "task.create", task_id, {"assignee": assignee})
         return {"task_id": task_id, "state": "queued", "deduplicated": False}
+
+
+    def task_inbox(self, actor: Principal, state: str = "queued",
+                   limit: int = 50) -> list[dict[str, Any]]:
+        actor.require("task:read")
+        if state not in ("queued", "running", "blocked", "succeeded", "failed"):
+            raise GatewayError("unsupported task state")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise GatewayError("limit must be 1..100")
+        with self.tx() as db:
+            if actor.agent_id == "operator":
+                rows = db.execute("SELECT * FROM tasks WHERE state=? ORDER BY created LIMIT ?",
+                                  (state, limit)).fetchall()
+            else:
+                rows = db.execute("""SELECT * FROM tasks WHERE state=? AND assignee=?
+                                     ORDER BY created LIMIT ?""",
+                                  (state, actor.agent_id, limit)).fetchall()
+        return [{**dict(r), "input": json.loads(r["input"]),
+                 "result": json.loads(r["result"]) if r["result"] is not None else None}
+                for r in rows]
 
     def task_get(self, actor: Principal, task_id: str) -> dict[str, Any]:
         actor.require("task:read")
