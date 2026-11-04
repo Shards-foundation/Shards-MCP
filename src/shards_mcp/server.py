@@ -80,6 +80,8 @@ TOOL_DEFS = [
      schema({}), False),
     ("system_status", "Admin only: inspect database and gateway counts; no raw credentials.",
      schema({}), True),
+    ("system_sanity_check", "Admin only: check SQLite integrity, foreign keys and audit hash chain.",
+     schema({}), True),
 ]
 
 TOOL_LIST = [
@@ -142,6 +144,7 @@ def dispatch(gateway: Gateway, principal: Principal, name: str, args: Any) -> An
         "schedule_create": lambda: gateway.schedule_create(principal, a["assignee"], a["payload"], a["interval_seconds"]),
         "schedule_tick": lambda: gateway.schedule_tick(principal),
         "system_status": lambda: status(gateway, principal),
+        "system_sanity_check": lambda: gateway.sanity_check(principal),
     }
     return calls[name]()
 
