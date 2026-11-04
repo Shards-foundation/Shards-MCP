@@ -4,9 +4,13 @@
 
 MCP JSON-RPC POST endpoint at /mcp, with bearer authentication. Tools may be called by clients that can send custom MCP HTTP requests. Generic HTTP clients can also call GET /v1/tools and POST /v1/tools/{name}, passing the same JSON arguments as an MCP tool call, with a bearer credential. This is a Shards-specific REST adapter, not an A2A protocol implementation. Agent-to-agent communication occurs through persisted message and task APIs; direct A2A protocol interoperability is planned but not yet implemented.
 
+## OAuth and ChatGPT remote integration status
+
+RFC 9728 protected-resource discovery and signed JWT verification are implemented in optional OAuth mode. Configure an external OAuth issuer and register the signed `sub` as a Shards agent through the **host-only operator CLI**. Remote token scopes can never exceed enrolled agent scopes. ChatGPT still requires a hosted HTTPS endpoint, supported workspace permissions, compatible authorisation-server discovery, and a real client login/tool-call test. There is no deployed hosted service or App Directory approval.
+
 ## ChatGPT platform
 
-ChatGPT supports remote custom MCP server connections subject to plan/workspace permissions. This version does not yet implement the OAuth 2.1 resource metadata and token validation expected for broad secure deployment. Do not claim that it is ready for directory submission, published, or approved.
+ChatGPT supports remote custom MCP server connections subject to plan/workspace permissions. An optional OAuth JWT resource-server implementation now provides protected-resource metadata and signed access-token validation, but needs an external configured issuer and verified deployment. Do not claim that it is ready for directory submission, published, or approved.
 
 Release checklist:
 1. Add externally accessible HTTPS plus fully compliant OAuth protected-resource discovery and token audience/scope validation.
