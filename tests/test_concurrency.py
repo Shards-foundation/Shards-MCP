@@ -57,6 +57,21 @@ class ConcurrencyTests(unittest.TestCase):
         self.assertEqual(self.g.audit_verify(self.root)["count"], start + 1)
         self.assertEqual(len(self.g.inbox(self.worker)), 1)
 
+    def test_replay_remains_idempotent_after_destination_revoked(self):
+        message = self.g.send(self.creator, self.worker.agent_id, {"notice": 1}, "delivery-key")
+        task = self.g.task_create(self.creator, self.worker.agent_id, {"action": "health"}, "task-key")
+        self.g.revoke(self.root, self.worker.agent_id)
+        replay_message = self.g.send(self.creator, self.worker.agent_id, {"notice": 1}, "delivery-key")
+        replay_task = self.g.task_create(self.creator, self.worker.agent_id, {"action": "health"}, "task-key")
+        self.assertEqual(replay_message["message_id"], message["message_id"])
+        self.assertTrue(replay_message["deduplicated"])
+        self.assertEqual(replay_task["task_id"], task["task_id"])
+        self.assertTrue(replay_task["deduplicated"])
+        with self.assertRaises(GatewayError):
+            self.g.send(self.creator, self.worker.agent_id, {"notice": 2}, "new-key")
+        with self.assertRaises(GatewayError):
+            self.g.task_create(self.creator, self.worker.agent_id, {"action": "health"}, "new-task")
+
     def test_distinct_concurrent_messages_preserve_audit_chain(self):
         start = self.g.audit_verify(self.root)["count"]
         def send(n):
