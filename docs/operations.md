@@ -16,6 +16,10 @@ After crash or outage, run task_scan_expired. Inspect downstream effects, then r
 
 Keep the database on persistent protected storage. Do not bind the container directly to a public address without an independent security gateway.
 
+## Remote OAuth configuration
+
+Set `SHARDS_AUTH_MODE=oauth`, `SHARDS_OAUTH_ISSUER`, `SHARDS_OAUTH_JWKS_URI`, `SHARDS_PUBLIC_URL=https://YOUR_HOST/mcp`, `SHARDS_BIND=0.0.0.0` and `SHARDS_ALLOW_REMOTE=1`. Install `shards-mcp[oauth]`. The OAuth server validates issuer, audience, signature, expiry and scopes, and maps the signed subject to an operator-enrolled agent. Local bearer tokens cannot authenticate in OAuth mode. The HTTP listener still requires an HTTPS reverse proxy, storage protection, backups and network-level rate limiting. This does not provide an OAuth authorisation server or automatic refresh tokens.
+
 ## Review operational controls
 
 Use `message_poll` to paginate all pending messages, `message_ack` after processing and `schedule_disable` to stop recurring tasks. Fetch verification evidence using `verification_get` with task-read authority.
