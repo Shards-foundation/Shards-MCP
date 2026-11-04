@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 from pathlib import Path
@@ -542,10 +543,26 @@ class Gateway:
         return {"task_id": task_id, "state": "queued"}
 
 
+    @staticmethod
+    def check_event_topic(actor: Principal, topic: str) -> None:
+        # Public shared topics are explicitly untrusted cross-agent broadcasts.
+        # Agent-prefixed topics are private to the authenticated principal.
+        # System topics are reserved for the operator.
+        if not isinstance(topic, str) or not 1 <= len(topic) <= 200 or not re.fullmatch(r"[a-z][a-z0-9_.-]*", topic):
+            raise GatewayError("invalid event topic")
+        if "*" in actor.scopes:
+            return
+        if topic.startswith("shared.") and len(topic) > len("shared."):
+            return
+        own_prefix = "agent." + actor.agent_id + "."
+        if topic.startswith(own_prefix) and len(topic) > len(own_prefix):
+            return
+        raise GatewayError("event topic access denied", "FORBIDDEN")
+
     def event_publish(self, actor: Principal, topic: str, body: Any,
                       idempotency_key: str, correlation_id: str | None = None) -> dict[str, Any]:
         actor.require("event:write")
-        self.required(topic, "topic")
+        self.check_event_topic(actor, topic)
         self.required(idempotency_key, "idempotency_key")
         if correlation_id is not None:
             self.required(correlation_id, "correlation_id")
@@ -575,14 +592,26 @@ class Gateway:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise GatewayError("limit must be 1..100")
         if topic is not None:
-            self.required(topic, "topic")
-        with self.tx() as db:
-            if topic is None:
-                rows = db.execute("SELECT * FROM events WHERE seq>? ORDER BY seq LIMIT ?",
-                                  (after_seq, limit)).fetchall()
+            self.check_event_topic(actor, topic)
+        with self.read_tx() as db:
+            if "*" in actor.scopes:
+                if topic is None:
+                    rows = db.execute("SELECT * FROM events WHERE seq>? ORDER BY seq LIMIT ?",
+                                      (after_seq, limit)).fetchall()
+                else:
+                    rows = db.execute("SELECT * FROM events WHERE seq>? AND topic=? ORDER BY seq LIMIT ?",
+                                      (after_seq, topic, limit)).fetchall()
             else:
-                rows = db.execute("SELECT * FROM events WHERE seq>? AND topic=? ORDER BY seq LIMIT ?",
-                                  (after_seq, topic, limit)).fetchall()
+                private_prefix = "agent." + actor.agent_id + "."
+                # Substring prefix avoids SQLite LIKE '_' wildcard ambiguity.
+                if topic is None:
+                    rows = db.execute("""SELECT * FROM events WHERE seq>?
+                      AND (substr(topic,1,7)='shared.' OR substr(topic,1,?)=?)
+                      ORDER BY seq LIMIT ?""",
+                      (after_seq, len(private_prefix), private_prefix, limit)).fetchall()
+                else:
+                    rows = db.execute("SELECT * FROM events WHERE seq>? AND topic=? ORDER BY seq LIMIT ?",
+                                      (after_seq, topic, limit)).fetchall()
         result = [{**dict(r), "body": json.loads(r["body"])} for r in rows]
         return {"events": result, "next_cursor": result[-1]["seq"] if result else after_seq}
 
@@ -602,8 +631,12 @@ class Gateway:
         actor.require("audit:read")
         if not isinstance(limit, int) or not 1 <= limit <= 200:
             raise GatewayError("limit must be 1..200")
-        with self.tx() as db:
-            rows = db.execute("SELECT * FROM audit ORDER BY seq DESC LIMIT ?", (limit,)).fetchall()
+        with self.read_tx() as db:
+            if "*" in actor.scopes:
+                rows = db.execute("SELECT * FROM audit ORDER BY seq DESC LIMIT ?", (limit,)).fetchall()
+            else:
+                rows = db.execute("SELECT * FROM audit WHERE actor=? ORDER BY seq DESC LIMIT ?",
+                                  (actor.agent_id, limit)).fetchall()
         return [{**dict(r), "details": json.loads(r["details"])} for r in rows]
 
     def audit_verify(self, actor: Principal) -> dict[str, Any]:
