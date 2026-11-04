@@ -4,6 +4,7 @@ Uses separate SQLite connections in each caller thread through Gateway.tx().
 No mocks of task locks or audit persistence.
 """
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import secrets
 import sqlite3
@@ -99,14 +100,36 @@ class MigrationTests(unittest.TestCase):
                 db.execute("""INSERT INTO tasks
                     (id,creator,assignee,state,input,created,updated)
                     VALUES ('old','origin','worker','queued','{}','2026-01-01','2026-01-01')""")
-            gateway = Gateway(database, secrets.token_urlsafe(48))
+                lease_anchor = (datetime.now(timezone.utc) - timedelta(minutes=100)).isoformat(timespec="microseconds")
+                lease_deadline = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(timespec="microseconds")
+                db.execute("""INSERT INTO tasks
+                    (id,creator,assignee,state,input,lease_until,created,updated)
+                    VALUES ('inflight','origin','worker','running','{}',?,?,?)""",
+                    (lease_deadline, lease_anchor, lease_anchor))
+            gateway_token = secrets.token_urlsafe(48)
+            gateway = Gateway(database, gateway_token)
             with gateway.read_tx() as db:
                 columns = {r["name"] for r in db.execute("PRAGMA table_info(tasks)")}
                 row = db.execute("SELECT id,input,state FROM tasks WHERE id='old'").fetchone()
                 versions = {r["name"] for r in db.execute("PRAGMA table_info(verifications)")}
+                migrated = db.execute("SELECT lease_started,updated FROM tasks WHERE id='inflight'").fetchone()
             self.assertIn("lease_started", columns)
             self.assertEqual(dict(row), {"id": "old", "input": "{}", "state": "queued"})
             self.assertIn("evidence", versions)
+            self.assertEqual(migrated["lease_started"], lease_anchor)
+            self.assertEqual(migrated["updated"], lease_anchor)
+            root_actor = gateway.authenticate(gateway_token)
+            worker = gateway.register(root_actor, "migration-worker", "test", [], ["task:update"])
+            worker_principal = gateway.authenticate(worker["token"])
+            with gateway.tx() as db:
+                db.execute("UPDATE tasks SET assignee=? WHERE id='inflight'", (worker["agent_id"],))
+            # This would incorrectly renew beyond two hours if migration lacked a fixed anchor.
+            with self.assertRaises(GatewayError):
+                gateway.task_renew(worker_principal, "inflight", lease_seconds=3600)
+            reloaded = Gateway(database, gateway_token)
+            with reloaded.read_tx() as db:
+                after = db.execute("SELECT lease_started FROM tasks WHERE id='inflight'").fetchone()
+            self.assertEqual(after["lease_started"], lease_anchor)
 
 
 if __name__ == "__main__":
