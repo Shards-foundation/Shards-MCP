@@ -17,6 +17,16 @@ The gateway coordinates agents; it does not itself run an AI model. Clients are 
 9. Sensitive credentials are excluded from list and audit results.
 10. Unsupported external actions fail closed rather than calling arbitrary upstream tools.
 
+## Review correction notes
+
+- Renewed task leases are audited and capped at two hours from claim.
+- Worker completion enters `reported`; a separately authorised principal must verify before success. The bootstrap operator is still privileged and can act as verifier.
+- Verification evidence is persisted and its hash included in the audit ledger.
+- Audit verification uses a read-only database cursor and requires operator privileges.
+- Audit mutation triggers block ordinary UPDATE/DELETE, not a compromised database administrator.
+- `message_poll` is cursor-based, unlike the convenience `message_inbox` view.
+- `schedule_list` and `schedule_disable` are available; revoked agents are skipped.
+
 ## Deliberate limits
 
 This is a **single-host foundation**. SQLite is not a distributed lock manager. No lease fencing tokens, A2A adapter, OAuth resource server, remote MCP tool federation, true snapshots or checkpointed model-process restoration exist yet.
