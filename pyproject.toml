@@ -14,6 +14,7 @@ keywords = ["mcp", "agents", "gateway", "audit", "orchestration"]
 
 [project.scripts]
 shards-mcp = "shards_mcp.server:main"
+shards-worker = "shards_mcp.worker:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
