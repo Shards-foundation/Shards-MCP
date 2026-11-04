@@ -124,5 +124,29 @@ class HttpTests(unittest.TestCase):
             safe_operation({"action": "shell", "command": "rm -rf /"})
 
 
+    def test_stdio_bridge_roundtrip(self):
+        import subprocess
+        import sys
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                        "clientInfo": {"name": "shards-stdio-test", "version": "1.0"}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+             "params": {"name": "system_status", "arguments": {}}},
+        ]
+        env = {**os.environ, "SHARDS_GATEWAY_URL": "http://127.0.0.1:%d" % self.server.server_port,
+               "SHARDS_AGENT_TOKEN": self.token}
+        proc = subprocess.run([sys.executable, "-m", "shards_mcp.stdio"],
+                              input="".join(json.dumps(req) + "\n" for req in requests),
+                              capture_output=True, text=True, env=env, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        responses = [json.loads(line) for line in proc.stdout.splitlines()]
+        self.assertEqual(len(responses), 3, proc.stdout)
+        self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "shards-mcp")
+        self.assertIn("agent_register", {entry["name"] for entry in responses[1]["result"]["tools"]})
+        self.assertEqual(responses[2]["result"]["structuredContent"]["agents"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
