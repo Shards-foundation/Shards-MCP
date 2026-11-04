@@ -35,7 +35,7 @@ export SHARDS_DB="./shards.db"
 shards-mcp
 ~~~
 
-The service binds to 127.0.0.1:8787 by default. PowerShell users should set environment variables using the $env: prefix.
+The bootstrap secret must be randomly generated (at least 32 characters and 12 distinct characters; these checks alone do not prove cryptographic entropy). The service binds to 127.0.0.1:8787 by default. PowerShell users should set environment variables using the $env: prefix.
 
 ## MCP smoke test
 
