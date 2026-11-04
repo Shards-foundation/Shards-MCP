@@ -10,6 +10,7 @@
 ## Implemented
 
 - Durable operational events with topic filters and monotonic cursor polling, separate from security audit entries.
+- Agent-private event topics `agent.<agent_id>.<topic>`, untrusted shared broadcasts `shared.<topic>`, and operator-only `system.*` topics; audit queries scoped to the authenticated actor.
 
 - MCP stdio bridge for compatible local AI runtimes, forwarding to the authenticated HTTP server.
 - MCP JSON-RPC 2.0 stateless HTTP at POST /mcp: initialize, ping, tools/list, tools/call. Authenticated generic HTTP clients may instead invoke POST /v1/tools/{name} with JSON arguments, or discover GET /v1/tools.
