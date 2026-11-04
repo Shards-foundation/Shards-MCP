@@ -1,3 +1,4 @@
+import secrets
 """Regressions for independent review of PR #1 (B1-B4 and transport hardening)."""
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
@@ -20,7 +21,7 @@ class ReviewCoreTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.temp.name, "state.sqlite")
-        self.token = "R" * 48
+        self.token = secrets.token_urlsafe(48)
         self.g = Gateway(self.path, self.token)
         self.root = self.g.authenticate(self.token)
         scopes = ["agent:heartbeat", "task:create", "task:read", "task:claim",
@@ -138,7 +139,7 @@ class ReviewCoreTests(unittest.TestCase):
 class ReviewHttpTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.token = "S" * 48
+        self.token = secrets.token_urlsafe(48)
         self.g = Gateway(os.path.join(self.tmp.name, "db.sqlite"), self.token)
         self.server = BoundedHTTPServer(("127.0.0.1", 0), make_handler(self.g, set()))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
