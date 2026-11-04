@@ -100,7 +100,9 @@ class ReviewCoreTests(unittest.TestCase):
     def test_stdio_rejects_excessively_nested_json(self):
         class FakeClient:
             pass
-        nested = "[" * 1300 + "0" + "]" * 1300
+        # The JSON parser depth threshold differs across Python versions.
+        # Ten thousand nested arrays exceeds supported safe recursion depth.
+        nested = "[" * 10000 + "0" + "]" * 10000
         result = request_line(FakeClient(),
                               '{"jsonrpc":"2.0","id":7,"method":"tools/list","params":' + nested + '}')
         self.assertEqual(json.loads(result)["error"]["code"], -32700)
