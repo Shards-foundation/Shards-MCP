@@ -24,7 +24,7 @@ def request_line(client: AgentClient, line: str) -> str | None:
             raise ValueError("invalid JSON-RPC request")
         if not isinstance(payload.get("method"), str):
             raise ValueError("missing JSON-RPC method")
-    except (ValueError, json.JSONDecodeError):
+    except (ValueError, json.JSONDecodeError, RecursionError):
         return canonical({"jsonrpc": "2.0", "id": None,
                           "error": {"code": -32700, "message": "Parse error"}})
     try:
