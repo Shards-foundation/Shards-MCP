@@ -274,13 +274,13 @@ class Gateway:
         self.required(idempotency_key, "idempotency_key")
         serialized = self.limit(body)
         with self.tx() as db:
-            self.agent_exists(db, destination)
             prev = db.execute("SELECT * FROM messages WHERE source=? AND idem=?",
                               (actor.agent_id, idempotency_key)).fetchone()
             if prev:
                 if prev["destination"] != destination or prev["body"] != serialized or prev["task_id"] != task_id:
                     raise GatewayError("idempotency key reused with different payload", "CONFLICT")
                 return {"message_id": prev["id"], "deduplicated": True}
+            self.agent_exists(db, destination)
             message_id = uid("msg")
             db.execute("""INSERT INTO messages
                  (id,source,destination,body,task_id,idem,created)
@@ -348,13 +348,12 @@ class Gateway:
         self.required(idempotency_key, "idempotency_key")
         data = self.limit(payload)
         with self.tx() as db:
-            self.agent_exists(db, assignee)
-            previous = db.execute("SELECT * FROM tasks WHERE creator=? AND idem=?",
-                                  (actor.agent_id, idempotency_key)).fetchone()
+            previous = db.execute("SELECT * FROM tasks WHERE creator=? AND idem=?",                                  (actor.agent_id, idempotency_key)).fetchone()
             if previous:
                 if previous["assignee"] != assignee or previous["input"] != data:
                     raise GatewayError("idempotency key reused with different task", "CONFLICT")
                 return {"task_id": previous["id"], "state": previous["state"], "deduplicated": True}
+            self.agent_exists(db, assignee)
             task_id = uid("tsk")
             stamp = now()
             db.execute("""INSERT INTO tasks
