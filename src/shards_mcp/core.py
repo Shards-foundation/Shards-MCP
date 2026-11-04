@@ -117,6 +117,10 @@ class Gateway:
                   actor TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL,
                   details TEXT NOT NULL, previous_hash TEXT NOT NULL, entry_hash TEXT NOT NULL
                 );
+                CREATE TRIGGER IF NOT EXISTS audit_reject_update BEFORE UPDATE ON audit
+                  BEGIN SELECT RAISE(ABORT, 'audit entries are immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS audit_reject_delete BEFORE DELETE ON audit
+                  BEGIN SELECT RAISE(ABORT, 'audit entries are immutable'); END;
             """)
             # Migration from existing experimental 0.1 databases.
             columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
@@ -603,18 +607,20 @@ class Gateway:
         return [{**dict(r), "details": json.loads(r["details"])} for r in rows]
 
     def audit_verify(self, actor: Principal) -> dict[str, Any]:
-        actor.require("audit:read")
+        # Full ledger scans are privileged and do not monopolise the SQLite writer.
+        actor.require("*")
         previous = "0" * 64
-        with self.tx() as db:
-            rows = db.execute("SELECT * FROM audit ORDER BY seq").fetchall()
-        for r in rows:
-            record = {"at": r["at"], "actor": r["actor"], "action": r["action"],
-                      "subject": r["subject"], "details": json.loads(r["details"])}
-            digest = hashlib.sha256((previous + canonical(record)).encode()).hexdigest()
-            if r["previous_hash"] != previous or r["entry_hash"] != digest:
-                return {"valid": False, "first_invalid_seq": r["seq"]}
-            previous = digest
-        return {"valid": True, "count": len(rows), "head": previous}
+        count = 0
+        with self.read_tx() as db:
+            for r in db.execute("SELECT * FROM audit ORDER BY seq"):
+                record = {"at": r["at"], "actor": r["actor"], "action": r["action"],
+                          "subject": r["subject"], "details": json.loads(r["details"])}
+                digest = hashlib.sha256((previous + canonical(record)).encode()).hexdigest()
+                if r["previous_hash"] != previous or r["entry_hash"] != digest:
+                    return {"valid": False, "first_invalid_seq": r["seq"]}
+                previous = digest
+                count += 1
+        return {"valid": True, "count": count, "head": previous}
 
     def schedule_create(self, actor: Principal, assignee: str, payload: Any,
                         interval_seconds: int) -> dict[str, Any]:
