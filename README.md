@@ -74,6 +74,29 @@ The package also installs the shards-worker command. Register a worker agent wit
 
 Supported example tasks have an input JSON object with action set to echo, sha256 or health. The worker will never execute arbitrary shell commands or external service actions. If a worker is interrupted, an operator must reconcile the expired task lease before retry.
 
+## Remote OAuth resource-server mode
+
+The gateway now supports an **optional signed-JWT resource-server mode**, separate from its local bearer-token mode. It is not an OAuth authorisation server. Install `pip install -e '.[oauth]'` and use `shards-mcp-admin register --oauth-subject SUBJECT` to bind the **exact signed OAuth `sub` claim** to a registered Shards identity. Register that identity with only the scopes it needs.
+
+Example operator configuration (placeholder issuer/host, not a deployed endpoint):
+
+~~~bash
+export SHARDS_AUTH_MODE=oauth
+export SHARDS_OAUTH_ISSUER=https://identity.example.com
+export SHARDS_OAUTH_JWKS_URI=https://identity.example.com/jwks.json
+export SHARDS_PUBLIC_URL=https://gateway.example.com/mcp
+export SHARDS_BIND=0.0.0.0
+export SHARDS_ALLOW_REMOTE=1
+# SHARDS_ADMIN_TOKEN and SHARDS_DB must also be set securely.
+shards-mcp
+~~~
+
+The configured identity provider must issue **signed JWT access tokens** with a verified issuer, `sub`, `aud` equal to `SHARDS_PUBLIC_URL`, `iat`, `exp`, and `scope` string containing the authorised gateway scopes. The server accepts RS256 and ES256; the JWKS address is pinned by the operator, never supplied by a token. Access-token scopes are intersected with the enrolled agent's scopes. The bootstrap credential and local worker tokens cannot authenticate to the OAuth network endpoints.
+
+The resource server exposes RFC 9728 metadata under `/.well-known/oauth-protected-resource` and adds a `resource_metadata` URL to HTTP 401 challenges.
+
+**Remote access requires a TLS reverse proxy and a compatible external OAuth provider.** Token issuance, consent/PKCE, refresh tokens and provider-specific integrations are not implemented by this gateway. Local signed-JWT integration tests passing does **not** mean a live ChatGPT plugin, a fully compatible identity-provider flow, or App Directory approval.
+
 ## Local stdio MCP bridge
 
 For Claude Desktop and other environments supporting stdio MCP clients, run shards-mcp-stdio as a local process with SHARDS_GATEWAY_URL pointing to the running service and SHARDS_AGENT_TOKEN containing a **least-privileged agent token**. The bridge forwards newline-delimited MCP JSON-RPC messages to the shared authenticated HTTP gateway. It does not use administrator credentials and does not bypass policy checks. Local stdio MCP support is separate from ChatGPT's hosted remote MCP connection requirements.
