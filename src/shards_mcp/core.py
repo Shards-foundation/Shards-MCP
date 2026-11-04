@@ -52,7 +52,7 @@ class Principal:
 SCOPES = (
     "agent:read", "agent:heartbeat", "message:send", "message:read",
     "task:create", "task:read", "task:claim", "task:update",
-    "checkpoint:write", "audit:read",
+    "checkpoint:write", "audit:read", "event:read", "event:write",
 )
 
 
@@ -93,6 +93,13 @@ class Gateway:
                   interval_seconds INTEGER NOT NULL, next_due TEXT NOT NULL,
                   enabled INTEGER NOT NULL DEFAULT 1, created TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS events (
+                  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                  source TEXT NOT NULL, topic TEXT NOT NULL, body TEXT NOT NULL,
+                  correlation_id TEXT, idem TEXT NOT NULL, created TEXT NOT NULL,
+                  UNIQUE(source, idem)
+                );
+                CREATE INDEX IF NOT EXISTS idx_events_topic_seq ON events(topic,seq);
                 CREATE TABLE IF NOT EXISTS audit (
                   seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL,
                   actor TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL,
@@ -416,6 +423,51 @@ class Gateway:
                        (now(), task_id))
             self.audit(db, actor.agent_id, "task.reconcile", task_id, {"explanation": explanation})
         return {"task_id": task_id, "state": "queued"}
+
+
+    def event_publish(self, actor: Principal, topic: str, body: Any,
+                      idempotency_key: str, correlation_id: str | None = None) -> dict[str, Any]:
+        actor.require("event:write")
+        self.required(topic, "topic")
+        self.required(idempotency_key, "idempotency_key")
+        if correlation_id is not None:
+            self.required(correlation_id, "correlation_id")
+        data = self.limit(body)
+        with self.tx() as db:
+            existing = db.execute("SELECT seq,topic,body,correlation_id FROM events WHERE source=? AND idem=?",
+                                  (actor.agent_id, idempotency_key)).fetchone()
+            if existing:
+                if existing["topic"] != topic or existing["body"] != data or existing["correlation_id"] != correlation_id:
+                    raise GatewayError("idempotency key reused with different event", "CONFLICT")
+                return {"event_seq": existing["seq"], "deduplicated": True}
+            row = db.execute("""INSERT INTO events
+              (source,topic,body,correlation_id,idem,created)
+              VALUES (?,?,?,?,?,?)""",
+              (actor.agent_id, topic, data, correlation_id, idempotency_key, now()))
+            seq = row.lastrowid
+            self.audit(db, actor.agent_id, "event.publish", str(seq),
+                       {"topic": topic, "correlation_id": correlation_id,
+                        "payload_sha256": hashlib.sha256(data.encode()).hexdigest()})
+        return {"event_seq": seq, "deduplicated": False}
+
+    def event_poll(self, actor: Principal, after_seq: int = 0, limit: int = 50,
+                   topic: str | None = None) -> dict[str, Any]:
+        actor.require("event:read")
+        if type(after_seq) is not int or after_seq < 0:
+            raise GatewayError("after_seq must be a non-negative integer")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise GatewayError("limit must be 1..100")
+        if topic is not None:
+            self.required(topic, "topic")
+        with self.tx() as db:
+            if topic is None:
+                rows = db.execute("SELECT * FROM events WHERE seq>? ORDER BY seq LIMIT ?",
+                                  (after_seq, limit)).fetchall()
+            else:
+                rows = db.execute("SELECT * FROM events WHERE seq>? AND topic=? ORDER BY seq LIMIT ?",
+                                  (after_seq, topic, limit)).fetchall()
+        result = [{**dict(r), "body": json.loads(r["body"])} for r in rows]
+        return {"events": result, "next_cursor": result[-1]["seq"] if result else after_seq}
 
     def audit_list(self, actor: Principal, limit: int = 50) -> list[dict[str, Any]]:
         actor.require("audit:read")
