@@ -1,4 +1,8 @@
 
+## OAuth remote-mode security boundary
+
+Remote mode now requires a trusted, pinned HTTPS JWKS issuer, a canonical HTTPS MCP audience, signed JWT access tokens and an enrolled external subject. Scopes from the signed token are intersected with stored agent scopes. It does not implement an authorisation server, opaque token introspection, global replay protection, identity-provider operational controls or OAuth client consent workflows. Do not expose the gateway without TLS termination and network controls.
+
 ## Review-identified residual risks
 
 - Agent creation and revocation are deliberately unavailable on the network MCP/REST tool surfaces. The local `shards-mcp-admin` command writes a new bearer token to an exclusive owner-only file instead of returning it to an LLM. Never connect the bootstrap administrator credential to a model; migrate remote operator workflows to OAuth before deployment.
