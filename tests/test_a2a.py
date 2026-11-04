@@ -114,6 +114,40 @@ class A2ATests(unittest.TestCase):
                                   self.rpc("GetTask", {"id": task_id}))
         self.assertEqual(no_access[1]["error"]["code"], -32001)
 
+    def test_separate_process_reference_worker_completes_a2a_message(self):
+        import os
+        import subprocess
+        import sys
+        worker = self.gateway.register(self.root, "a2a-reference-process", "test",
+                                       ["a2a/1.0"], ["agent:heartbeat", "task:read",
+                                       "task:claim", "task:update", "checkpoint:write"])
+        endpoint = "/a2a/agents/" + worker["agent_id"]
+        message = self.rpc("SendMessage", self.message("process-1", "Hello from A2A"))
+        status, created = self.request("POST", endpoint, self.sender["token"], message)
+        self.assertEqual(status, 200)
+        task_id = created["result"]["task"]["id"]
+
+        env = {**os.environ, "SHARDS_GATEWAY_URL": "http://127.0.0.1:%d" % self.srv.server_port,
+               "SHARDS_AGENT_TOKEN": worker["token"]}
+        env.pop("SHARDS_ADMIN_TOKEN", None)
+        child = subprocess.run([sys.executable, "-m", "shards_mcp.worker", "--once"],
+                               capture_output=True, text=True, env=env, timeout=15)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertNotIn(worker["token"], child.stdout + child.stderr)
+        reported = self.request("POST", endpoint, self.sender["token"],
+                                self.rpc("GetTask", {"id": task_id}))[1]["result"]
+        self.assertEqual(reported["status"]["state"], "TASK_STATE_WORKING")
+        self.assertNotIn("artifacts", reported)
+
+        reviewer = self.gateway.authenticate(self.reviewer["token"])
+        self.gateway.task_verify(reviewer, task_id, True,
+                                 {"summary": "A2A deterministic echo output matched input"})
+        complete = self.request("POST", endpoint, self.sender["token"],
+                                self.rpc("GetTask", {"id": task_id}))[1]["result"]
+        self.assertEqual(complete["status"]["state"], "TASK_STATE_COMPLETED")
+        result = complete["artifacts"][0]["parts"][0]["data"]
+        self.assertEqual(result, {"text": "Hello from A2A", "worker": "deterministic-echo"})
+
     def test_explicit_version_and_unsupported_feature_rejection(self):
         send = self.rpc("SendMessage", self.message("mid-2", "hello"))
         self.assertEqual(self.request("POST", self.path, self.sender["token"], send,
