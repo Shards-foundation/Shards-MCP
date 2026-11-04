@@ -13,8 +13,8 @@
 
 ## Independent review — 4 November 2026
 
-B1-B4 addressed in PR #1: audited bounded leases, verified non-empty evidence retention, read-only authentication and bounded HTTP parsing, and explicit Docker remote binding opt-in. Added tests cover these invariants, plus cursor-based messaging, schedulers, audit immutability and credential hygiene.
+B1-B4 addressed in PR #1: audited bounded leases, verified non-empty evidence retention, read-only authentication and bounded HTTP parsing, and explicit Docker remote binding opt-in. Regression tests exercise these findings, together with cursor-based messaging, scheduling, audit integrity and credential hygiene. This is partial coverage; passing CI is not a complete formal security proof.
 
-Still pending: fine-grained event/audit scopes and topic ACLs, per-agent quotas, separate operator provisioning outside LLM transcripts, OAuth resource-server support, independent audit anchoring, distributed storage, deployment and multi-platform interoperability.
+Still pending: fine-grained per-topic grants beyond the current private/shared/system namespaces, per-agent quotas and retention, OAuth resource-server support, independent audit anchoring, distributed storage, deployment and multi-platform interoperability. Local out-of-band agent provisioning and agent-level audit isolation are implemented.
 
 Do not mark as production-ready until the applicable phases have independent evidence. Implementation presence is not verification.
