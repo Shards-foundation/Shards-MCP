@@ -74,6 +74,7 @@ No arbitrary commands, deployments, trades, transfers or external requests are e
 - [Integration requirements](docs/integrations.md)
 - [Operations and recovery](docs/operations.md)
 - [Release roadmap](docs/roadmap.md)
+- [Portable plugin manifests and installation](docs/plugin-packaging.md)
 
 ## Test
 
