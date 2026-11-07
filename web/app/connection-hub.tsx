@@ -20,7 +20,7 @@ function configuration(client: Client, transport: Transport, endpoint: string) {
       command: "shards-mcp-stdio",
       env: {
         SHARDS_GATEWAY_URL: endpoint,
-        SHARDS_AGENT_TOKEN: "<SCOPED_AGENT_TOKEN>",
+        SHARDS_AGENT_TOKEN: "<GATEWAY_ACCESS_TOKEN>",
       },
     };
     if (client === "vscode") return JSON.stringify({ servers: { shards: { type: "stdio", ...server } } }, null, 2);
@@ -30,7 +30,7 @@ function configuration(client: Client, transport: Transport, endpoint: string) {
       "",
       "[mcp_servers.shards.env]",
       `SHARDS_GATEWAY_URL = "${endpoint}"`,
-      'SHARDS_AGENT_TOKEN = "<SCOPED_AGENT_TOKEN>"',
+      'SHARDS_AGENT_TOKEN = "<GATEWAY_ACCESS_TOKEN>"',
     ].join("\n");
     return JSON.stringify({ mcpServers: { shards: server } }, null, 2);
   }
@@ -42,11 +42,11 @@ function configuration(client: Client, transport: Transport, endpoint: string) {
   if (client === "vscode") return JSON.stringify({
     servers: { shards: { type: "http", url: endpoint.replace(/\/$/, "") + "/mcp",
       headers: { Authorization: "Bearer ${input:shardsAgentToken}" } } },
-    inputs: [{ id: "shardsAgentToken", type: "promptString", description: "Scoped Shards agent token", password: true }],
+    inputs: [{ id: "shardsAgentToken", type: "promptString", description: "Gateway access token (local or OAuth, depending on mode)", password: true }],
   }, null, 2);
   return JSON.stringify({ mcpServers: {
     shards: { type: "http", url: endpoint.replace(/\/$/, "") + "/mcp",
-      headers: { Authorization: "Bearer <SCOPED_AGENT_TOKEN>" } },
+      headers: { Authorization: "Bearer <GATEWAY_ACCESS_TOKEN>" } },
   } }, null, 2);
 }
 
@@ -91,13 +91,13 @@ export function ConnectionHub() {
     <p><strong>Setup:</strong> {instructions[client]}</p>
     <p className="muted">{selected.note} These examples are starting points, not verified against every IDE release.</p>
     {transport === "stdio" && <p className="muted">Prerequisite: install the Shards MCP Python package on the same machine as the IDE, so the <code>shards-mcp-stdio</code> executable is on PATH. The gateway itself may run elsewhere.</p>}
-    {transport === "remote" && <p className="muted">Prerequisite: the selected client must support Streamable HTTP MCP and bearer-token authentication. The gateway must be reachable from the IDE; localhost refers to the IDE machine.</p>}
+    {transport === "remote" && <p className="muted">Prerequisite: the selected client must support Streamable HTTP MCP and bearer-token authentication. The gateway must be reachable from the IDE; localhost refers to the IDE machine. Off-loopback deployments require SHARDS_AUTH_MODE=oauth: enrol the identity with the admin CLI --oauth-subject option and obtain a scoped access JWT from the trusted issuer. Local agent tokens are rejected in OAuth mode.</p>}
     {!valid ? <p role="alert">Use an HTTPS gateway URL or local loopback HTTP, with no path, query or embedded credentials.</p> :
       <><pre className="snippet"><code>{snippet}</code></pre>
       <button className="action" type="button" onClick={() => {
         void navigator.clipboard.writeText(snippet).then(() => setCopied(true)).catch(() => setCopied(false));
       }}>{copied ? "Copied" : "Copy configuration"}</button></>}
-    <p className="muted">Never use the bootstrap administrator token. Provision a different least-privilege agent token for each IDE, and store it in the client's secret configuration. JSON examples contain placeholders, not live credentials.</p>
+    <p className="muted">Never use the bootstrap administrator token. Local-token mode requires a separate least-privilege token per IDE; OAuth mode requires an issuer-signed scoped access JWT for an enrolled subject. Store credentials securely. JSON examples contain placeholders, not live credentials.</p>
     <p className="muted">Validate the connection with <code>shards-mcp-doctor --protocol both --json</code> using that client's scoped credential from a trusted machine.</p>
   </section>;
 }
