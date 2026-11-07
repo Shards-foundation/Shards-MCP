@@ -165,9 +165,9 @@ shards-a2a-doctor --target-agent agt_REPLACE_WITH_ENROLLED_ID \
   --url http://127.0.0.1:8787 --token-file "$HOME/.config/shards/reader.token" --json
 ~~~
 
-This requires agent:read and task:read on a **scoped agent** credential;
+This verifies the caller is a scoped agent through the existing read-only MCP agent_identity contract, then requires agent:read and task:read on that credential;
 it rejects admin tokens, non-loopback HTTP, redirects and malformed
-response envelopes. The random GetTask probe must return task-not-found
+response envelopes, missing bearer security requirements and invalid JSON-RPC error messages. The random GetTask probe must return task-not-found
 rather than a successful task response or permission error. The
 diagnostic cannot prove SendMessage/CancelTask, streaming, multi-turn
 interoperability or full protocol conformance.
