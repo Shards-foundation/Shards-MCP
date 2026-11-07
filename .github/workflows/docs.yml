@@ -1,0 +1,42 @@
+name: Documentation and deterministic demo
+
+on:
+  pull_request:
+    paths:
+      - "**/*.md"
+      - "scripts/docs_check.py"
+      - "scripts/demo_local.py"
+      - "tests/test_documentation.py"
+      - ".github/workflows/docs.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**/*.md"
+      - "scripts/docs_check.py"
+      - "scripts/demo_local.py"
+      - "tests/test_documentation.py"
+      - ".github/workflows/docs.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    name: Docs links, skill contracts and local demo
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install project with no external OAuth provider
+        run: python -m pip install -e .
+      - name: Validate doc links and skill metadata
+        run: python scripts/docs_check.py
+      - name: Safe deterministic agent demo
+        run: python scripts/demo_local.py
+      - name: Regression suite
+        run: python -m unittest discover -s tests -p 'test_documentation.py' -v
