@@ -88,15 +88,15 @@ def safe_operation(payload: object) -> dict:
 
 def process_once(client: AgentClient) -> int:
     client.call("agent_heartbeat", {})
-    queue = client.call("task_inbox", {"state": "queued", "limit": 10})
     completed = 0
-    for task in queue:
+    # Claim-and-fetch is one atomic server transaction: a concurrent worker
+    # cannot take the same task between an inbox poll and separate lease claim.
+    for _ in range(10):
+        claimed = client.call("task_claim_next", {"lease_seconds": 60})
+        if not claimed["claimed"]:
+            break
+        task = claimed["task"]
         task_id = task["id"]
-        try:
-            client.call("task_claim", {"task_id": task_id, "lease_seconds": 60})
-        except RuntimeError:
-            # Another worker can have claimed it in a concurrent poll.
-            continue
         try:
             client.call("checkpoint_write", {"task_id": task_id, "body": {"stage": "started"}})
             result = safe_operation(task["input"])

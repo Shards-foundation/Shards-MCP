@@ -69,6 +69,8 @@ TOOL_DEFS = [
      schema({"state": S, "limit": INT}), True),
     ("task_cancel", "Creator or operator: cancel a queued task before worker claim; cannot stop running work.",
      schema({"task_id": S}, ("task_id",)), False),
+    ("task_claim_next", "Atomically claim the next queued assignment and return its input. Requires both task:read and task:claim.",
+     schema({"lease_seconds": INT}), False),
     ("task_claim", "Claim assigned queued task with a bounded lease.",
      schema({"task_id": S, "lease_seconds": INT}, ("task_id",)), False),
     ("task_renew", "Renew an active task lease.",
@@ -124,7 +126,7 @@ TOOL_SCOPES = {
     "message_ack": "message:read", "message_poll": "message:read",
     "task_create": "task:create", "task_get": "task:read",
     "task_inbox": "task:read", "task_cancel": "task:cancel",
-    "task_claim": "task:claim",
+    "task_claim": "task:claim", "task_claim_next": "task:claim",
     "task_renew": "task:update", "task_complete": "task:update",
     "task_verify": "task:verify", "verification_get": "task:read",
     "checkpoint_write": "checkpoint:write", "checkpoint_get": "task:read",
@@ -142,8 +144,12 @@ if set(TOOL_SCOPES) != set(SCHEMAS):
 def visible_tools(principal: Principal) -> list[dict[str, Any]]:
     if "*" in principal.scopes:
         return TOOL_LIST
-    return [tool for tool in TOOL_LIST if (TOOL_SCOPES[tool["name"]] in principal.scopes
-            or TOOL_SCOPES[tool["name"]] == "__authenticated__")]
+    return [
+        tool for tool in TOOL_LIST
+        if (TOOL_SCOPES[tool["name"]] in principal.scopes
+            or TOOL_SCOPES[tool["name"]] == "__authenticated__")
+        and (tool["name"] != "task_claim_next" or "task:read" in principal.scopes)
+    ]
 
 
 def decode_auth(value: str) -> str:
@@ -238,6 +244,7 @@ def dispatch(gateway: Gateway, principal: Principal, name: str, args: Any) -> An
         "task_get": lambda: gateway.task_get(principal, a["task_id"]),
         "task_inbox": lambda: gateway.task_inbox(principal, a.get("state", "queued"), a.get("limit", 50)),
         "task_cancel": lambda: gateway.task_cancel(principal, a["task_id"]),
+        "task_claim_next": lambda: gateway.task_claim_next(principal, a.get("lease_seconds", 60)),
         "task_claim": lambda: gateway.task_claim(principal, a["task_id"], a.get("lease_seconds", 60)),
         "task_renew": lambda: gateway.task_renew(principal, a["task_id"], a.get("lease_seconds", 60)),
         "task_complete": lambda: gateway.task_complete(principal, a["task_id"], a["success"], a["result"]),

@@ -128,6 +128,10 @@ class Gateway:
             if "oauth_subject" not in agent_columns:
                 db.execute("ALTER TABLE agents ADD COLUMN oauth_subject TEXT")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_oauth_subject ON agents(oauth_subject)")
+            # Stable FIFO retrieval of an agent's queued work at constant
+            # index lookup cost; also applies to migrated databases.
+            db.execute("""CREATE INDEX IF NOT EXISTS idx_tasks_claim_next
+                          ON tasks(assignee, state, created, id)""")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}
             if "lease_started" not in columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN lease_started TEXT")
@@ -450,6 +454,45 @@ class Gateway:
             self.audit(db, actor.agent_id, "task.cancel", task_id,
                        {"reason": "unclaimed"})
         return {"task_id": task_id, "state": "canceled", "already_canceled": False}
+
+    def task_claim_next(self, actor: Principal, lease_seconds: int = 60) -> dict[str, Any]:
+        """Atomically select and claim the next assigned FIFO task.
+
+        Requires both task:read and task:claim: the returned envelope contains
+        task input and must not bypass a principal's task-read entitlement.
+        Multiple workers or cancellation requests serialize on BEGIN IMMEDIATE.
+        No queued work returns a read-only empty result, not an audit event.
+        """
+        actor.require("task:claim")
+        actor.require("task:read")
+        if type(lease_seconds) is not int or not 15 <= lease_seconds <= 3600:
+            raise GatewayError("lease_seconds must be 15..3600")
+        with self.tx() as db:
+            row = db.execute(
+                """SELECT * FROM tasks WHERE assignee=? AND state='queued'
+                   ORDER BY created, id LIMIT 1""",
+                (actor.agent_id,),
+            ).fetchone()
+            if row is None:
+                return {"claimed": False, "task": None}
+            started = now()
+            expiry = after(lease_seconds)
+            db.execute("""UPDATE tasks SET state='running', lease_until=?, lease_started=?,
+                          attempts=attempts+1, updated=? WHERE id=?""",
+                       (expiry, started, started, row["id"]))
+            self.audit(db, actor.agent_id, "task.claim", row["id"],
+                       {"lease_until": expiry, "mode": "next"})
+            task = {
+                "id": row["id"],
+                "creator": row["creator"],
+                "assignee": row["assignee"],
+                "state": "running",
+                "input": json.loads(row["input"]),
+                "lease_until": expiry,
+                "lease_started": started,
+                "attempts": row["attempts"] + 1,
+            }
+        return {"claimed": True, "task": task}
 
     def task_claim(self, actor: Principal, task_id: str, lease_seconds: int = 60) -> dict[str, Any]:
         actor.require("task:claim")
