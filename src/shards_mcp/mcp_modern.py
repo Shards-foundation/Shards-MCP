@@ -100,10 +100,11 @@ def process_modern(
     if not isinstance(meta, dict):
         return error(-32602, "Missing request metadata", request_id)
     requested = meta.get(PROTOCOL_VERSION_KEY)
-    if requested != MODERN_VERSION:
-        if isinstance(requested, str):
-            return unsupported(requested, request_id)
+    if not isinstance(requested, str):
         return error(-32602, "Invalid protocol metadata", request_id)
+    if requested != MODERN_VERSION:
+        return error(HEADER_MISMATCH, "Header mismatch: protocol version",
+                     request_id)
     if not isinstance(meta.get(CLIENT_CAPABILITIES_KEY), dict):
         return error(-32602, "Missing client capabilities", request_id)
     client_info = meta.get("io.modelcontextprotocol/clientInfo")
