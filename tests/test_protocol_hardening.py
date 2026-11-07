@@ -71,6 +71,41 @@ class ProtocolHardeningTests(unittest.TestCase):
                 self.assertEqual(status, 400, payload)
                 self.assertIn("unsupported", payload["error"])
 
+    def test_get_mcp_probe_validates_origin_and_version_before_405(self):
+        c = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            c.request("GET", "/mcp", headers={
+                "MCP-Protocol-Version": "2026-07-28",
+                "Origin": "https://trusted.example",
+            })
+            response = c.getresponse()
+            self.assertEqual(response.status, 400)
+            response.read()
+        finally:
+            c.close()
+        c = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            c.request("GET", "/mcp", headers={
+                "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+                "Origin": "https://untrusted.example",
+            })
+            response = c.getresponse()
+            self.assertEqual(response.status, 403)
+            response.read()
+        finally:
+            c.close()
+        c = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            c.request("GET", "/mcp", headers={
+                "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+                "Origin": "https://trusted.example",
+            })
+            response = c.getresponse()
+            self.assertEqual(response.status, 405)
+            response.read()
+        finally:
+            c.close()
+
     def test_ambiguous_protocol_content_length_and_auth_headers_rejected(self):
         # The second version header must never be silently ignored.
         status, _ = self.raw(self.ping(), [
