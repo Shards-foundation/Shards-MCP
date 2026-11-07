@@ -10,7 +10,7 @@ on:
       - "web/**"
       - ".github/workflows/web.yml"
 permissions:
-  contents: write
+  contents: read
 jobs:
   console:
     runs-on: ubuntu-latest
@@ -28,27 +28,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
-      - name: Capture resolved dependency lockfile
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: web-package-lock
-          path: web/package-lock.json
-          retention-days: 1
-      - name: Commit registry-resolved lockfile to this PR branch
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/web-auth-control-plane-foundation-20261107'
-        working-directory: .
-        env:
-          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add web/package-lock.json
-          if ! git diff --cached --quiet; then
-            git commit -m "build(web): commit registry-resolved dependency lockfile"
-            git push origin "HEAD:refs/heads/$PR_BRANCH"
-          fi
+        run: npm ci --no-audit --no-fund
       - name: Typecheck
         run: npm run typecheck
       - name: Build
