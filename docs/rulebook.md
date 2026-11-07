@@ -12,7 +12,7 @@ This rulebook is normative for project operators and automation. It **does not r
 
 ## Task state machine
 
-`queued -> running -> reported -> succeeded` requires claim + worker report + **independent reviewer**. Worker failure may lead to `failed`; pre-claim creator/operator cancellation leads to `cancelled`. Expired/uncertain leases become `blocked` pending documented reconciliation. Do not infer success from a checkpoint or a worker's optimistic result.
+`queued -> running -> reported -> succeeded` requires claim + worker report + **independent reviewer**. Worker failure may lead to `failed`; pre-claim creator/operator cancellation leads to `canceled` (the exact API state spelling). Expired/uncertain leases become `blocked` pending documented reconciliation. Do not infer success from a checkpoint or a worker's optimistic result.
 
 ## Idempotency and side effects
 
