@@ -37,6 +37,8 @@ jobs:
         run: python -c "import mcp, httpx2; from mcp import Client; from mcp.client.streamable_http import streamable_http_client"
       - name: Unit and HTTP tests
         run: python -m unittest discover -s tests -v
+      - name: Cross-runtime end-to-end contract (MCP, stdio, worker, restart)
+        run: python -m unittest discover -s tests -p 'test_gateway_e2e.py' -v
       - name: Import smoke test
         run: python -c "import shards_mcp; from shards_mcp.server import TOOL_LIST; assert len(TOOL_LIST) >= 15"
       - name: Verify distributable wheel and sdist
