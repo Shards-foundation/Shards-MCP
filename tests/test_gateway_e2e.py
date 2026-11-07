@@ -162,7 +162,7 @@ class GatewayInteropE2ETests(unittest.TestCase):
         })
         events = self.assert_ok(created, "event_poll", {"after_seq": 0})
         self.assertEqual(len(events["events"]), 1)
-        self.assertEqual(events["events"][0]["seq"], event["sequence"])
+        self.assertEqual(events["events"][0]["seq"], event["event_seq"])
 
         task_args = {
             "assignee": self.worker["agent_id"],
