@@ -52,12 +52,18 @@ class AgentClient:
         }, method="POST")
         try:
             with self.opener.open(req, timeout=15) as res:
-                value = json.loads(res.read(262145))
+                raw = res.read(262145)
         except HTTPError as exc:
             # Deliberately do not include supplied authentication headers.
             raise RuntimeError("gateway tool call failed (HTTP %d)" % exc.code) from None
-        if not value.get("ok"):
-            raise RuntimeError("gateway rejected tool call")
+        if len(raw) > 262144:
+            raise RuntimeError("gateway response exceeds worker size limit")
+        try:
+            value = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            raise RuntimeError("gateway returned invalid JSON") from None
+        if not isinstance(value, dict) or value.get("ok") is not True or "result" not in value:
+            raise RuntimeError("gateway returned an invalid tool response")
         return value["result"]
 
 
