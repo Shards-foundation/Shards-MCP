@@ -481,12 +481,17 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                     candidate_id = payload.get("id") if isinstance(payload, dict) else None
                     if type(candidate_id) not in (str, int, float):
                         candidate_id = None
+                    version_header = self.headers.get("MCP-Protocol-Version")
+                    if version_header is not None and declared_version != version_header:
+                        return self.respond(*modern_error(
+                            -32020, "Header mismatch: protocol version", candidate_id,
+                        ))
                     if declared_version not in SUPPORTED_VERSIONS:
                         return self.respond(*unsupported(
                             declared_version if isinstance(declared_version, str) else None,
                             candidate_id,
                         ))
-                    if declared_version != self.headers.get("MCP-Protocol-Version"):
+                    if version_header is None:
                         return self.respond(*modern_error(
                             -32020, "Header mismatch: protocol version", candidate_id,
                         ))
