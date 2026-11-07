@@ -173,7 +173,7 @@ shards-a2a-doctor --url http://127.0.0.1:8787 \
   --token-file "$HOME/.config/shards/reader.token" --json
 ~~~
 
-Requires a separate agent credential with agent:read and task:read.
+Requires a separate agent credential with agent:read and task:read. It also verifies scoped agent identity through Shards' read-only MCP agent_identity workflow, rejecting an operator token even when the local SHARDS_ADMIN_TOKEN variable is absent.
 It rejects off-loopback plaintext, redirects, malformed responses and
 insufficient permissions. Success verifies only this read-only slice of
 A2A v1.0 for the configured connection, not general interoperability.
