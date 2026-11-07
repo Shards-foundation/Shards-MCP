@@ -20,6 +20,30 @@ enrol other agents or change permissions. Every authenticated agent may call it.
 MCP exposes tools to an AI runtime; A2A delegates work between agents. These
 interfaces must not be confused with unrestricted tool execution.
 
+## HTTP protocol boundary and version support
+
+The gateway implements the **MCP 2025-11-25 tool-server subset**, not the
+newer MCP 2026-07-28 server/discover lifecycle. This is a protocol-version
+compatibility statement, not a blanket claim of compliance with the newest
+MCP revision.
+
+For /mcp requests, an explicitly supplied MCP-Protocol-Version header must
+be exactly 2025-11-25; unsupported values and duplicate version headers return
+HTTP 400. An absent header remains accepted for backward compatibility with
+older clients and the local stdio bridge. Clients should use the version
+returned by initialize.
+
+HTTP POST requests with ambiguous duplicate Content-Length or Authorization
+headers are rejected. Duplicate Origin headers are rejected even when the
+first one appears allowlisted. Payloads containing duplicate JSON object keys
+are rejected rather than allowing last-key-wins ambiguity. JSON-RPC request
+IDs must be a scalar string, number or null; booleans, arrays and objects
+are invalid. notifications/initialized must not carry a request ID.
+
+The dedicated protocol-hardening regressions run in regular CI discovery,
+alongside the official MCP SDK interoperability test. This does not replace
+real public HTTPS and OAuth interoperability testing.
+
 ## Cancellation semantics across clients
 
 The scoped MCP/REST **task_cancel** tool requires task:cancel and lets the
