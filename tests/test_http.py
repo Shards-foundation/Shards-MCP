@@ -73,6 +73,10 @@ class HttpTests(unittest.TestCase):
     def test_rest_bridge_and_version_guard(self):
         status, data = self.req("POST", "/mcp", self.rpc("initialize"), self.token,
                                 {"MCP-Protocol-Version": "2026-07-28"})
+        self.assertEqual(status, 400)
+        self.assertIn("unsupported", data["error"])
+        status, data = self.req("POST", "/mcp", self.rpc("initialize"), self.token,
+                                {"MCP-Protocol-Version": "2025-11-25"})
         self.assertEqual(status, 200)
         self.assertEqual(data["result"]["protocolVersion"], "2025-11-25")
         status, available = self.req("GET", "/v1/tools", token=self.token)

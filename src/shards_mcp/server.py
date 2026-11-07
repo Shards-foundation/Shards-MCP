@@ -11,6 +11,7 @@ import re
 import socket
 import threading
 import json
+import math
 import sqlite3
 import os
 import sys
@@ -24,6 +25,9 @@ from .oauth import OAuthResourceServer
 from .a2a import A2AAdapter
 from .observability import RequestMetrics, route_class
 from .config import admin_token_from_environment
+
+
+MCP_PROTOCOL_VERSION = "2025-11-25"
 
 
 def schema(properties: dict[str, dict[str, Any]], required: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -145,6 +149,23 @@ def decode_auth(value: str) -> str:
 
 def reject_nonfinite(value: str) -> None:
     raise ValueError("non-finite JSON constant")
+
+
+def reject_overflowing_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON numeric value")
+    return parsed
+
+
+def reject_duplicate_properties(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """JSON payloads with ambiguous duplicate properties must fail closed."""
+    obj: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate JSON object property")
+        obj[key] = value
+    return obj
 
 
 class BoundedHTTPServer(ThreadingHTTPServer):
@@ -335,6 +356,12 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                 except sqlite3.Error:
                     return self.respond(503, {"status": "not_ready"})
             if self.path == "/mcp":
+                origins = self.headers.get_all("Origin", [])
+                if len(origins) > 1 or (origins and origins[0] not in allowed_origins):
+                    return self.respond(403, {"error": "origin denied"})
+                versions = self.headers.get_all("MCP-Protocol-Version", [])
+                if len(versions) > 1 or (versions and versions[0] != MCP_PROTOCOL_VERSION):
+                    return self.respond(400, {"error": "unsupported MCP protocol version"})
                 return self.respond(405, {"error": "GET streaming not supported; use POST"}, {"Allow": "POST"})
             card_target = a2a.route(self.path, card=True) if a2a else None
             if card_target:
@@ -374,9 +401,17 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                 return self.respond(404, {"error": "not found"})
             # A client may probe with a newer version; initialize advertises the
             # version this implementation actually implements.
-            origin = self.headers.get("Origin")
-            if origin and origin not in allowed_origins:
+            origins = self.headers.get_all("Origin", [])
+            if len(origins) > 1 or (origins and origins[0] not in allowed_origins):
                 return self.respond(403, {"error": "origin denied"})
+            if self.path == "/mcp":
+                versions = self.headers.get_all("MCP-Protocol-Version", [])
+                if len(versions) > 1 or (versions and versions[0] != MCP_PROTOCOL_VERSION):
+                    return self.respond(400, {"error": "unsupported MCP protocol version"})
+            if len(self.headers.get_all("Authorization", [])) > 1:
+                return self.respond(400, {"error": "ambiguous Authorization headers"})
+            if len(self.headers.get_all("Content-Length", [])) > 1:
+                return self.respond(400, {"error": "ambiguous Content-Length headers"})
             if not self.headers.get("Content-Type", "").split(";")[0].strip() == "application/json":
                 return self.respond(415, {"error": "application/json required"})
             if self.headers.get("Transfer-Encoding"):
@@ -402,7 +437,9 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                 return self.respond(401, {"error": "invalid credentials"},
                                     {"WWW-Authenticate": challenge})
             try:
-                payload = json.loads(self.rfile.read(length), parse_constant=reject_nonfinite)
+                payload = json.loads(self.rfile.read(length), parse_constant=reject_nonfinite,
+                                     parse_float=reject_overflowing_float,
+                                     object_pairs_hook=reject_duplicate_properties)
             except (ValueError, UnicodeDecodeError, RecursionError):
                 return self.respond(400, {"jsonrpc": "2.0", "id": None,
                                           "error": {"code": -32700, "message": "Parse error"}})
@@ -427,16 +464,20 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                 return self.respond(400, {"jsonrpc": "2.0", "id": None,
                                           "error": {"code": -32600, "message": "Invalid Request"}})
             request_id = payload.get("id")
+            if "id" in payload and type(request_id) not in (str, int, float):
+                return self.rpc_error(None, -32600, "Invalid Request")
             method = payload.get("method")
             if not isinstance(method, str):
                 return self.rpc_error(request_id, -32600, "Invalid Request")
             if method == "notifications/initialized":
+                if "id" in payload:
+                    return self.rpc_error(request_id, -32600, "Invalid Request")
                 return self.respond(202, None)
             if "id" not in payload:
                 return self.respond(202, None)
             try:
                 if method == "initialize":
-                    result = {"protocolVersion": "2025-11-25",
+                    result = {"protocolVersion": MCP_PROTOCOL_VERSION,
                               "capabilities": {"tools": {"listChanged": False}},
                               "serverInfo": {"name": "shards-mcp", "version": __version__}}
                 elif method == "ping":
