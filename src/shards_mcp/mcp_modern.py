@@ -141,13 +141,17 @@ def process_modern(
         return _result(request_id, {
             "supportedVersions": list(SUPPORTED_VERSIONS),
             "capabilities": {"tools": {"listChanged": False}},
+            "ttlMs": 0, "cacheScope": "private",
         })
     if method == "tools/list":
         if set(params) - {"_meta", "cursor"}:
             return error(-32602, "Invalid list params", request_id)
         if "cursor" in params and params["cursor"] not in ("", None):
             return error(-32602, "Unknown tool-list cursor", request_id)
-        return _result(request_id, {"tools": tools_fn(principal)})
+        return _result(request_id, {
+            "tools": tools_fn(principal),
+            "ttlMs": 0, "cacheScope": "private",
+        })
     if method == "tools/call":
         if set(params) - {"_meta", "name", "arguments"}:
             return error(-32602, "Invalid call params", request_id)
