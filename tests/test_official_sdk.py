@@ -54,6 +54,80 @@ class OfficialSdkTests(unittest.TestCase):
                     self.assertEqual(result.structured_content["agents"], 0)
         asyncio.run(run())
 
+    def test_official_client_with_signed_oauth_jwt_least_privilege(self):
+        """Real SDK over HTTP + RSA JWT resource-server authentication together.
+
+        This uses a locally generated key and an injected test key resolver;
+        it does not pretend to test an external provider's login/PKCE flow.
+        """
+        from datetime import datetime, timedelta, timezone
+        import jwt
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from shards_mcp.oauth import OAuthResourceServer
+
+        issuer = "https://issuer.example.test"
+        resource = "https://shards.example.test/mcp"
+        subject = "official-sdk-oauth-subject"
+        admin = self.gateway.authenticate(self.token)
+        enrolled = self.gateway.register(
+            admin, "sdk-oauth-agent", "tests", ["read-only"],
+            ["agent:read"], oauth_subject=subject,
+        )
+        private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        public = private.public_key()
+        oauth = OAuthResourceServer(
+            self.gateway, issuer, resource, issuer + "/jwks.json",
+            key_resolver=lambda kid: public if kid == "sdk-interop-key" else None,
+        )
+        now = datetime.now(timezone.utc)
+        token = jwt.encode({
+            "iss": issuer,
+            "sub": subject,
+            "aud": resource,
+            "iat": now,
+            "exp": now + timedelta(minutes=10),
+            # Attempted excessive JWT scope is deliberately intersected with
+            # the agent's actual enrolment, never granting task creation or *.
+            "scope": "agent:read task:create *",
+        }, private, algorithm="RS256", headers={"kid": "sdk-interop-key"})
+        protected = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            make_handler(self.gateway, set(), oauth=oauth),
+        )
+        protected_thread = threading.Thread(
+            target=protected.serve_forever, daemon=True
+        )
+        protected_thread.start()
+        try:
+            async def run():
+                url = "http://127.0.0.1:%s/mcp" % protected.server_port
+                async with httpx2.AsyncClient(
+                    headers={"Authorization": "Bearer " + token},
+                    timeout=httpx2.Timeout(10, read=20),
+                ) as http_client:
+                    transport = streamable_http_client(url, http_client=http_client)
+                    async with Client(transport) as client:
+                        names = {tool.name for tool in (await client.list_tools()).tools}
+                        self.assertIn("agent_identity", names)
+                        self.assertIn("agent_list", names)
+                        self.assertNotIn("system_status", names)
+                        self.assertNotIn("task_create", names)
+                        report = await client.call_tool("agent_identity", {})
+                        self.assertFalse(report.is_error)
+                        identity = report.structured_content
+                        self.assertEqual(identity["agent_id"], enrolled["agent_id"])
+                        self.assertEqual(identity["role"], "agent")
+                        self.assertEqual(identity["scopes"], ["agent:read"])
+                        self.assertNotIn(token, str(identity))
+                        denied = await client.call_tool("system_status", {})
+                        self.assertTrue(denied.is_error)
+            asyncio.run(run())
+        finally:
+            protected.shutdown()
+            protected.server_close()
+            protected_thread.join(timeout=5)
+            self.assertFalse(protected_thread.is_alive())
+
 
 if __name__ == "__main__":
     unittest.main()
