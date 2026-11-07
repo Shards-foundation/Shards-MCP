@@ -19,10 +19,10 @@
 | Read-only observer | `agent:read` / `task:read` only if required | Claims, execution, verification |
 | Sender | `task:create`, `task:read`; optional `message:send` | Task claim, verify |
 | Worker | `agent:heartbeat`, `task:read`, `task:claim`, `task:update`, `checkpoint:write` | Task creation/verification |
-| Verifier | `task:verify`, `task:read` | Worker execution |
+| Verifier | `task:verify`; optional `message:read` for a separately authorised evidence handoff | Worker execution; `task_get` on tasks belonging to other principals |
 | Operator | Bootstrap token strictly **host-only** | Never passed to LLM/IDE |
 
-Actual owner visibility is enforced per request. A scope alone never grants cross-agent task access.
+Actual owner visibility is enforced per request. A scope alone never grants cross-agent task access. In particular, `task:verify` does **not** grant `task_get` to a third-party verifier: results must reach the verifier over a separate authorised message or trusted review channel.
 
 ## Local vs off-host
 
