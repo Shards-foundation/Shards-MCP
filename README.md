@@ -80,6 +80,7 @@ In a **second terminal**, change into the same repository directory and configur
 
 ```bash
 cd Shards-MCP
+. .venv/bin/activate
 export SHARDS_ADMIN_TOKEN_FILE="$HOME/.config/shards/admin.token"
 export SHARDS_DB="$PWD/shards.local.sqlite"
 shards-mcp-admin register --name doctor --provider cli --scope agent:read \
