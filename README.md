@@ -123,7 +123,7 @@ Configure `SHARDS_A2A_BASE_URL=http://127.0.0.1:8787` for local testing. Remote 
 - Task outputs appear as A2A artifacts only once a separately authorised reviewer has verified them. A pending reported result is not represented as completed work.
 - The included reference worker understands text-only A2A task input and performs **deterministic echo only**. It never treats received text as a shell command, network request, model instruction or trading instruction. A different agent runtime can implement real processing behind its own permission boundary.
 
-`SendStreamingMessage`, `ListTasks`, multi-turn messages, push notification support and public well-known card discovery are **not implemented**. `CancelTask` is supported only for unclaimed queued tasks and requires the appropriate cancellation authority; claimed or running work returns a not-cancelable error, without interruption or rollback of external effects. The adapter is a constrained subset, **not a full A2A conformance claim**. The per-agent card URL is available via direct configuration (a supported A2A discovery mechanism).
+`SendStreamingMessage`, `ListTasks`, multi-turn messages, push notification support and public well-known card discovery are **not implemented**. `CancelTask` is supported only for unclaimed queued tasks. It requires both `task:read` and `task:cancel` scopes, and the caller must be the task creator or the operator; claimed or running work returns a not-cancelable error, without interruption or rollback of external effects. The adapter is a constrained subset, **not a full A2A conformance claim**. The per-agent card URL is available via direct configuration (a supported A2A discovery mechanism).
 
 Reference: https://a2a-protocol.org/v1.0.0/specification/
 
