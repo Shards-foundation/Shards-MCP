@@ -25,6 +25,7 @@ from urllib.request import Request
 from .core import canonical
 from .json_limits import enforce_json_depth
 from .server import MCP_PROTOCOL_VERSION, reject_nonfinite, reject_overflowing_float, reject_duplicate_properties
+from .mcp_modern import MODERN_VERSION, PROTOCOL_VERSION_KEY, CLIENT_CAPABILITIES_KEY
 from .worker import AgentClient
 
 
@@ -77,17 +78,22 @@ def _validate_gateway_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def _request(client: AgentClient, payload: dict[str, Any]) -> Request:
-    """Prepare a single MCP POST without leaking or redirecting bearer tokens."""
+def _request(client: AgentClient, payload: dict[str, Any], *,
+             modern: bool = False) -> Request:
+    """Prepare a scoped MCP POST without redirecting bearer credentials."""
+    headers = {
+        "Authorization": "Bearer " + client.token,
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "MCP-Protocol-Version": MODERN_VERSION if modern else MCP_PROTOCOL_VERSION,
+    }
+    if modern:
+        headers["Mcp-Method"] = payload["method"]
+        if payload["method"] == "tools/call":
+            headers["Mcp-Name"] = payload["params"]["name"]
     return Request(
         client.url + "/mcp", canonical(payload).encode("utf-8"),
-        headers={
-            "Authorization": "Bearer " + client.token,
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
-        },
-        method="POST",
+        headers=headers, method="POST",
     )
 
 
@@ -109,11 +115,21 @@ def _initialized(client: AgentClient, timeout: float) -> None:
 
 
 def _rpc(client: AgentClient, request_id: int, method: str,
-         params: dict[str, Any], timeout: float) -> dict[str, Any]:
+         params: dict[str, Any], timeout: float, *,
+         modern: bool = False) -> dict[str, Any]:
+    values = dict(params)
+    if modern:
+        values["_meta"] = {
+            PROTOCOL_VERSION_KEY: MODERN_VERSION,
+            "io.modelcontextprotocol/clientInfo": {
+                "name": "shards-mcp-doctor", "version": "0.1.0",
+            },
+            CLIENT_CAPABILITIES_KEY: {},
+        }
     req = _request(client, {
         "jsonrpc": "2.0", "id": request_id,
-        "method": method, "params": params,
-    })
+        "method": method, "params": values,
+    }, modern=modern)
     try:
         with client.opener.open(req, timeout=timeout) as response:
             if response.status != 200:
