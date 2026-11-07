@@ -64,7 +64,10 @@ cd Shards-MCP
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
-export SHARDS_ADMIN_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+mkdir -p "$HOME/.config/shards"
+chmod 700 "$HOME/.config/shards"
+python -c 'import os,pathlib,secrets; p=pathlib.Path.home()/".config/shards/admin.token"; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(fd,(secrets.token_urlsafe(48)+"\\n").encode()); os.close(fd)'
+export SHARDS_ADMIN_TOKEN_FILE="$HOME/.config/shards/admin.token"
 export SHARDS_DB="$PWD/shards.local.sqlite"
 shards-mcp
 ```
@@ -73,11 +76,12 @@ By default the server listens on `http://127.0.0.1:8787`. **Do not** expose a lo
 
 ### Enrol a diagnostic principal (on trusted gateway host)
 
-With the gateway's **same** existing `SHARDS_ADMIN_TOKEN` and `SHARDS_DB` available to the operator:
+In a **second terminal**, change into the same repository directory and configure the **same existing** host-local secret file and database. The bootstrap generator above intentionally refuses to overwrite an existing file; never regenerate a secret for an already initialised database.
 
 ```bash
-mkdir -p "$HOME/.config/shards"
-chmod 700 "$HOME/.config/shards"
+cd Shards-MCP
+export SHARDS_ADMIN_TOKEN_FILE="$HOME/.config/shards/admin.token"
+export SHARDS_DB="$PWD/shards.local.sqlite"
 shards-mcp-admin register --name doctor --provider cli --scope agent:read \
   --token-file "$HOME/.config/shards/doctor.token"
 shards-mcp-doctor --url http://127.0.0.1:8787 \
