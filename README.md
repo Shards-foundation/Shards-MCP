@@ -68,6 +68,37 @@ export SHARDS_AGENT_TOKEN="$(cat "$HOME/.config/shards/hermes.token")"
 
 `shards-mcp-admin` prints only the new agent ID and the token file location. The token file is created with permission `0600`; registration refuses an existing file. To revoke a credential, run `shards-mcp-admin revoke <agent_id>`. These operations are **not** available as network tools. Supply each AI client with only its scoped agent token using the client's secret configuration mechanism; never copy the bootstrap token into a model transcript.
 
+## Verify a connected AI client (read-only)
+
+The `shards-mcp-doctor` command performs a real Streamable HTTP MCP
+`initialize` / `notifications/initialized` / `tools/list` / `agent_identity` lifecycle and prints
+the authenticated agent ID, effective permission scopes, discovered tool count
+and latency. It makes **no writes**, never prints credentials, rejects
+administrator identities and refuses non-loopback plaintext or redirects.
+
+With a separately provisioned agent credential:
+
+~~~bash
+export SHARDS_GATEWAY_URL=http://127.0.0.1:8787
+export SHARDS_AGENT_TOKEN="$(cat "$HOME/.config/shards/hermes.token")"
+shards-mcp-doctor --json
+~~~
+
+For file-based secret handling (recommended on a shared host), unset
+`SHARDS_AGENT_TOKEN` and instead run:
+
+~~~bash
+shards-mcp-doctor --token-file "$HOME/.config/shards/hermes.token" --json
+~~~
+
+The token file must be a regular, non-symlink file readable only by its
+owner on POSIX. An explicitly configured HTTPS gateway may also be checked;
+the diagnostic does not perform OAuth login or issue access tokens. A
+successful result proves MCP client negotiation and permissions from this
+client's current network location, **not** full ChatGPT App Directory
+compatibility or a production deployment. Use separate scoped agent tokens
+for each AI client and never provide the bootstrap administrator secret.
+
 ## MCP smoke test
 
 ~~~bash
@@ -76,6 +107,17 @@ curl -sS http://127.0.0.1:8787/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
+~~~
+
+Complete the MCP lifecycle before tool discovery:
+
+~~~bash
+curl -sS -i http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $SHARDS_AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "MCP-Protocol-Version: 2025-11-25" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 ~~~
 
 Then issue method `tools/list` with an empty `params` object. Tool discovery is filtered by the authenticated agent scopes. Agent creation and revocation are deliberately not exposed through MCP or REST; use `shards-mcp-admin` on the host.

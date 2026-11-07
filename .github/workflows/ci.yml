@@ -76,3 +76,4 @@ jobs:
           /tmp/shards-wheel-env/bin/shards-worker --help >/dev/null
           /tmp/shards-wheel-env/bin/shards-scheduler --help >/dev/null
           /tmp/shards-wheel-env/bin/shards-mcp-admin --help >/dev/null
+          /tmp/shards-wheel-env/bin/shards-mcp-doctor --help >/dev/null
