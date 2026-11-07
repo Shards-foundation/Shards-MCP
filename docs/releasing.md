@@ -79,6 +79,7 @@ have supporting evidence recorded for the deployed version and endpoint:
 | Recovery | Verified encrypted off-host backup, independent restore rehearsal with recorded recovery time |
 | Observability | Metrics and access logs visible to operators, rate limits, alerts and an actionable incident contact |
 | Security | No secrets in client bundles, scoped host credentials, patch and dependency review, tested proxy boundaries |
+| Audit integrity | Anchor the audit-chain root independently in immutable/WORM storage; prove it detects database-owner rehashing and survives backup/restore |
 | UX | Real sign-in/sign-out on mobile and desktop, no misleading placeholder actions, real provider callback testing |
 | Service | Public privacy policy, support channel, usage limits, retention policy and documented operational owner |
 
