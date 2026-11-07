@@ -135,6 +135,22 @@ class ProtocolHardeningTests(unittest.TestCase):
                 self.assertEqual(status, 400)
                 self.assertEqual(payload["error"]["code"], -32700)
 
+    def test_exponent_overflow_is_rejected_during_json_decode(self):
+        # json.loads normally converts 1e999 to float('inf') even with
+        # parse_constant rejecting the literal Infinity token. That value
+        # must not reach canonical response serialization or tool execution.
+        for raw in (
+            '{"jsonrpc":"2.0","id":1e999,"method":"ping"}',
+            '{"jsonrpc":"2.0","id":1,"method":"ping","params":{"x":-1e999}}',
+            '{"jsonrpc":"2.0","id":1,"method":"ping","params":{"x":1e999}}',
+        ):
+            with self.subTest(raw=raw):
+                code, response = self.raw(raw)
+                self.assertEqual(code, 400)
+                self.assertEqual(response["error"]["code"], -32700)
+                self.assertIsNone(response["id"])
+        self.assertEqual(self.raw(self.ping(1.125))[0], 200)
+
     def test_jsonrpc_ids_must_be_scalar_and_not_boolean(self):
         for bad_id in (True, False, None, [], {"nested": "id"}):
             with self.subTest(identifier=bad_id):
