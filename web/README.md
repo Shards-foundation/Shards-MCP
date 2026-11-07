@@ -4,7 +4,7 @@ This is a **separate Next.js application** under `web/`, not a public deployment
 
 ## What works once configured
 
-- Google, GitHub and Discord OAuth sign-in using NextAuth, with server-side secrets, eight-hour JWT sessions, and an explicit email allowlist (empty means no access).
+- Google, GitHub and Discord OAuth sign-in using NextAuth, with server-side secrets, eight-hour JWT sessions, and an explicit provider-subject allowlist (empty means no access).
 - Authentication-gated console; unauthenticated users are redirected to `/signin`.
 - A server-side, read-only gateway liveness probe at `/api/gateway/health` with a three-second timeout, no redirects, no user-supplied target URL, no credential forwarding and no response-body forwarding.
 - Visible connection guidance and explicit disclosure of functionality not yet implemented.
@@ -23,7 +23,7 @@ npm run build
 npm run dev
 ```
 
-Set `SHARDS_CONSOLE_ALLOWED_EMAILS` to a comma-separated list of approved account emails before testing sign-in. An empty list denies all sign-ins. This is a private-preview admission gate, **not** a substitute for persistent tenancy/RBAC. Provider email changes, account linking and revocation of existing sessions require a future persistent identity layer. Do not enable general public sign-up.
+Set `SHARDS_CONSOLE_ALLOWED_IDENTITIES` to comma-separated `provider:providerAccountId` entries (for example `github:12345678`). An empty list denies all sign-ins. Determine the stable provider subject through the provider's trusted developer/account tooling; do not infer it from an email address. This is a private-preview admission gate, **not** persistent tenancy/RBAC. Account linking, invitation and session revocation require a future identity layer. Do not enable general public sign-up.
 
 Register the exact redirect URLs in each OAuth provider's developer console:
 
