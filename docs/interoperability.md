@@ -37,7 +37,7 @@ HTTP POST requests with ambiguous duplicate Content-Length or Authorization
 headers are rejected. Duplicate Origin headers are rejected even when the
 first one appears allowlisted. Payloads containing duplicate JSON object keys
 are rejected rather than allowing last-key-wins ambiguity. JSON-RPC request
-IDs must be a scalar string, number or null; booleans, arrays and objects
+IDs must be a scalar string or number; null, booleans, arrays and objects
 are invalid. notifications/initialized must not carry a request ID.
 
 The dedicated protocol-hardening regressions run in regular CI discovery,
