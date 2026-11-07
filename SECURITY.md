@@ -22,7 +22,7 @@ Remote mode now requires a trusted, pinned HTTPS JWKS issuer, a canonical HTTPS 
 - Localhost binding is the default; non-loopback requires SHARDS_ALLOW_REMOTE=1. Remote usage additionally requires a secure reverse proxy, TLS, rate limiting, network restrictions and proper OAuth 2.1 integration.
 - Origin headers are denied unless explicitly allowlisted via SHARDS_ALLOWED_ORIGINS.
 - Audit entries are committed with state mutations. The hash chain catches accidental edits, but a privileged database attacker can rewrite and rehash it; independent immutable audit anchoring is not yet implemented.
-- The HTTP endpoint does not provide OAuth protected-resource metadata, JWT audience validation, credential expiry, SSE, multi-tenant isolation or rate limiting. **Do not claim broad ChatGPT plugin authentication compliance.**
+- Optional remote OAuth mode provides RFC 9728 protected-resource metadata and signed JWT issuer, audience and expiry validation. It does **not** provide an OAuth authorisation server, OAuth client-flow validation, SSE subscriptions, multi-tenant isolation or application-layer rate limiting. **Do not claim broad ChatGPT plugin authentication compliance or hosted production approval.**
 - Prompt injection, untrusted task payloads, malicious agents, secret exfiltration, storage compromise, and external side-effect uncertainty remain risks.
 - Use test credentials and non-consequential operations only. Backup and restore the SQLite file using the SQLite backup API, with encrypted off-host storage.
 

@@ -1,0 +1,154 @@
+name: Publish Shards-MCP
+
+# Publish only from a deliberately created version tag. Protect v* tags and
+# require a human reviewer for the "pypi" GitHub environment.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shards-mcp-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.repository == 'Shards-foundation/Shards-MCP'
+    name: Release contract (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require the released commit to be merged into main
+        run: |
+          # fetch-depth: 0 above already retrieves the remote-tracking main ref.
+          # Do not re-fetch: checkout deliberately drops credentials for test steps.
+          git show-ref --verify --quiet refs/remotes/origin/main || {
+            echo "origin/main missing from full-history checkout" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {
+            echo "Release tag points to a commit not merged into main" >&2
+            exit 1
+          }
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Check tag and project version agree
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import tomllib
+          tag = os.environ["GITHUB_REF_NAME"]
+          version = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
+          if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag) or tag != "v" + version:
+              raise SystemExit(f"Refusing release: tag {tag!r} differs from package v{version}")
+          print(f"Validated release: {tag}")
+          PY
+      - name: Install test dependencies
+        run: python -m pip install '.[oauth]' 'mcp==2.0.0'
+      - name: Run complete unit, HTTP and SDK tests
+        run: |
+          python -m compileall -q src tests
+          python -m unittest discover -s tests -v
+          python -m unittest discover -s tests -p 'test_gateway_e2e.py' -v
+          python -m unittest discover -s tests -p 'test_a2a_doctor.py' -v
+      - name: Test additional official MCP SDK (isolated)
+        run: |
+          python -m venv /tmp/shards-release-sdk
+          /tmp/shards-release-sdk/bin/python -m pip install -e '.[oauth]' 'mcp==2.3.0'
+          /tmp/shards-release-sdk/bin/python -m unittest discover -s tests -p 'test_official_sdk.py' -v
+
+  build:
+    name: Verified wheel and source distribution
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Build and inspect distributions
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check --strict dist/*
+          python - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          import tomllib
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          expected = {f"shards_mcp-{version}-py3-none-any.whl", f"shards_mcp-{version}.tar.gz"}
+          actual = {p.name for p in Path("dist").iterdir()}
+          if actual != expected:
+              raise SystemExit(f"Unexpected release artifacts: {actual!r}; expected {expected!r}")
+          for path in sorted(Path("dist").iterdir()):
+              print(f"sha256 {hashlib.sha256(path.read_bytes()).hexdigest()} {path.name}")
+          PY
+      - name: Fresh environment wheel install and CLI smoke
+        run: |
+          python -m venv /tmp/shards-release-wheel
+          /tmp/shards-release-wheel/bin/python -m pip install dist/*.whl
+          /tmp/shards-release-wheel/bin/python -c "import importlib.metadata as metadata, shards_mcp; from shards_mcp.server import TOOL_LIST; assert TOOL_LIST; assert shards_mcp.__version__ == metadata.version('shards-mcp'), (shards_mcp.__version__, metadata.version('shards-mcp'))"
+          /tmp/shards-release-wheel/bin/shards-mcp-doctor --help >/dev/null
+          /tmp/shards-release-wheel/bin/shards-worker --help >/dev/null
+          /tmp/shards-release-wheel/bin/shards-scheduler --help >/dev/null
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  pypi:
+    name: Publish to PyPI via OIDC
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/shards-mcp/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-distributions
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1 pinned 2026-11-07
+        with:
+          print-hash: true
+
+  github-release:
+    name: Publish GitHub release after PyPI success
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-distributions
+          path: dist
+      - name: Publish immutable tag assets and changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
+            --title "Shards-MCP $GITHUB_REF_NAME" --generate-notes

@@ -222,6 +222,7 @@ No arbitrary commands, deployments, trades, transfers or external requests are e
 - [Operations and recovery](docs/operations.md)
 - [Release roadmap](docs/roadmap.md)
 - [Portable plugin manifests and installation](docs/plugin-packaging.md)
+- [Release workflow and production deployment acceptance](docs/releasing.md)
 - [Persistent Docker Compose deployment and recovery runbook](deploy/README.md)
 
 ## Test
