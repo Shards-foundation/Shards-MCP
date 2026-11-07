@@ -23,16 +23,16 @@ class CompletionClient:
 
 
 class WorkerCompletionSafetyTests(unittest.TestCase):
-    def test_successful_completion_value_error_is_not_retried(self):
+    def test_successful_completion_runtime_error_is_not_retried(self):
         client = CompletionClient(failure="task_complete")
         with self.assertRaisesRegex(RuntimeError, "simulated gateway failure"):
             process_once(client)
         self.assertEqual(sum(name == "task_complete" for name, _ in client.calls), 1)
         self.assertIs(client.calls[-1][1]["success"], True)
 
-    def test_checkpoint_value_error_does_not_complete_task(self):
+    def test_checkpoint_runtime_error_does_not_complete_task(self):
         client = CompletionClient(failure="checkpoint_write")
-        with self.assertRaisesRegex(ValueError, "simulated gateway failure"):
+        with self.assertRaisesRegex(RuntimeError, "simulated gateway failure"):
             process_once(client)
         self.assertFalse(any(name == "task_complete" for name, _ in client.calls))
 
