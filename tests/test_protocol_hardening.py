@@ -151,6 +151,32 @@ class ProtocolHardeningTests(unittest.TestCase):
                 self.assertIsNone(response["id"])
         self.assertEqual(self.raw(self.ping(1.125))[0], 200)
 
+    def test_http_rejects_deep_json_before_decoder_version_dependent_recursion(self):
+        depth = 180
+        payload = ('{"jsonrpc":"2.0","id":1,"method":"ping","params":{"x":'
+                   + "[" * depth + "0" + "]" * depth + '}}')
+        code, result = self.raw(payload)
+        self.assertEqual(code, 400)
+        self.assertEqual(result["error"]["code"], -32700)
+        # Delimiters inside a JSON string are data, not nesting.
+        valid = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping",
+                            "params": {"x": "[" * 800}})
+        self.assertEqual(self.raw(valid)[0], 200)
+
+    def test_mcp_rejects_utf16_and_utf32_json_body_encoding(self):
+        # json.loads(bytes) auto-detects UTF-16/32 and could disagree with a
+        # byte-wise structural scan. MCP requires UTF-8 JSON on the wire.
+        sample = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "ping",
+                             "params": {"text": "\u2200", "items": [[1]]}},
+                            ensure_ascii=False)
+        for encoding in ("utf-16", "utf-16-le", "utf-16-be",
+                         "utf-32", "utf-32-le", "utf-32-be"):
+            with self.subTest(encoding=encoding):
+                status, data = self.raw(sample.encode(encoding))
+                self.assertEqual(status, 400, data)
+                self.assertEqual(data["error"]["code"], -32700)
+        self.assertEqual(self.raw(sample)[0], 200)
+
     def test_jsonrpc_ids_must_be_scalar_and_not_boolean(self):
         for bad_id in (True, False, None, [], {"nested": "id"}):
             with self.subTest(identifier=bad_id):

@@ -34,7 +34,12 @@ See [interoperability and ChatGPT plugin gates](docs/interoperability.md) for th
 
 ## Run locally
 
-Python 3.11+ required.
+Python 3.11+ required. Linux GitHub Actions CI tests Python **3.11, 3.12,
+3.13, 3.14 and 3.15**, including the complete unit/HTTP suite, official MCP SDK
+client, cross-runtime E2E, wheel/sdist build, and a fresh-environment
+installation. This does not claim that Windows/macOS, Python 3.16 or every
+third-party SDK is tested. Docker and Caddy deployment checks run on Python
+3.12 as a representative container baseline.
 
 ~~~bash
 git clone https://github.com/Shards-foundation/Shards-MCP.git
