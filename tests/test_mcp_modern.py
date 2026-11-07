@@ -181,8 +181,36 @@ class StatelessMcpTests(unittest.TestCase):
         mismatch["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] = "1900-01-01"
         code, data = self.request(mismatch, route="tools/list")
         self.assertEqual(code, 400)
-        self.assertEqual(data["error"]["code"], -32022)
-        self.assertEqual(data["error"]["data"]["supported"], list(SUPPORTED_VERSIONS))
+        self.assertEqual(data["error"]["code"], -32020)
+        self.assertNotIn("data", data["error"])
+
+    def test_modern_and_legacy_clients_share_durable_task_state(self):
+        create = self.packet("tools/call", {
+            "name": "task_create",
+            "arguments": {
+                "assignee": self.worker_id,
+                "payload": {"action": "health"},
+                "idempotency_key": "modern-shared-task-e2e",
+            },
+        })
+        code, created = self.request(
+            create, route="tools/call", name="task_create"
+        )
+        self.assertEqual(code, 200, created)
+        self.assertFalse(created["result"]["isError"])
+        task_id = created["result"]["structuredContent"]["task_id"]
+        again = self.request(create, route="tools/call", name="task_create")[1]
+        self.assertEqual(again["result"]["structuredContent"]["task_id"], task_id)
+        legacy = {
+            "jsonrpc": "2.0", "id": 22, "method": "tools/call",
+            "params": {"name": "task_get", "arguments": {"task_id": task_id}},
+        }
+        code, readback = self.request(legacy, version=LEGACY_VERSION)
+        self.assertEqual(code, 200, readback)
+        self.assertEqual(readback["result"]["structuredContent"]["id"], task_id)
+        self.assertEqual(readback["result"]["structuredContent"]["state"], "queued")
+        with self.gateway.read_tx() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 1)
 
     def test_old_handshake_works_and_removed_modern_methods_are_absent(self):
         old = {"jsonrpc": "2.0", "id": 11, "method": "initialize",
