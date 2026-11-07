@@ -39,8 +39,7 @@ extension conformance, hosted ChatGPT OAuth flows, or public plugin-directory ap
 
 ## Publish (owner-triggered only)
 
-Create tag `v0.1.0` at the verified commit on `main` and push the tag.
-This can be done using the GitHub Releases user interface or trusted Git CLI:
+Create tag `v0.1.0` at the verified commit on `main` and push the tag using trusted Git CLI. **Do not use the GitHub Releases UI to publish a release at this stage**: it can create a release before PyPI approval and make the workflow's final `gh release create` fail. A maintainer using a trusted cloud terminal can perform this operation without a local computer:
 
 ```bash
 git fetch origin main --tags
