@@ -54,8 +54,10 @@ def validate(root: Path = REPO) -> list[str]:
             problems.append(f"required documentation missing: {name}")
     for name in ("docs/legal/privacy.md", "docs/legal/terms.md", "docs/legal/dpa.md"):
         file = root / name
-        if file.exists() and "DRAFT" not in file.read_text(encoding="utf-8").upper():
-            problems.append(f"{name}: missing DRAFT/legal approval warning")
+        if file.exists():
+            opening = "\n".join(file.read_text(encoding="utf-8").splitlines()[:8])
+            if not re.search(r"(?i)\bstatus:\s*DRAFT\b", opening):
+                problems.append(f"{name}: missing explicit Status: DRAFT legal approval warning")
     for skill in (root / "skills").glob("*/SKILL.md"):
         data = skill.read_text(encoding="utf-8")
         if not data.startswith("---\n") or "description:" not in data or "name:" not in data:
