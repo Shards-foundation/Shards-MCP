@@ -200,6 +200,34 @@ class DoctorTests(unittest.TestCase):
                 )
                 self.assertNotIn(token, str(problem.exception))
 
+    def test_untrusted_server_metadata_cannot_inject_terminal_controls(self):
+        token = self.agent["token"]
+        invalid_version = [
+            {"protocolVersion": "2025-11-25",
+             "serverInfo": {"name": "shards-mcp", "version": "0.1.0\x1b[2J"}}
+        ]
+        with patch("shards_mcp.doctor._rpc", side_effect=invalid_version):
+            with self.assertRaises(DiagnosticError) as issue:
+                diagnose(self.url, token)
+        self.assertEqual(str(issue.exception), "invalid MCP server version metadata")
+        self.assertNotIn("\x1b", str(issue.exception))
+
+        invalid_agent = [
+            {"protocolVersion": "2025-11-25",
+             "serverInfo": {"name": "shards-mcp", "version": "0.1.0"}},
+            {"tools": [{"name": "agent_identity"}]},
+            {"isError": False, "structuredContent": {
+                "agent_id": self.agent["agent_id"] + "\x1b[2J",
+                "role": "agent", "scopes": [],
+            }},
+        ]
+        with patch("shards_mcp.doctor._rpc", side_effect=invalid_agent):
+            with patch("shards_mcp.doctor._initialized", return_value=None):
+                with self.assertRaises(DiagnosticError) as issue:
+                    diagnose(self.url, token)
+        self.assertIn("not a valid scoped agent identity", str(issue.exception))
+        self.assertNotIn("\x1b", str(issue.exception))
+
     def test_scoped_secret_files_are_secure_and_sources_unambiguous(self):
         secret = self.folder / "agent.token"
         secret.write_text(self.agent["token"] + "\n", encoding="ascii")
