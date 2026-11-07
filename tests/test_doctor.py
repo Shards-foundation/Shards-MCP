@@ -70,6 +70,168 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
 
+    def test_modern_doctor_validates_scoped_stateless_contract_without_writes(self):
+        before = self.gateway.audit_verify(
+            self.gateway.authenticate(self.admin_secret)
+        )["count"]
+        report = diagnose(self.url, self.agent["token"], protocol="modern")
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["protocol_version"], "2026-07-28")
+        self.assertEqual(report["agent_id"], self.agent["agent_id"])
+        self.assertEqual(report["scopes"], [])
+        self.assertEqual(report["tool_names"], ["agent_identity"])
+        self.assertNotIn(self.agent["token"], json.dumps(report))
+        self.assertEqual(
+            before,
+            self.gateway.audit_verify(
+                self.gateway.authenticate(self.admin_secret)
+            )["count"],
+            "modern diagnostic must never append audit or task records",
+        )
+        with self.gateway.read_tx() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
+
+    def test_modern_client_does_not_send_removed_legacy_notifications(self):
+        from shards_mcp.doctor import _rpc as real_rpc
+        order = []
+
+        def record_rpc(client, identifier, method, params, timeout, **kwargs):
+            order.append((method, kwargs.get("modern", False)))
+            return real_rpc(client, identifier, method, params, timeout, **kwargs)
+
+        with patch("shards_mcp.doctor._rpc", side_effect=record_rpc):
+            with patch("shards_mcp.doctor._initialized",
+                       side_effect=AssertionError("legacy initialized called")):
+                result = diagnose(self.url, self.agent["token"], protocol="modern")
+        self.assertTrue(result["ok"])
+        self.assertEqual(order, [
+            ("server/discover", True),
+            ("tools/list", True),
+            ("tools/call", True),
+        ])
+
+    def test_both_protocols_agree_and_cli_emits_secrets_free_json(self):
+        env = os.environ.copy()
+        env.pop("SHARDS_ADMIN_TOKEN", None)
+        env.pop("SHARDS_ADMIN_TOKEN_FILE", None)
+        env.pop("SHARDS_AGENT_TOKEN_FILE", None)
+        env.update({"SHARDS_GATEWAY_URL": self.url,
+                    "SHARDS_AGENT_TOKEN": self.agent["token"]})
+        child = subprocess.run(
+            [sys.executable, "-m", "shards_mcp.doctor",
+             "--protocol", "both", "--json"],
+            capture_output=True, text=True, env=env, timeout=25, check=False,
+        )
+        self.assertEqual(child.returncode, 0, child.stderr)
+        report = json.loads(child.stdout)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["protocol"], "both")
+        self.assertEqual(report["agent_id"], self.agent["agent_id"])
+        self.assertEqual(report["legacy"]["protocol_version"], "2025-11-25")
+        self.assertEqual(report["modern"]["protocol_version"], "2026-07-28")
+        self.assertEqual(report["legacy"]["tool_names"],
+                         report["modern"]["tool_names"])
+        self.assertEqual(report["scopes"], [])
+        self.assertNotIn(self.agent["token"], child.stdout + child.stderr)
+        self.assertNotIn(self.admin_secret, child.stdout + child.stderr)
+
+    def test_modern_discovery_bad_metadata_fails_without_fallback(self):
+        valid = {
+            "resultType": "complete", "supportedVersions": ["2026-07-28"],
+            "ttlMs": 0, "cacheScope": "private",
+            "capabilities": {"tools": {}},
+            "_meta": {"io.modelcontextprotocol/serverInfo": {
+                "name": "shards-mcp", "version": "0.1.0",
+            }},
+        }
+        invalid_discoveries = [
+            {**valid, "supportedVersions": "2026-07-28"},
+            {**valid, "ttlMs": 1000, "cacheScope": "public"},
+            {**valid, "supportedVersions": ["2025-11-25"]},
+            {**valid, "ttlMs": False},
+            {**valid, "capabilities": {}},
+            {**valid, "capabilities": {"tools": None}},
+            {**valid, "capabilities": []},
+        ]
+        for discovery in invalid_discoveries:
+            with self.subTest(discovery=discovery):
+                with patch("shards_mcp.doctor._rpc", return_value=discovery) as rpc:
+                    with self.assertRaises(DiagnosticError) as error:
+                        diagnose(self.url, self.agent["token"], protocol="modern")
+                self.assertIn("discovery", str(error.exception))
+                self.assertEqual(rpc.call_count, 1)
+                self.assertNotIn(self.agent["token"], str(error.exception))
+
+    def test_modern_tool_results_require_stable_server_identity(self):
+        from shards_mcp.doctor import _rpc as real_rpc
+        for phase in ("tools/list", "tools/call"):
+            for malformed in ("missing", "changed"):
+                with self.subTest(phase=phase, malformed=malformed):
+                    def corrupted(client, identifier, method, params, timeout, **kw):
+                        result = real_rpc(client, identifier, method, params, timeout, **kw)
+                        if method == phase and kw.get("modern"):
+                            result = json.loads(json.dumps(result))
+                            if malformed == "missing":
+                                result.pop("_meta", None)
+                            else:
+                                result["_meta"]["io.modelcontextprotocol/serverInfo"][
+                                    "version"
+                                ] = "99.0.0"
+                        return result
+
+                    with patch("shards_mcp.doctor._rpc", side_effect=corrupted):
+                        with self.assertRaises(DiagnosticError) as error:
+                            diagnose(self.url, self.agent["token"], protocol="modern")
+                    self.assertIn("server identity", str(error.exception))
+                    self.assertNotIn(self.agent["token"], str(error.exception))
+
+    def test_both_rejects_agent_scope_and_tool_disagreement(self):
+        from shards_mcp.doctor import _rpc as real_rpc
+        for mismatch in ("agent_id", "scopes", "tool_names"):
+            with self.subTest(mismatch=mismatch):
+                def inconsistent(client, identifier, method, params, timeout, **kw):
+                    result = real_rpc(client, identifier, method, params, timeout, **kw)
+                    if kw.get("modern") and (
+                        (method == "tools/list" and mismatch == "tool_names") or
+                        (method == "tools/call" and mismatch != "tool_names")
+                    ):
+                        result = json.loads(json.dumps(result))
+                        if mismatch == "tool_names":
+                            result["tools"].append({"name": "agent_list"})
+                        elif mismatch == "agent_id":
+                            result["structuredContent"]["agent_id"] = "agt_" + "0" * 24
+                        else:
+                            result["structuredContent"]["scopes"] = ["agent:read"]
+                    return result
+
+                with patch("shards_mcp.doctor._rpc", side_effect=inconsistent):
+                    with self.assertRaises(DiagnosticError) as error:
+                        diagnose(self.url, self.agent["token"], protocol="both")
+                self.assertIn("protocols disagree", str(error.exception))
+                self.assertNotIn(self.agent["token"], str(error.exception))
+
+    def test_both_cli_fails_if_modern_errors_after_legacy_success(self):
+        env = os.environ.copy()
+        env.pop("SHARDS_ADMIN_TOKEN", None)
+        env.pop("SHARDS_ADMIN_TOKEN_FILE", None)
+        env.pop("SHARDS_AGENT_TOKEN_FILE", None)
+        env.update({"SHARDS_GATEWAY_URL": self.url,
+                    "SHARDS_AGENT_TOKEN": self.agent["token"]})
+        with patch("shards_mcp.server.process_modern",
+                   side_effect=RuntimeError("private " + self.agent["token"])):
+            child = subprocess.run(
+                [sys.executable, "-m", "shards_mcp.doctor",
+                 "--protocol", "both", "--json"],
+                capture_output=True, text=True, env=env, timeout=25, check=False,
+            )
+        self.assertEqual(child.returncode, 1)
+        body = json.loads(child.stdout)
+        self.assertFalse(body["ok"])
+        self.assertIsInstance(body["error"], str)
+        self.assertNotIn(self.agent["token"], child.stdout + child.stderr)
+        self.assertNotIn(self.admin_secret, child.stdout + child.stderr)
+
     def test_mcp_handshake_emits_initialized_notification_before_tool_calls(self):
         from shards_mcp.doctor import _initialized as real_initialized
         order = []

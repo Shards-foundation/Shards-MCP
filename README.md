@@ -70,11 +70,16 @@ export SHARDS_AGENT_TOKEN="$(cat "$HOME/.config/shards/hermes.token")"
 
 ## Verify a connected AI client (read-only)
 
-The `shards-mcp-doctor` command performs a real Streamable HTTP MCP
-`initialize` / `notifications/initialized` / `tools/list` / `agent_identity` lifecycle and prints
-the authenticated agent ID, effective permission scopes, discovered tool count
-and latency. It makes **no writes**, never prints credentials, rejects
-administrator identities and refuses non-loopback plaintext or redirects.
+The `shards-mcp-doctor` command verifies scoped Streamable HTTP MCP
+connectivity and reports the authenticated agent ID, effective permissions,
+visible tools and latency. It supports three explicit modes: `--protocol legacy`
+(the default, using the 2025-11-25 initialize/initialized lifecycle),
+`--protocol modern` (2026-07-28 stateless discovery, tool listing and identity),
+and `--protocol both` (verifies both contracts and checks that they expose
+the same agent and tool authority). It performs **no writes**, never prints
+credentials, rejects administrator identities and refuses non-loopback
+plaintext or redirects. A failed modern check never silently falls back to
+legacy.
 
 With a separately provisioned agent credential:
 
@@ -82,6 +87,8 @@ With a separately provisioned agent credential:
 export SHARDS_GATEWAY_URL=http://127.0.0.1:8787
 export SHARDS_AGENT_TOKEN="$(cat "$HOME/.config/shards/hermes.token")"
 shards-mcp-doctor --json
+shards-mcp-doctor --protocol modern --json
+shards-mcp-doctor --protocol both --json
 ~~~
 
 For file-based secret handling (recommended on a shared host), unset

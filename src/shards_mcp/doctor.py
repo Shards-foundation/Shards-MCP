@@ -25,6 +25,7 @@ from urllib.request import Request
 from .core import canonical
 from .json_limits import enforce_json_depth
 from .server import MCP_PROTOCOL_VERSION, reject_nonfinite, reject_overflowing_float, reject_duplicate_properties
+from .mcp_modern import MODERN_VERSION, PROTOCOL_VERSION_KEY, CLIENT_CAPABILITIES_KEY
 from .worker import AgentClient
 
 
@@ -77,17 +78,22 @@ def _validate_gateway_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def _request(client: AgentClient, payload: dict[str, Any]) -> Request:
-    """Prepare a single MCP POST without leaking or redirecting bearer tokens."""
+def _request(client: AgentClient, payload: dict[str, Any], *,
+             modern: bool = False) -> Request:
+    """Prepare a scoped MCP POST without redirecting bearer credentials."""
+    headers = {
+        "Authorization": "Bearer " + client.token,
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "MCP-Protocol-Version": MODERN_VERSION if modern else MCP_PROTOCOL_VERSION,
+    }
+    if modern:
+        headers["Mcp-Method"] = payload["method"]
+        if payload["method"] == "tools/call":
+            headers["Mcp-Name"] = payload["params"]["name"]
     return Request(
         client.url + "/mcp", canonical(payload).encode("utf-8"),
-        headers={
-            "Authorization": "Bearer " + client.token,
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
-        },
-        method="POST",
+        headers=headers, method="POST",
     )
 
 
@@ -109,11 +115,21 @@ def _initialized(client: AgentClient, timeout: float) -> None:
 
 
 def _rpc(client: AgentClient, request_id: int, method: str,
-         params: dict[str, Any], timeout: float) -> dict[str, Any]:
+         params: dict[str, Any], timeout: float, *,
+         modern: bool = False) -> dict[str, Any]:
+    values = dict(params)
+    if modern:
+        values["_meta"] = {
+            PROTOCOL_VERSION_KEY: MODERN_VERSION,
+            "io.modelcontextprotocol/clientInfo": {
+                "name": "shards-mcp-doctor", "version": "0.1.0",
+            },
+            CLIENT_CAPABILITIES_KEY: {},
+        }
     req = _request(client, {
         "jsonrpc": "2.0", "id": request_id,
-        "method": method, "params": params,
-    })
+        "method": method, "params": values,
+    }, modern=modern)
     try:
         with client.opener.open(req, timeout=timeout) as response:
             if response.status != 200:
@@ -152,27 +168,73 @@ def _rpc(client: AgentClient, request_id: int, method: str,
     return answer["result"]
 
 
-def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
-    """Verify three read-only protocol interactions on the actual MCP transport."""
+def _require_modern_server_identity(result: dict[str, Any],
+                                    expected: dict[str, Any]) -> None:
+    """Fail if a later modern result changes or omits authenticated server identity."""
+    metadata = result.get("_meta")
+    server = (metadata.get("io.modelcontextprotocol/serverInfo")
+              if isinstance(metadata, dict) else None)
+    if (result.get("resultType") != "complete"
+            or not isinstance(server, dict)
+            or server.get("name") != expected["name"]
+            or server.get("version") != expected["version"]):
+        raise DiagnosticError("modern MCP result has inconsistent server identity")
+
+
+def diagnose(url: str, token: str, *, timeout: float = 10.0,
+             protocol: str = "legacy") -> dict[str, Any]:
+    """Verify a specified MCP wire era; never silently downgrade protocols."""
+    if protocol not in ("legacy", "modern", "both"):
+        raise DiagnosticError("protocol must be legacy, modern or both")
     if not isinstance(timeout, (int, float)) or type(timeout) is bool:
         raise DiagnosticError("timeout must be a finite number of seconds")
     timeout = float(timeout)
     if not math.isfinite(timeout) or not 1 <= timeout <= 30:
         raise DiagnosticError("timeout must be between 1 and 30 seconds")
     origin = _validate_gateway_url(url)
+    if protocol == "both":
+        legacy = diagnose(origin, token, timeout=timeout, protocol="legacy")
+        modern_report = diagnose(origin, token, timeout=timeout, protocol="modern")
+        for field in ("agent_id", "scopes", "tool_names", "server_name", "server_version"):
+            if legacy[field] != modern_report[field]:
+                raise DiagnosticError("protocols disagree about agent or tool authority")
+        return {
+            "ok": True, "protocol": "both",
+            "agent_id": legacy["agent_id"], "scopes": legacy["scopes"],
+            "tool_names": legacy["tool_names"], "tool_count": legacy["tool_count"],
+            "legacy": legacy, "modern": modern_report,
+        }
     try:
         client = AgentClient(origin, token)
     except ValueError:
         raise DiagnosticError("invalid agent credential or gateway address") from None
     started = time.monotonic()
-    initialise = _rpc(client, 1, "initialize", {
-        "protocolVersion": MCP_PROTOCOL_VERSION,
-        "capabilities": {},
-        "clientInfo": {"name": "shards-mcp-doctor", "version": "0.1.0"},
-    }, timeout)
-    if initialise.get("protocolVersion") != MCP_PROTOCOL_VERSION:
-        raise DiagnosticError("gateway negotiated an unsupported MCP version")
-    info = initialise.get("serverInfo")
+    modern = protocol == "modern"
+    if modern:
+        discovered = _rpc(client, 1, "server/discover", {}, timeout, modern=True)
+        supported = discovered.get("supportedVersions")
+        capabilities = discovered.get("capabilities")
+        if (discovered.get("resultType") != "complete"
+                or not isinstance(supported, list)
+                or not isinstance(capabilities, dict)
+                or not isinstance(capabilities.get("tools"), dict)
+                or MODERN_VERSION not in supported
+                or discovered.get("cacheScope") != "private"
+                or type(discovered.get("ttlMs")) is not int
+                or discovered["ttlMs"] != 0):
+            raise DiagnosticError("modern MCP discovery is invalid or unsafe to cache")
+        meta = discovered.get("_meta")
+        info = (meta.get("io.modelcontextprotocol/serverInfo")
+                if isinstance(meta, dict) else None)
+    else:
+        initialise = _rpc(client, 1, "initialize", {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "shards-mcp-doctor", "version": "0.1.0"},
+        }, timeout)
+        if initialise.get("protocolVersion") != MCP_PROTOCOL_VERSION:
+            raise DiagnosticError("gateway negotiated an unsupported MCP version")
+        info = initialise.get("serverInfo")
     if not isinstance(info, dict) or info.get("name") != "shards-mcp":
         raise DiagnosticError("unexpected MCP server identity")
     version = info.get("version")
@@ -180,8 +242,17 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
         r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}", version
     ):
         raise DiagnosticError("invalid MCP server version metadata")
-    _initialized(client, timeout)
-    listed = _rpc(client, 2, "tools/list", {}, timeout)
+    if not modern:
+        _initialized(client, timeout)
+        listed = _rpc(client, 2, "tools/list", {}, timeout)
+    else:
+        listed = _rpc(client, 2, "tools/list", {}, timeout, modern=True)
+        _require_modern_server_identity(listed, info)
+        if (listed.get("resultType") != "complete"
+                or listed.get("cacheScope") != "private"
+                or type(listed.get("ttlMs")) is not int
+                or listed["ttlMs"] != 0):
+            raise DiagnosticError("modern MCP tool listing is invalid or unsafe to cache")
     tools = listed.get("tools")
     if not isinstance(tools, list) or len(tools) > 200:
         raise DiagnosticError("invalid MCP tool manifest")
@@ -192,9 +263,15 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
         names.append(entry["name"])
     if len(names) != len(set(names)) or "agent_identity" not in names:
         raise DiagnosticError("MCP tool discovery is incomplete or ambiguous")
-    call = _rpc(client, 3, "tools/call", {
-        "name": "agent_identity", "arguments": {},
-    }, timeout)
+    if modern:
+        call = _rpc(client, 3, "tools/call", {
+            "name": "agent_identity", "arguments": {},
+        }, timeout, modern=True)
+        _require_modern_server_identity(call, info)
+    else:
+        call = _rpc(client, 3, "tools/call", {
+            "name": "agent_identity", "arguments": {},
+        }, timeout)
     if call.get("isError") is not False:
         raise DiagnosticError("agent identity tool denied")
     ident = call.get("structuredContent")
@@ -209,7 +286,7 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
     report = {
         "ok": True,
         "transport": "streamable-http",
-        "protocol_version": MCP_PROTOCOL_VERSION,
+        "protocol_version": MODERN_VERSION if modern else MCP_PROTOCOL_VERSION,
         "server_name": info["name"],
         "server_version": version,
         "agent_id": ident["agent_id"],
@@ -236,11 +313,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--token-file", help="Private file containing scoped agent token")
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--protocol", choices=("legacy", "modern", "both"), default="legacy",
+        help="Explicitly verify the legacy 2025, modern 2026, or both MCP wire contracts",
+    )
     parser.add_argument("--json", action="store_true", help="Machine-readable output")
     args = parser.parse_args(argv)
     try:
         token = read_agent_token(args.token_file)
-        report = diagnose(args.url, token, timeout=args.timeout)
+        report = diagnose(args.url, token, timeout=args.timeout, protocol=args.protocol)
     except (DiagnosticError, ValueError, OSError, UnicodeError) as exc:
         # Avoid exception repr/tracebacks/remote response bodies to prevent
         # inadvertent disclosure of agent tokens or untrusted server content.
@@ -254,11 +335,21 @@ def main(argv: list[str] | None = None) -> int:
         print(canonical(report))
     else:
         print("Shards MCP diagnostic: PASS")
-        print("Protocol: " + report["protocol_version"])
-        print("Server: " + report["server_name"] + " " + report["server_version"])
-        print("Agent: " + report["agent_id"])
-        print("Scoped tools: " + str(report["tool_count"]))
-        print("Round trip: " + str(report["round_trip_ms"]) + " ms")
+        if args.protocol == "both":
+            print("Protocols: " + report["legacy"]["protocol_version"]
+                  + ", " + report["modern"]["protocol_version"])
+            print("Server: " + report["legacy"]["server_name"]
+                  + " " + report["legacy"]["server_version"])
+            print("Agent: " + report["agent_id"])
+            print("Scoped tools: " + str(report["tool_count"]))
+            print("Round trips: legacy " + str(report["legacy"]["round_trip_ms"])
+                  + " ms, modern " + str(report["modern"]["round_trip_ms"]) + " ms")
+        else:
+            print("Protocol: " + report["protocol_version"])
+            print("Server: " + report["server_name"] + " " + report["server_version"])
+            print("Agent: " + report["agent_id"])
+            print("Scoped tools: " + str(report["tool_count"]))
+            print("Round trip: " + str(report["round_trip_ms"]) + " ms")
     return 0
 
 
