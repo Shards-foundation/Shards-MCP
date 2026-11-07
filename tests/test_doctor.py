@@ -1,7 +1,7 @@
 """End-to-end read-only MCP connection doctor and credential isolation."""
 from __future__ import annotations
 
-from http.client import BadStatusLine
+from http.client import BadStatusLine, IncompleteRead
 from http.server import ThreadingHTTPServer
 import json
 import os
@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -125,12 +126,19 @@ class DoctorTests(unittest.TestCase):
         client = Mock()
         client.url = self.url
         client.token = token
-        client.opener.open.side_effect = BadStatusLine("HTTP/1.1 " + token)
-        with patch("shards_mcp.doctor.AgentClient", return_value=client):
-            with self.assertRaises(DiagnosticError) as problem:
-                diagnose(self.url, token)
-        self.assertNotIn(token, str(problem.exception))
-        self.assertEqual(str(problem.exception), "MCP transport unavailable or refused")
+        for failure in (
+            BadStatusLine("HTTP/1.1 " + token),
+            IncompleteRead(token.encode("ascii"), 1000),
+        ):
+            with self.subTest(error=type(failure).__name__):
+                client.opener.open.side_effect = failure
+                with patch("shards_mcp.doctor.AgentClient", return_value=client):
+                    with self.assertRaises(DiagnosticError) as problem:
+                        diagnose(self.url, token)
+                self.assertNotIn(token, str(problem.exception))
+                self.assertEqual(
+                    str(problem.exception), "MCP transport unavailable or refused"
+                )
 
     def test_reflected_token_anywhere_in_report_is_never_emitted(self):
         token = self.agent["token"]
@@ -196,6 +204,20 @@ class DoctorTests(unittest.TestCase):
             else:
                 with self.assertRaises(DiagnosticError):
                     read_agent_token(str(alias))
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "mkfifo"),
+                         "POSIX named pipes only")
+    def test_fifo_secret_path_never_blocks_before_file_type_check(self):
+        pipe = self.folder / "agent.fifo"
+        os.mkfifo(pipe, 0o600)
+        with patch.dict(os.environ, {
+            "SHARDS_AGENT_TOKEN": "",
+            "SHARDS_AGENT_TOKEN_FILE": "",
+        }):
+            start = time.monotonic()
+            with self.assertRaisesRegex(DiagnosticError, "regular file"):
+                read_agent_token(str(pipe))
+            self.assertLess(time.monotonic() - start, 1.0)
 
     def test_json_cli_errors_do_not_echo_secret_or_untrusted_url(self):
         env = os.environ.copy()
