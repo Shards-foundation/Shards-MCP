@@ -8,7 +8,7 @@ of an enrolled agent.
 
 | Interface | Client type | Contract |
 | --- | --- | --- |
-| POST /mcp | Streamable HTTP MCP clients | MCP 2025-11-25 tool-server subset |
+| POST /mcp | Streamable HTTP MCP clients | MCP 2025-11-25 legacy and 2026-07-28 stateless tool-server subsets |
 | shards-mcp-stdio | Local desktop and CLI MCP clients | Scoped token, forwarding to the gateway |
 | POST /v1/tools/{name} | REST automation, reference worker | Same Shards policy and scopes |
 | /a2a/agents/{id} | Delegating agents | Opt-in text-only A2A v1.0 subset |
@@ -22,16 +22,35 @@ interfaces must not be confused with unrestricted tool execution.
 
 ## HTTP protocol boundary and version support
 
-The gateway implements the **MCP 2025-11-25 tool-server subset**, not the
-newer MCP 2026-07-28 server/discover lifecycle. This is a protocol-version
-compatibility statement, not a blanket claim of compliance with the newest
-MCP revision.
+The gateway supports two explicit wire eras on the same authenticated /mcp
+endpoint: the established MCP 2025-11-25 handshake-based tool-server subset
+and a stateless MCP 2026-07-28 tool-server subset. This is **not** a claim of
+complete conformance to all optional MCP facilities or to other AI platforms.
 
-For /mcp requests, an explicitly supplied MCP-Protocol-Version header must
-be exactly 2025-11-25; unsupported values and duplicate version headers return
-HTTP 400. An absent header remains accepted for backward compatibility with
-older clients and the local stdio bridge. Clients should use the version
-returned by initialize.
+For modern 2026 requests, clients omit initialize and initialized. Instead,
+each POST MUST carry MCP-Protocol-Version: 2026-07-28, Mcp-Method: <method>,
+and Mcp-Name: <tool> on tools/call. The JSON params._meta MUST include
+io.modelcontextprotocol/protocolVersion: 2026-07-28 and an object
+io.modelcontextprotocol/clientCapabilities. Header/body mismatches fail with
+HTTP 400 and JSON-RPC -32020. Unsupported versions fail with -32022 listing
+both supported revisions. Modern results contain resultType: complete and
+the server identity in _meta. server/discover advertises only static tools.
+
+Legacy 2025-11-25 requests continue to use initialize, notifications/initialized,
+tools/list and tools/call. An absent version header remains accepted **only**
+for the legacy path, preserving backward compatibility with earlier local
+clients. Explicitly modern request metadata without a matching modern header
+is rejected. Newer revisions and duplicate version headers fail closed.
+
+**Modern scope limitations:** Only server/discover, tools/list and tools/call
+are supported, with the same Shards permissions and audited dispatcher.
+There is no resources/prompts subsystem, request-streaming, subscriptions/listen,
+multi-round-trip elicitation, or MCP Tasks extension. The Shards domain task
+tools are not the separate MCP Tasks extension. The pinned official Python
+MCP SDK clients (2.0.0 and 2.3.0) are tested with both the legacy path and,
+through `mode="auto"`, the 2026-07-28 tool subset, alongside dedicated
+direct-HTTP security contract tests. These establish a narrow tool-server
+interop envelope, **not** full 2026-era conformance certification.
 
 HTTP POST requests with ambiguous duplicate Content-Length or Authorization
 headers are rejected. Duplicate Origin headers are rejected even when the

@@ -54,6 +54,55 @@ class OfficialSdkTests(unittest.TestCase):
                     self.assertEqual(result.structured_content["agents"], 0)
         asyncio.run(run())
 
+    def test_official_modern_client_discovers_and_invokes_tools(self):
+        """2026-07-28 SDK protocol auto-selection, no legacy initialize."""
+        async def run():
+            url = "http://127.0.0.1:%s/mcp" % self.server.server_port
+            async with httpx2.AsyncClient(headers={
+                "Authorization": "Bearer " + self.token,
+            }, timeout=httpx2.Timeout(10, read=20)) as http_client:
+                transport = streamable_http_client(url, http_client=http_client)
+                async with Client(transport, mode="auto") as client:
+                    self.assertEqual(client.protocol_version, "2026-07-28")
+                    self.assertEqual(client.server_info.name, "shards-mcp")
+                    names = {tool.name for tool in (await client.list_tools()).tools}
+                    self.assertIn("system_status", names)
+                    response = await client.call_tool("system_status", {})
+                    self.assertFalse(response.is_error)
+                    self.assertEqual(response.structured_content["agents"], 0)
+        asyncio.run(run())
+
+    def test_official_modern_client_enforces_scoped_agent_visibility(self):
+        """SDK-negotiated modern tool calls enforce registered scope boundaries."""
+        root = self.gateway.authenticate(self.token)
+        enrolled = self.gateway.register(
+            root, "modern-scoped", "sdk-test", [], ["agent:read"],
+        )
+
+        async def run():
+            url = "http://127.0.0.1:%s/mcp" % self.server.server_port
+            async with httpx2.AsyncClient(headers={
+                "Authorization": "Bearer " + enrolled["token"],
+            }, timeout=httpx2.Timeout(10, read=20)) as http_client:
+                transport = streamable_http_client(url, http_client=http_client)
+                async with Client(transport, mode="auto") as client:
+                    self.assertEqual(client.protocol_version, "2026-07-28")
+                    tools = {tool.name for tool in (await client.list_tools()).tools}
+                    self.assertIn("agent_identity", tools)
+                    self.assertIn("agent_list", tools)
+                    self.assertNotIn("system_status", tools)
+                    self.assertNotIn("task_create", tools)
+                    identity = await client.call_tool("agent_identity", {})
+                    self.assertFalse(identity.is_error)
+                    self.assertEqual(identity.structured_content["agent_id"],
+                                     enrolled["agent_id"])
+                    self.assertEqual(identity.structured_content["scopes"], ["agent:read"])
+                    self.assertNotIn(enrolled["token"],
+                                     str(identity.structured_content))
+                    blocked = await client.call_tool("system_status", {})
+                    self.assertTrue(blocked.is_error)
+        asyncio.run(run())
+
     def test_official_client_with_signed_oauth_jwt_least_privilege(self):
         """Real SDK over HTTP + RSA JWT resource-server authentication together.
 

@@ -62,14 +62,21 @@ class ProtocolHardeningTests(unittest.TestCase):
         self.assertEqual(valid[1]["result"], {})
         # Missing header remains accepted for compatibility with legacy clients.
         self.assertEqual(self.raw(self.ping())[0], 200)
-        for version in ("2026-07-28", "2024-11-05", "invalid",
+        # A 2026-era request lacking params._meta is invalid; genuinely
+        # unsupported versions return a structured -32022 protocol error.
+        code, payload = self.raw(self.ping(), [
+            ("MCP-Protocol-Version", "2026-07-28"),
+        ])
+        self.assertEqual(code, 400)
+        self.assertEqual(payload["error"]["code"], -32602)
+        for version in ("2024-11-05", "invalid",
                         "2025-11-25,2026-07-28", ""):
             with self.subTest(version=version):
                 status, payload = self.raw(
                     self.ping(), [("MCP-Protocol-Version", version)]
                 )
                 self.assertEqual(status, 400, payload)
-                self.assertIn("unsupported", payload["error"])
+                self.assertEqual(payload["error"]["code"], -32022)
 
     def test_get_mcp_probe_validates_origin_and_version_before_405(self):
         c = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
@@ -79,7 +86,7 @@ class ProtocolHardeningTests(unittest.TestCase):
                 "Origin": "https://trusted.example",
             })
             response = c.getresponse()
-            self.assertEqual(response.status, 400)
+            self.assertEqual(response.status, 405)
             response.read()
         finally:
             c.close()
