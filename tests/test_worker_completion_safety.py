@@ -5,8 +5,9 @@ from shards_mcp.worker import process_once
 
 
 class CompletionClient:
-    def __init__(self, failure=None, payload=None):
+    def __init__(self, failure=None, payload=None, error_type=RuntimeError):
         self.failure = failure
+        self.error_type = error_type
         self.payload = {"action": "echo", "data": "ok"} if payload is None else payload
         self.calls = []
         self.claims = 0
@@ -18,7 +19,7 @@ class CompletionClient:
             return ({"claimed": True, "task": {"id": "t-1", "input": self.payload}}
                     if self.claims == 1 else {"claimed": False})
         if name == self.failure:
-            raise RuntimeError("simulated gateway failure")
+            raise self.error_type("simulated gateway failure")
         return {"ok": True}
 
 
@@ -29,6 +30,16 @@ class WorkerCompletionSafetyTests(unittest.TestCase):
             process_once(client)
         self.assertEqual(sum(name == "task_complete" for name, _ in client.calls), 1)
         self.assertIs(client.calls[-1][1]["success"], True)
+
+    def test_completion_value_error_cannot_trigger_second_completion(self):
+        # Regression for the original broad except(ValueError, TypeError):
+        # a future gateway adapter could raise ValueError while completing.
+        client = CompletionClient(failure="task_complete", error_type=ValueError)
+        with self.assertRaisesRegex(ValueError, "simulated gateway failure"):
+            process_once(client)
+        completions = [args for name, args in client.calls if name == "task_complete"]
+        self.assertEqual(len(completions), 1)
+        self.assertIs(completions[0]["success"], True)
 
     def test_checkpoint_runtime_error_does_not_complete_task(self):
         client = CompletionClient(failure="checkpoint_write")
