@@ -44,7 +44,8 @@ def read_agent_token(filename: str | None = None) -> str:
         path = Path(source).expanduser()
         if path.is_symlink():
             raise DiagnosticError("agent token file must not be a symlink")
-        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
