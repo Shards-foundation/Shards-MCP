@@ -1,6 +1,7 @@
 """End-to-end read-only MCP connection doctor and credential isolation."""
 from __future__ import annotations
 
+from http.client import BadStatusLine
 from http.server import ThreadingHTTPServer
 import json
 import os
@@ -115,6 +116,59 @@ class DoctorTests(unittest.TestCase):
             with self.subTest(timeout=bad_timeout):
                 with self.assertRaises(DiagnosticError):
                     diagnose(self.url, self.agent["token"], timeout=bad_timeout)
+
+    def test_untrusted_http_status_line_never_exposes_credential(self):
+        # Some malformed HTTP responses raise BadStatusLine with the original
+        # untrusted status text included in the exception string.
+        from unittest.mock import Mock
+        token = self.agent["token"]
+        client = Mock()
+        client.url = self.url
+        client.token = token
+        client.opener.open.side_effect = BadStatusLine("HTTP/1.1 " + token)
+        with patch("shards_mcp.doctor.AgentClient", return_value=client):
+            with self.assertRaises(DiagnosticError) as problem:
+                diagnose(self.url, token)
+        self.assertNotIn(token, str(problem.exception))
+        self.assertEqual(str(problem.exception), "MCP transport unavailable or refused")
+
+    def test_reflected_token_anywhere_in_report_is_never_emitted(self):
+        token = self.agent["token"]
+        valid_identity = {
+            "isError": False,
+            "structuredContent": {"agent_id": self.agent["agent_id"],
+                                  "role": "agent", "scopes": []},
+        }
+        for variant in ("server_version", "tool_name", "effective_scope"):
+            with self.subTest(variant=variant):
+                version = "0.1.0"
+                names = ["agent_identity"]
+                identity = dict(valid_identity)
+                if variant == "server_version":
+                    version = "0.1.0-" + token
+                elif variant == "tool_name":
+                    names.append("unknown_" + token)
+                else:
+                    identity = {
+                        **valid_identity,
+                        "structuredContent": {
+                            **valid_identity["structuredContent"],
+                            "scopes": ["scope:" + token],
+                        },
+                    }
+                result_sequence = [
+                    {"protocolVersion": "2025-11-25",
+                     "serverInfo": {"name": "shards-mcp", "version": version}},
+                    {"tools": [{"name": name} for name in names]},
+                    identity,
+                ]
+                with patch("shards_mcp.doctor._rpc", side_effect=result_sequence):
+                    with self.assertRaises(DiagnosticError) as problem:
+                        diagnose(self.url, token)
+                self.assertEqual(
+                    str(problem.exception), "gateway reflected an agent credential"
+                )
+                self.assertNotIn(token, str(problem.exception))
 
     def test_scoped_secret_files_are_secure_and_sources_unambiguous(self):
         secret = self.folder / "agent.token"
