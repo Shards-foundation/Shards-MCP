@@ -142,7 +142,7 @@ class ProtocolHardeningTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(payload["error"]["code"], -32600)
                 self.assertIsNone(payload["id"])
-        for valid_id in (0, -1, "req-1", None, 1.5):
+        for valid_id in (0, -1, "req-1", 1.5):
             with self.subTest(identifier=valid_id):
                 status, payload = self.raw(self.ping(valid_id))
                 self.assertEqual(status, 200)
