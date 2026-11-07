@@ -1,6 +1,7 @@
 import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
 import { authOptions } from "@/lib/auth";
+import { SignInButtons } from "./signin-buttons";
 
 export default async function SignInPage() {
   const session = await getServerSession(authOptions);
@@ -11,8 +12,7 @@ export default async function SignInPage() {
     <section className="panel">
       {authOptions.providers.length === 0
         ? <p>No identity providers configured. Set the OAuth client IDs and secrets on the server.</p>
-        : authOptions.providers.map(provider =>
-          <a className="action" key={provider.id} href={`/api/auth/signin/${provider.id}`}>Continue with {provider.name}</a>)}
+        : <SignInButtons providers={authOptions.providers.map(provider => ({ id: provider.id, name: provider.name }))} />}
     </section>
     <p className="muted">ChatGPT connects to the gateway as an AI client through MCP; it is not a social sign-in provider here.</p>
   </main>;
