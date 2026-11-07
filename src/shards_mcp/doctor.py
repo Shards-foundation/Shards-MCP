@@ -168,27 +168,55 @@ def _rpc(client: AgentClient, request_id: int, method: str,
     return answer["result"]
 
 
-def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
-    """Verify three read-only protocol interactions on the actual MCP transport."""
+def diagnose(url: str, token: str, *, timeout: float = 10.0,
+             protocol: str = "legacy") -> dict[str, Any]:
+    """Verify a specified MCP wire era; never silently downgrade protocols."""
+    if protocol not in ("legacy", "modern", "both"):
+        raise DiagnosticError("protocol must be legacy, modern or both")
     if not isinstance(timeout, (int, float)) or type(timeout) is bool:
         raise DiagnosticError("timeout must be a finite number of seconds")
     timeout = float(timeout)
     if not math.isfinite(timeout) or not 1 <= timeout <= 30:
         raise DiagnosticError("timeout must be between 1 and 30 seconds")
     origin = _validate_gateway_url(url)
+    if protocol == "both":
+        legacy = diagnose(origin, token, timeout=timeout, protocol="legacy")
+        modern_report = diagnose(origin, token, timeout=timeout, protocol="modern")
+        for field in ("agent_id", "scopes", "tool_names", "server_name"):
+            if legacy[field] != modern_report[field]:
+                raise DiagnosticError("protocols disagree about agent or tool authority")
+        return {
+            "ok": True, "protocol": "both",
+            "agent_id": legacy["agent_id"], "scopes": legacy["scopes"],
+            "tool_names": legacy["tool_names"], "tool_count": legacy["tool_count"],
+            "legacy": legacy, "modern": modern_report,
+        }
     try:
         client = AgentClient(origin, token)
     except ValueError:
         raise DiagnosticError("invalid agent credential or gateway address") from None
     started = time.monotonic()
-    initialise = _rpc(client, 1, "initialize", {
-        "protocolVersion": MCP_PROTOCOL_VERSION,
-        "capabilities": {},
-        "clientInfo": {"name": "shards-mcp-doctor", "version": "0.1.0"},
-    }, timeout)
-    if initialise.get("protocolVersion") != MCP_PROTOCOL_VERSION:
-        raise DiagnosticError("gateway negotiated an unsupported MCP version")
-    info = initialise.get("serverInfo")
+    modern = protocol == "modern"
+    if modern:
+        discovered = _rpc(client, 1, "server/discover", {}, timeout, modern=True)
+        if (discovered.get("resultType") != "complete"
+                or MODERN_VERSION not in discovered.get("supportedVersions", [])
+                or discovered.get("cacheScope") != "private"
+                or type(discovered.get("ttlMs")) is not int
+                or discovered["ttlMs"] != 0):
+            raise DiagnosticError("modern MCP discovery is invalid or unsafe to cache")
+        meta = discovered.get("_meta")
+        info = (meta.get("io.modelcontextprotocol/serverInfo")
+                if isinstance(meta, dict) else None)
+    else:
+        initialise = _rpc(client, 1, "initialize", {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "shards-mcp-doctor", "version": "0.1.0"},
+        }, timeout)
+        if initialise.get("protocolVersion") != MCP_PROTOCOL_VERSION:
+            raise DiagnosticError("gateway negotiated an unsupported MCP version")
+        info = initialise.get("serverInfo")
     if not isinstance(info, dict) or info.get("name") != "shards-mcp":
         raise DiagnosticError("unexpected MCP server identity")
     version = info.get("version")
@@ -196,8 +224,16 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
         r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}", version
     ):
         raise DiagnosticError("invalid MCP server version metadata")
-    _initialized(client, timeout)
-    listed = _rpc(client, 2, "tools/list", {}, timeout)
+    if not modern:
+        _initialized(client, timeout)
+        listed = _rpc(client, 2, "tools/list", {}, timeout)
+    else:
+        listed = _rpc(client, 2, "tools/list", {}, timeout, modern=True)
+        if (listed.get("resultType") != "complete"
+                or listed.get("cacheScope") != "private"
+                or type(listed.get("ttlMs")) is not int
+                or listed["ttlMs"] != 0):
+            raise DiagnosticError("modern MCP tool listing is invalid or unsafe to cache")
     tools = listed.get("tools")
     if not isinstance(tools, list) or len(tools) > 200:
         raise DiagnosticError("invalid MCP tool manifest")
@@ -208,9 +244,16 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
         names.append(entry["name"])
     if len(names) != len(set(names)) or "agent_identity" not in names:
         raise DiagnosticError("MCP tool discovery is incomplete or ambiguous")
-    call = _rpc(client, 3, "tools/call", {
-        "name": "agent_identity", "arguments": {},
-    }, timeout)
+    if modern:
+        call = _rpc(client, 3, "tools/call", {
+            "name": "agent_identity", "arguments": {},
+        }, timeout, modern=True)
+        if call.get("resultType") != "complete":
+            raise DiagnosticError("modern MCP call result type is invalid")
+    else:
+        call = _rpc(client, 3, "tools/call", {
+            "name": "agent_identity", "arguments": {},
+        }, timeout)
     if call.get("isError") is not False:
         raise DiagnosticError("agent identity tool denied")
     ident = call.get("structuredContent")
@@ -225,7 +268,7 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
     report = {
         "ok": True,
         "transport": "streamable-http",
-        "protocol_version": MCP_PROTOCOL_VERSION,
+        "protocol_version": MODERN_VERSION if modern else MCP_PROTOCOL_VERSION,
         "server_name": info["name"],
         "server_version": version,
         "agent_id": ident["agent_id"],
