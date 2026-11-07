@@ -2,13 +2,14 @@ import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
 import { authOptions } from "@/lib/auth";
 import { GatewayHealth } from "./status";
+import { SignOutButton } from "./signout-button";
 
 export default async function Home() {
   const session = await getServerSession(authOptions);
   if (!session?.user) redirect("/signin");
   return <main className="shell">
     <header><div><div className="eyebrow">SHARDS / MCP GATEWAY</div><h1>Operations console</h1></div>
-      <a className="action" href="/api/auth/signout">Sign out</a></header>
+      <SignOutButton /></header>
     <p className="muted">Signed in as {session.user.email ?? session.user.name ?? "authenticated user"}. Read-only diagnostics only.</p>
     <div className="grid">
       <section className="panel"><h2>Gateway reachability</h2><GatewayHealth /><p className="muted">Server-side liveness probe. No gateway credentials enter the browser.</p></section>
