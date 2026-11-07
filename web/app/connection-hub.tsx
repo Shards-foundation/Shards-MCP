@@ -65,6 +65,14 @@ export function ConnectionHub() {
     } catch { return false; }
   })();
   const selected = clients.find(item => item.id === client)!;
+  const instructions: Record<Client, string> = {
+    cursor: "Open Cursor Settings → MCP, add a custom MCP server and adapt the generated configuration to the installed version.",
+    claude: "Use Claude Code's MCP configuration or its mcp add command. Check the installed CLI help before importing the example.",
+    codex: "Edit the Codex MCP server configuration (typically config.toml) and restart the client.",
+    vscode: "Use the VS Code MCP configuration interface or workspace .vscode/mcp.json. Avoid committing credentials.",
+    antigravity: "Locate Antigravity's MCP server settings and confirm that the selected transport is supported by your installed release.",
+    other: "Open the client's MCP server configuration and map the transport, command or URL and authentication settings.",
+  };
   const snippet = valid ? configuration(client, transport, endpoint) : "";
   return <section className="panel" aria-labelledby="connections-title">
     <div className="eyebrow">DEVELOPER CONNECTIVITY</div>
@@ -80,7 +88,10 @@ export function ConnectionHub() {
       </select></label>
       <label>Gateway base URL<input value={endpoint} spellCheck={false} onChange={event => { setEndpoint(event.target.value); setCopied(false); }}/></label>
     </div>
+    <p><strong>Setup:</strong> {instructions[client]}</p>
     <p className="muted">{selected.note} These examples are starting points, not verified against every IDE release.</p>
+    {transport === "stdio" && <p className="muted">Prerequisite: install the Shards MCP Python package on the same machine as the IDE, so the <code>shards-mcp-stdio</code> executable is on PATH. The gateway itself may run elsewhere.</p>}
+    {transport === "remote" && <p className="muted">Prerequisite: the selected client must support Streamable HTTP MCP and bearer-token authentication. The gateway must be reachable from the IDE; localhost refers to the IDE machine.</p>}
     {!valid ? <p role="alert">Use an HTTPS gateway URL or local loopback HTTP, with no path, query or embedded credentials.</p> :
       <><pre className="snippet"><code>{snippet}</code></pre>
       <button className="action" type="button" onClick={() => {
