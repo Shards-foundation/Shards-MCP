@@ -168,6 +168,19 @@ def _rpc(client: AgentClient, request_id: int, method: str,
     return answer["result"]
 
 
+def _require_modern_server_identity(result: dict[str, Any],
+                                    expected: dict[str, Any]) -> None:
+    """Fail if a later modern result changes or omits authenticated server identity."""
+    metadata = result.get("_meta")
+    server = (metadata.get("io.modelcontextprotocol/serverInfo")
+              if isinstance(metadata, dict) else None)
+    if (result.get("resultType") != "complete"
+            or not isinstance(server, dict)
+            or server.get("name") != expected["name"]
+            or server.get("version") != expected["version"]):
+        raise DiagnosticError("modern MCP result has inconsistent server identity")
+
+
 def diagnose(url: str, token: str, *, timeout: float = 10.0,
              protocol: str = "legacy") -> dict[str, Any]:
     """Verify a specified MCP wire era; never silently downgrade protocols."""
@@ -182,7 +195,7 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0,
     if protocol == "both":
         legacy = diagnose(origin, token, timeout=timeout, protocol="legacy")
         modern_report = diagnose(origin, token, timeout=timeout, protocol="modern")
-        for field in ("agent_id", "scopes", "tool_names", "server_name"):
+        for field in ("agent_id", "scopes", "tool_names", "server_name", "server_version"):
             if legacy[field] != modern_report[field]:
                 raise DiagnosticError("protocols disagree about agent or tool authority")
         return {
@@ -200,8 +213,11 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0,
     if modern:
         discovered = _rpc(client, 1, "server/discover", {}, timeout, modern=True)
         supported = discovered.get("supportedVersions")
+        capabilities = discovered.get("capabilities")
         if (discovered.get("resultType") != "complete"
                 or not isinstance(supported, list)
+                or not isinstance(capabilities, dict)
+                or not isinstance(capabilities.get("tools"), dict)
                 or MODERN_VERSION not in supported
                 or discovered.get("cacheScope") != "private"
                 or type(discovered.get("ttlMs")) is not int
@@ -231,6 +247,7 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0,
         listed = _rpc(client, 2, "tools/list", {}, timeout)
     else:
         listed = _rpc(client, 2, "tools/list", {}, timeout, modern=True)
+        _require_modern_server_identity(listed, info)
         if (listed.get("resultType") != "complete"
                 or listed.get("cacheScope") != "private"
                 or type(listed.get("ttlMs")) is not int
@@ -250,8 +267,7 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0,
         call = _rpc(client, 3, "tools/call", {
             "name": "agent_identity", "arguments": {},
         }, timeout, modern=True)
-        if call.get("resultType") != "complete":
-            raise DiagnosticError("modern MCP call result type is invalid")
+        _require_modern_server_identity(call, info)
     else:
         call = _rpc(client, 3, "tools/call", {
             "name": "agent_identity", "arguments": {},
