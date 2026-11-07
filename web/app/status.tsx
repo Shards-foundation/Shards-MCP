@@ -7,8 +7,8 @@ export function GatewayHealth() {
     const controller = new AbortController();
     fetch("/api/gateway/health", { cache: "no-store", signal: controller.signal })
       .then(async response => {
-        if (!response.ok) throw new Error("probe_failed");
         const data: unknown = await response.json();
+        if (!response.ok && response.status !== 503) throw new Error("probe_failed");
         setState(typeof data === "object" && data !== null && "state" in data &&
           typeof data.state === "string" ? data.state : "unknown");
       })
