@@ -70,6 +70,28 @@ class DoctorTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
 
+    def test_mcp_handshake_emits_initialized_notification_before_tool_calls(self):
+        from shards_mcp.doctor import _initialized as real_initialized
+        order = []
+
+        def record_initialised(client, timeout):
+            order.append("notifications/initialized")
+            return real_initialized(client, timeout)
+
+        from shards_mcp.doctor import _rpc as real_rpc
+        def record_rpc(client, identifier, method, params, timeout):
+            order.append(method)
+            return real_rpc(client, identifier, method, params, timeout)
+
+        with patch("shards_mcp.doctor._rpc", side_effect=record_rpc):
+            with patch("shards_mcp.doctor._initialized", side_effect=record_initialised):
+                report = diagnose(self.url, self.agent["token"])
+        self.assertTrue(report["ok"])
+        self.assertEqual(
+            order,
+            ["initialize", "notifications/initialized", "tools/list", "tools/call"],
+        )
+
     def test_separate_process_json_report_has_no_credentials(self):
         env = os.environ.copy()
         env.pop("SHARDS_ADMIN_TOKEN", None)
