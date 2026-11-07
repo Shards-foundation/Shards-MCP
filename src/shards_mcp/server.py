@@ -25,6 +25,7 @@ from .oauth import OAuthResourceServer
 from .a2a import A2AAdapter
 from .observability import RequestMetrics, route_class
 from .config import admin_token_from_environment
+from .json_limits import enforce_json_depth
 
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
@@ -437,7 +438,9 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                 return self.respond(401, {"error": "invalid credentials"},
                                     {"WWW-Authenticate": challenge})
             try:
-                payload = json.loads(self.rfile.read(length), parse_constant=reject_nonfinite,
+                raw = self.rfile.read(length)
+                enforce_json_depth(raw)
+                payload = json.loads(raw, parse_constant=reject_nonfinite,
                                      parse_float=reject_overflowing_float,
                                      object_pairs_hook=reject_duplicate_properties)
             except (ValueError, UnicodeDecodeError, RecursionError):
