@@ -35,7 +35,10 @@ returned by initialize.
 
 HTTP POST requests with ambiguous duplicate Content-Length or Authorization
 headers are rejected. Duplicate Origin headers are rejected even when the
-first one appears allowlisted. Payloads containing duplicate JSON object keys
+first one appears allowlisted. Both HTTP and stdio also enforce a fixed
+128-level JSON nesting limit before parsing, independent of interpreter
+recursion behaviour. A string containing brackets does not consume this
+structural depth budget. Payloads containing duplicate JSON object keys
 are rejected rather than allowing last-key-wins ambiguity. JSON-RPC request
 IDs must be a scalar string or number; null, booleans, arrays and objects
 are invalid. notifications/initialized must not carry a request ID.
