@@ -46,10 +46,11 @@ is rejected. Newer revisions and duplicate version headers fail closed.
 are supported, with the same Shards permissions and audited dispatcher.
 There is no resources/prompts subsystem, request-streaming, subscriptions/listen,
 multi-round-trip elicitation, or MCP Tasks extension. The Shards domain task
-tools are not the separate MCP Tasks extension. The older Python MCP SDK
-client checks run against the legacy path; modern interoperability currently
-has dedicated direct-HTTP contract tests, not a third-party 2026-era client
-conformance certification.
+tools are not the separate MCP Tasks extension. The pinned official Python
+MCP SDK clients (2.0.0 and 2.3.0) are tested with both the legacy path and,
+through `mode="auto"`, the 2026-07-28 tool subset, alongside dedicated
+direct-HTTP security contract tests. These establish a narrow tool-server
+interop envelope, **not** full 2026-era conformance certification.
 
 HTTP POST requests with ambiguous duplicate Content-Length or Authorization
 headers are rejected. Duplicate Origin headers are rejected even when the
