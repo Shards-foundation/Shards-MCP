@@ -161,6 +161,25 @@ The resource server exposes RFC 9728 metadata under `/.well-known/oauth-protecte
 
 **Remote access requires a TLS reverse proxy and a compatible external OAuth provider.** Token issuance, consent/PKCE, refresh tokens and provider-specific integrations are not implemented by this gateway. Local signed-JWT integration tests passing does **not** mean a live ChatGPT plugin, a fully compatible identity-provider flow, or App Directory approval.
 
+## Verify A2A without creating tasks
+
+A scoped client can use the new read-only shards-a2a-doctor CLI to check
+an enrolled target Agent Card and the A2A 1.0 JSON-RPC GetTask error
+contract. It sends **no SendMessage, CancelTask or worker actions**.
+
+~~~bash
+shards-a2a-doctor --url http://127.0.0.1:8787 \
+  --target-agent agt_REPLACE_WITH_ENROLLED_ID \
+  --token-file "$HOME/.config/shards/reader.token" --json
+~~~
+
+Requires a separate agent credential with agent:read and task:read.
+It rejects off-loopback plaintext, redirects, malformed responses and
+insufficient permissions. Success verifies only this read-only slice of
+A2A v1.0 for the configured connection, not general interoperability.
+
+See [A2A diagnostic guide](docs/a2a-doctor.md).
+
 ## Agent-to-Agent v1.0 adapter (limited preview)
 
 The gateway now provides an opt-in **A2A v1.0 JSON-RPC subset** alongside MCP and REST. A2A is for *agent-to-agent task collaboration*, whereas MCP connects an agent to tools.
