@@ -28,6 +28,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: Require the released commit to be merged into main
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {
+            echo "Release tag points to a commit not merged into main" >&2
+            exit 1
+          }
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
@@ -92,7 +100,7 @@ jobs:
         run: |
           python -m venv /tmp/shards-release-wheel
           /tmp/shards-release-wheel/bin/python -m pip install dist/*.whl
-          /tmp/shards-release-wheel/bin/python -c "import shards_mcp; from shards_mcp.server import TOOL_LIST; assert TOOL_LIST"
+          /tmp/shards-release-wheel/bin/python -c "import importlib.metadata as metadata, shards_mcp; from shards_mcp.server import TOOL_LIST; assert TOOL_LIST; assert shards_mcp.__version__ == metadata.version('shards-mcp'), (shards_mcp.__version__, metadata.version('shards-mcp'))"
           /tmp/shards-release-wheel/bin/shards-mcp-doctor --help >/dev/null
           /tmp/shards-release-wheel/bin/shards-worker --help >/dev/null
           /tmp/shards-release-wheel/bin/shards-scheduler --help >/dev/null
