@@ -54,6 +54,8 @@ class A2ADoctorTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["protocol_version"], "1.0")
         self.assertEqual(result["target_agent"], self.target["agent_id"])
+        self.assertTrue(result["scoped_identity_verified"])
+        self.assertEqual(result["caller_agent"], self.reader["agent_id"])
         self.assertEqual(result["methods_exercised"], ["GetTask"])
         self.assertEqual(result["get_task_probe"], "not-found-as-expected")
         self.assertFalse(result["full_a2a_conformance"])
@@ -129,13 +131,32 @@ class A2ADoctorTests(unittest.TestCase):
         with patch("shards_mcp.a2a_doctor._read_json", side_effect=no_bearer):
             with self.assertRaisesRegex(DiagnosticError, "bearer authentication"):
                 diagnose(self.url, self.reader["token"], self.target["agent_id"])
+        for requirements in (None, [], [{}],
+                             [{"schemes": {"anonymous": {"list": []}}}],
+                             [{"schemes": {"bearer": {"list": []}}}, {}]):
+            with self.subTest(requirements=requirements):
+                def invalid_requirements(client, request, timeout):
+                    data = real_read(client, request, timeout)
+                    if request.get_method() == "GET":
+                        if requirements is None:
+                            data.pop("securityRequirements", None)
+                        else:
+                            data["securityRequirements"] = requirements
+                    return data
+                with patch("shards_mcp.a2a_doctor._read_json",
+                           side_effect=invalid_requirements):
+                    with self.assertRaisesRegex(DiagnosticError, "bearer requirements"):
+                        diagnose(self.url, self.reader["token"], self.target["agent_id"])
 
     def test_gettask_envelope_and_permission_validation(self):
         from shards_mcp.a2a_doctor import _read_json as real_read
         variants = [
             {"jsonrpc": "2.0", "id": 2, "error": {"code": -32001}},
             {"jsonrpc": "2.0", "id": 1, "result": {"id": "unexpected"}},
-            {"jsonrpc": "2.0", "id": 1, "error": {"code": -32003}},
+            {"jsonrpc": "2.0", "id": 1, "error": {"code": -32003, "message": "denied"}},
+            {"jsonrpc": "2.0", "id": 1, "error": {"code": -32001}},
+            {"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": None}},
+            {"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": 123}},
         ]
         for invalid in variants:
             with self.subTest(reply=invalid):
@@ -150,6 +171,11 @@ class A2ADoctorTests(unittest.TestCase):
     def test_admin_token_not_used_for_agent_diagnostic(self):
         with patch.dict(os.environ, {"SHARDS_ADMIN_TOKEN": self.admin_token}):
             with self.assertRaises(DiagnosticError):
+                diagnose(self.url, self.admin_token, self.target["agent_id"])
+        # Critical: an operator token MUST be denied even when the environment
+        # omits the administrator variable (e.g. token loaded from a file).
+        with patch.dict(os.environ, {"SHARDS_ADMIN_TOKEN": ""}):
+            with self.assertRaisesRegex(DiagnosticError, "scoped Shards agent"):
                 diagnose(self.url, self.admin_token, self.target["agent_id"])
 
 
