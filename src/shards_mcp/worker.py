@@ -108,14 +108,17 @@ def process_once(client: AgentClient) -> int:
                 or not task["id"] or "input" not in task):
             raise RuntimeError("gateway returned an invalid claimed task")
         task_id = task["id"]
+        client.call("checkpoint_write", {"task_id": task_id, "body": {"stage": "started"}})
         try:
-            client.call("checkpoint_write", {"task_id": task_id, "body": {"stage": "started"}})
             result = safe_operation(task["input"])
-            client.call("task_complete", {"task_id": task_id, "success": True, "result": result})
         except (ValueError, TypeError) as exc:
-            # Only expected validation failures become a reported task failure.
+            # Only local input validation errors become task failures.
+            # A completion or checkpoint transport failure must never be
+            # converted into a second, contradictory completion attempt.
             client.call("task_complete", {"task_id": task_id, "success": False,
                                           "result": {"error": str(exc)}})
+        else:
+            client.call("task_complete", {"task_id": task_id, "success": True, "result": result})
         completed += 1
     return completed
 
