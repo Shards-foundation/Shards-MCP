@@ -71,7 +71,7 @@ export SHARDS_AGENT_TOKEN="$(cat "$HOME/.config/shards/hermes.token")"
 ## Verify a connected AI client (read-only)
 
 The `shards-mcp-doctor` command performs a real Streamable HTTP MCP
-`initialize` / `tools/list` / `agent_identity` round-trip and prints
+`initialize` / `notifications/initialized` / `tools/list` / `agent_identity` lifecycle and prints
 the authenticated agent ID, effective permission scopes, discovered tool count
 and latency. It makes **no writes**, never prints credentials, rejects
 administrator identities and refuses non-loopback plaintext or redirects.
@@ -107,6 +107,17 @@ curl -sS http://127.0.0.1:8787/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
+~~~
+
+Complete the MCP lifecycle before tool discovery:
+
+~~~bash
+curl -sS -i http://127.0.0.1:8787/mcp \
+  -H "Authorization: Bearer $SHARDS_AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "MCP-Protocol-Version: 2025-11-25" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 ~~~
 
 Then issue method `tools/list` with an empty `params` object. Tool discovery is filtered by the authenticated agent scopes. Agent creation and revocation are deliberately not exposed through MCP or REST; use `shards-mcp-admin` on the host.
