@@ -2,6 +2,7 @@ import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
 import { authOptions } from "@/lib/auth";
 import { GatewayHealth } from "./status";
+import { ConnectionHub } from "./connection-hub";
 import { SignOutButton } from "./signout-button";
 
 export default async function Home() {
@@ -23,5 +24,6 @@ export default async function Home() {
         <p>Connect ChatGPT as an MCP client after configuring a publicly reachable HTTPS gateway and appropriate OAuth resource-server support.</p>
         <p className="muted">Live ChatGPT interoperability is not yet verified.</p></section>
     </div>
+    <ConnectionHub />
   </main>;
 }
