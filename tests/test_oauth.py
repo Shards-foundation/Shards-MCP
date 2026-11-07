@@ -16,7 +16,7 @@ import unittest
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from shards_mcp.core import Gateway, GatewayError
+from shards_mcp.core import Gateway, GatewayError, SCOPES
 from shards_mcp.oauth import OAuthResourceServer
 from shards_mcp.server import make_handler
 
@@ -84,6 +84,7 @@ class OAuthTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertEqual(metadata["resource"], self.RESOURCE)
         self.assertEqual(metadata["authorization_servers"], [self.ISSUER])
+        self.assertEqual(set(metadata["scopes_supported"]), set(SCOPES))
         code, _, _ = self.request("GET", "/.well-known/oauth-protected-resource/mcp")
         self.assertEqual(code, 200)
         code, _, headers = self.request("POST", "/mcp",
@@ -99,6 +100,12 @@ class OAuthTests(unittest.TestCase):
         names = {t["name"] for t in data["result"]["tools"]}
         self.assertIn("agent_list", names)
         self.assertIn("message_poll", names)
+        self.assertIn("agent_identity", names)
+        _, identity, _ = self.request("POST", "/mcp", self.jwt_token(),
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "agent_identity", "arguments": {}}})
+        self.assertEqual(identity["result"]["structuredContent"]["agent_id"], self.agent_id)
+        self.assertNotIn("token", identity["result"]["structuredContent"])
         self.assertNotIn("task_create", names)
         self.assertNotIn("system_status", names)
         result = self.oauth.authenticate(self.jwt_token())
