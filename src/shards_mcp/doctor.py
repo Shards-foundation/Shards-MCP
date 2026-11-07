@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+from http.client import HTTPException
 import stat
 import sys
 import time
@@ -101,7 +102,7 @@ def _rpc(client: AgentClient, request_id: int, method: str,
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except HTTPError as exc:
         raise DiagnosticError("MCP gateway rejected request (HTTP %d)" % exc.code) from None
-    except (URLError, TimeoutError, OSError, RuntimeError) as exc:
+    except (URLError, TimeoutError, OSError, RuntimeError, HTTPException):
         raise DiagnosticError("MCP transport unavailable or refused") from None
     if len(raw) > MAX_RESPONSE_BYTES:
         raise DiagnosticError("MCP response exceeds maximum size")
@@ -177,9 +178,7 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
             not isinstance(ident.get("scopes"), list) or
             any(not isinstance(x, str) for x in ident["scopes"])):
         raise DiagnosticError("credential is not a valid scoped agent identity")
-    if token in canonical(ident):
-        raise DiagnosticError("server leaked an agent credential")
-    return {
+    report = {
         "ok": True,
         "transport": "streamable-http",
         "protocol_version": MCP_PROTOCOL_VERSION,
@@ -191,6 +190,12 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
         "tool_names": sorted(names),
         "round_trip_ms": round((time.monotonic() - started) * 1000, 2),
     }
+    # Server metadata and tool names are untrusted even after a valid identity
+    # response: a compromised endpoint could reflect the bearer credential
+    # outside the identity tool result. Reject the entire output atomically.
+    if token in canonical(report):
+        raise DiagnosticError("gateway reflected an agent credential")
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
