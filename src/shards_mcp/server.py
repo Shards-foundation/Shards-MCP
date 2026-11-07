@@ -455,7 +455,7 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                 return self.respond(400, {"jsonrpc": "2.0", "id": None,
                                           "error": {"code": -32600, "message": "Invalid Request"}})
             request_id = payload.get("id")
-            if "id" in payload and type(request_id) not in (str, int, float, type(None)):
+            if "id" in payload and type(request_id) not in (str, int, float):
                 return self.rpc_error(None, -32600, "Invalid Request")
             method = payload.get("method")
             if not isinstance(method, str):
