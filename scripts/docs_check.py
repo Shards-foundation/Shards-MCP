@@ -39,7 +39,7 @@ def skill_frontmatter_valid(data: str) -> bool:
     for line in lines[1:closing]:
         if not line.strip() or line.lstrip().startswith("#"):
             continue
-        match = re.fullmatch(r"([a-z][a-z0-9_-]*):[ \\t]*(\\S.*?)\\s*", line)
+        match = re.fullmatch(r"([a-z][a-z0-9_-]*):[ \t]*(\S.*?)\s*", line)
         if match is None or match.group(1) in fields:
             return False
         fields[match.group(1)] = match.group(2).strip()
