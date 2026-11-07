@@ -20,6 +20,34 @@ def markdown_files(root: Path):
             yield candidate
 
 
+def skill_frontmatter_valid(data: str) -> bool:
+    """Require a complete YAML-style header, with populated metadata before its closing fence.
+
+    This intentionally validates only our required, scalar fields, not general YAML.
+    It rejects absent/malformed delimiters, duplicate keys and missing values.
+    """
+    lines = data.splitlines()
+    if len(lines) < 4 or lines[0] != "---":
+        return False
+    try:
+        closing = lines.index("---", 1)
+    except ValueError:
+        return False
+    if closing < 3:
+        return False
+    fields: dict[str, str] = {}
+    for line in lines[1:closing]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = re.fullmatch(r"([a-z][a-z0-9_-]*):[ \\t]*(\\S.*?)\\s*", line)
+        if match is None or match.group(1) in fields:
+            return False
+        fields[match.group(1)] = match.group(2).strip()
+    name = fields.get("name", "")
+    description = fields.get("description", "")
+    return bool(re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name) and description)
+
+
 def validate(root: Path = REPO) -> list[str]:
     problems: list[str] = []
     paths = list(markdown_files(root))
@@ -74,7 +102,7 @@ def validate(root: Path = REPO) -> list[str]:
                 problems.append(f"LICENSE: missing canonical MIT clause: {required_notice}")
     for skill in (root / "skills").glob("*/SKILL.md"):
         data = skill.read_text(encoding="utf-8")
-        if not data.startswith("---\n") or "description:" not in data or "name:" not in data:
+        if not skill_frontmatter_valid(data):
             problems.append(f"{skill.relative_to(root)}: invalid skill frontmatter")
         if "Output:" not in data and "**Output:**" not in data:
             problems.append(f"{skill.relative_to(root)}: missing execution output contract")
