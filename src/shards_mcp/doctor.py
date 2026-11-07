@@ -11,6 +11,7 @@ import argparse
 import json
 import math
 import os
+import re
 from pathlib import Path
 from http.client import HTTPException
 import stat
@@ -174,6 +175,11 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
     info = initialise.get("serverInfo")
     if not isinstance(info, dict) or info.get("name") != "shards-mcp":
         raise DiagnosticError("unexpected MCP server identity")
+    version = info.get("version")
+    if not isinstance(version, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}", version
+    ):
+        raise DiagnosticError("invalid MCP server version metadata")
     _initialized(client, timeout)
     listed = _rpc(client, 2, "tools/list", {}, timeout)
     tools = listed.get("tools")
@@ -195,7 +201,7 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
     if not isinstance(ident, dict):
         raise DiagnosticError("agent identity result is not structured")
     if (not isinstance(ident.get("agent_id"), str) or
-            not ident["agent_id"].startswith("agt_") or
+            re.fullmatch(r"agt_[0-9a-f]{24}", ident["agent_id"]) is None or
             ident.get("role") != "agent" or
             not isinstance(ident.get("scopes"), list) or
             any(not isinstance(x, str) for x in ident["scopes"])):
@@ -205,7 +211,7 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
         "transport": "streamable-http",
         "protocol_version": MCP_PROTOCOL_VERSION,
         "server_name": info["name"],
-        "server_version": str(info.get("version", "")),
+        "server_version": version,
         "agent_id": ident["agent_id"],
         "scopes": sorted(ident["scopes"]),
         "tool_count": len(names),
