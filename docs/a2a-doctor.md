@@ -41,17 +41,18 @@ nonregular secret input.
 
 ## What is verified
 
-1. Fetch GET /a2a/agents/ID/card using the scoped bearer token.
-2. Validate that the Agent Card advertises exactly the requested
-   JSONRPC v1.0 endpoint, declared nonstreaming capabilities and
-   bearer authentication.
-3. Send a JSON-RPC GetTask request with the A2A-Version: 1.0 header
+1. Verify the caller is a **scoped agent** through the existing read-only Shards MCP initialize / agent_identity workflow; reject an operator token regardless of local administrator environment variables. Require agent:read and task:read.
+2. Fetch GET /a2a/agents/ID/card using the scoped bearer token.
+3. Validate that the Agent Card advertises exactly the requested
+   JSONRPC v1.0 endpoint, declared nonstreaming capabilities, the bearer
+   scheme and the explicit non-anonymous securityRequirements entry.
+4. Send a JSON-RPC GetTask request with the A2A-Version: 1.0 header
    for a newly generated random, nonexistent task ID.
-4. Require the matching JSON-RPC response ID and the documented
+5. Require the matching JSON-RPC response ID, required string error message and the documented
    task-not-found error. A permission error, unexpected successful
    task result, wrong protocol version, malformed JSON or redirect
    is a diagnostic failure.
-5. Return JSON with target ID, protocol version, round-trip latency
+6. Return JSON with verified caller/target IDs, protocol version, round-trip latency
    and verified probe semantics.
 
 The tool does not invoke SendMessage, CancelTask, worker execution,
@@ -65,6 +66,7 @@ random GetTask probe is deliberately read-only.
   values are checked before trusting remote data.
 - Credentials are not included in reports or error messages;
   reflected credentials invalidate the run.
+- A missing or ambiguous required bearer-auth declaration fails closed.
 - Unknown versions or endpoint mismatches fail closed without
   automatic protocol downgrades.
 - The report intentionally omits the untrusted Agent Card name,
