@@ -14,7 +14,7 @@
 
 - MCP stdio bridge for compatible local AI runtimes, forwarding to the authenticated HTTP server.
 - Authenticated `agent_identity` tool for effective principal and scope discovery without exposing credentials.
-- MCP JSON-RPC 2.0 stateless HTTP at POST /mcp: initialize, ping, tools/list, tools/call. Authenticated generic HTTP clients may instead invoke POST /v1/tools/{name} with JSON arguments, or discover GET /v1/tools.
+- MCP JSON-RPC over authenticated `POST /mcp`, with both the legacy `2025-11-25` initialize/ping/tool-server contract and the **2026-07-28 stateless tool subset** (`server/discover`, `tools/list`, `tools/call`, per-request metadata and checked routing headers). The newer contract is not yet a full MCP extensions/subscriptions implementation. Generic HTTP automation may alternatively use `POST /v1/tools/{name}` or discover `GET /v1/tools`.
 - Scoped bearer-credential agent registration, agent enumeration, revocation and heartbeat.
 - Durable agent-to-agent messaging, idempotency and recipient isolation.
 - Assigned tasks with leases, checkpoint persistence, conservative failure recovery and independent task verification gate.
