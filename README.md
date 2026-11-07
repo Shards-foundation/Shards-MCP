@@ -66,7 +66,7 @@ python -m venv .venv
 python -m pip install -e .
 mkdir -p "$HOME/.config/shards"
 chmod 700 "$HOME/.config/shards"
-python -c 'import os,pathlib,secrets; p=pathlib.Path.home()/".config/shards/admin.token"; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(fd,(secrets.token_urlsafe(48)+"\\n").encode()); os.close(fd)'
+python -c 'import os,pathlib,secrets; p=pathlib.Path.home()/".config/shards/admin.token"; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(fd,secrets.token_urlsafe(48).encode()); os.close(fd)'
 export SHARDS_ADMIN_TOKEN_FILE="$HOME/.config/shards/admin.token"
 export SHARDS_DB="$PWD/shards.local.sqlite"
 shards-mcp
