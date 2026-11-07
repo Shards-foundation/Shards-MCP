@@ -49,16 +49,19 @@ def main() -> int:
         require(result == {"echo": "shards-mcp-safe-demo"}, "unexpected deterministic worker output")
         reported = gateway.task_complete(worker, task_id, True, result)
         require(reported["state"] == "reported", "worker report bypassed verifier")
-        require(gateway.task_get(creator, task_id)["state"] == "reported", "creator saw incorrect reported state")
+        persisted = gateway.task_get(creator, task_id)
+        require(persisted["state"] == "reported", "creator saw incorrect reported state")
+        require(persisted["result"] == {"echo": "shards-mcp-safe-demo"}, "persisted result differs from expected output")
         verified = gateway.task_verify(
             verifier, task_id, approved=True,
-            evidence={"assertion": "echo-output-matched-expected-value", "expected": result},
+            evidence={"assertion": "persisted-echo-output-matched-expected-value", "expected": persisted["result"]},
         )
         require(verified["state"] == "succeeded", "verification failed")
         final = gateway.task_get(creator, task_id)
         audit = gateway.audit_verify(admin)
         require(audit["valid"] is True, "audit integrity failed")
         require(final["state"] == "succeeded", "final task state invalid")
+        require(final["result"] == {"echo": "shards-mcp-safe-demo"}, "verified task output changed")
         report = {
             "ok": True,
             "task_state": final["state"],
