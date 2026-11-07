@@ -31,7 +31,12 @@ jobs:
           fetch-depth: 0
       - name: Require the released commit to be merged into main
         run: |
-          git fetch --no-tags origin main:refs/remotes/origin/main
+          # fetch-depth: 0 above already retrieves the remote-tracking main ref.
+          # Do not re-fetch: checkout deliberately drops credentials for test steps.
+          git show-ref --verify --quiet refs/remotes/origin/main || {
+            echo "origin/main missing from full-history checkout" >&2
+            exit 1
+          }
           git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {
             echo "Release tag points to a commit not merged into main" >&2
             exit 1
