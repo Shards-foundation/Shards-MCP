@@ -7,6 +7,7 @@ This is a **separate Next.js application** under `web/`, not a public deployment
 - Google, GitHub and Discord OAuth sign-in using NextAuth, with server-side secrets, eight-hour JWT sessions, and an explicit provider-subject allowlist (empty means no access).
 - Authentication-gated console; unauthenticated users are redirected to `/signin`.
 - A server-side, read-only gateway liveness probe at `/api/gateway/health` with a three-second timeout, no redirects, no user-supplied target URL, no credential forwarding and no response-body forwarding.
+- Interactive IDE Connection Hub with local stdio and remote HTTP configuration templates for Cursor, Claude Code, Codex, VS Code, Antigravity and generic MCP clients. Templates are not live connectivity tests; installed client versions and transport support must be verified.
 - Visible connection guidance and explicit disclosure of functionality not yet implemented.
 
 **Social sign-in does not authorise gateway actions.** No administrator token, agent token or OAuth provider access token is sent to the browser. This version deliberately does not allow registration, agent management or task mutation. Those require tenant membership, roles, audit integration and a scoped backend bridge.
@@ -36,6 +37,16 @@ Register the exact redirect URLs in each OAuth provider's developer console:
 Set `SHARDS_GATEWAY_INTERNAL_URL` to the gateway address reachable from the **web server**, not from the user's browser. Remote URLs must use HTTPS. The probe does not establish readiness, OAuth interoperability, identity or permission scope.
 
 For production, use a verified HTTPS domain and register corresponding provider callbacks. Configure `NEXTAUTH_URL` to the exact external origin and a strong `NEXTAUTH_SECRET`. Never commit `.env.local`. Do not expose the Python gateway bootstrap secret to the web application.
+
+## IDE connection workflow
+
+1. Install the Python gateway/stdio bridge package on the machine where the IDE runs.
+2. Register a separate least-privilege agent credential on the trusted gateway host with `shards-mcp-admin`; never reuse the administrator token.
+3. Sign in to the console, select the IDE and transport, then copy the generated configuration into that client's MCP settings.
+4. Replace the credential placeholder using the client's protected secret mechanism. Do not commit secrets to workspace files.
+5. Run `shards-mcp-doctor --protocol both --json` with the scoped credential from a trusted machine to verify server-side identity and permissions. Client-side verification must also be performed.
+
+For remote HTTP, use HTTPS and confirm that the chosen IDE supports the required MCP transport and authentication header handling. Some clients may use different configuration keys or require their own OAuth flow; examples are not claims of certified compatibility.
 
 ## ChatGPT and AI connections
 
