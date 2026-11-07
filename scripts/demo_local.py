@@ -11,6 +11,12 @@ from shards_mcp.core import Gateway
 from shards_mcp.worker import safe_operation
 
 
+def require(condition: bool, message: str) -> None:
+    """Fail closed even under python -O / PYTHONOPTIMIZE."""
+    if not condition:
+        raise RuntimeError("DEMO FAIL: " + message)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="shards-mcp-demo-") as folder:
         secret = secrets.token_urlsafe(48)
@@ -30,29 +36,29 @@ def main() -> int:
             for role, data in identities.items()
         }
         creator, worker, verifier = (actors[k] for k in ("creator", "worker", "verifier"))
-        assert len({creator.agent_id, worker.agent_id, verifier.agent_id}) == 3
+        require(len({creator.agent_id, worker.agent_id, verifier.agent_id}) == 3, "roles not distinct")
         input_data = {"action": "echo", "data": "shards-mcp-safe-demo"}
         created = gateway.task_create(creator, worker.agent_id, input_data, "demo-echo-001")
         repeated = gateway.task_create(creator, worker.agent_id, input_data, "demo-echo-001")
-        assert repeated["deduplicated"] is True
+        require(repeated["deduplicated"] is True, "idempotency deduplication failed")
         task_id = created["task_id"]
         claimed = gateway.task_claim_next(worker, lease_seconds=60)
-        assert claimed["claimed"] is True and claimed["task"]["id"] == task_id
+        require(claimed["claimed"] is True and claimed["task"]["id"] == task_id, "worker did not claim assigned task")
         gateway.checkpoint(worker, task_id, {"stage": "safe-operation-started"})
         result = safe_operation(claimed["task"]["input"])
-        assert result == {"echo": "shards-mcp-safe-demo"}
+        require(result == {"echo": "shards-mcp-safe-demo"}, "unexpected deterministic worker output")
         reported = gateway.task_complete(worker, task_id, True, result)
-        assert reported["state"] == "reported"
-        assert gateway.task_get(creator, task_id)["state"] == "reported"
+        require(reported["state"] == "reported", "worker report bypassed verifier")
+        require(gateway.task_get(creator, task_id)["state"] == "reported", "creator saw incorrect reported state")
         verified = gateway.task_verify(
             verifier, task_id, approved=True,
             evidence={"assertion": "echo-output-matched-expected-value", "expected": result},
         )
-        assert verified["state"] == "succeeded"
+        require(verified["state"] == "succeeded", "verification failed")
         final = gateway.task_get(creator, task_id)
         audit = gateway.audit_verify(admin)
-        assert audit["valid"] is True
-        assert final["state"] == "succeeded"
+        require(audit["valid"] is True, "audit integrity failed")
+        require(final["state"] == "succeeded", "final task state invalid")
         report = {
             "ok": True,
             "task_state": final["state"],
