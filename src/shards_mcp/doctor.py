@@ -1,6 +1,6 @@
 """Read-only connection diagnostic for scoped Shards MCP clients.
 
-Three MCP calls only: initialize, tools/list and agent_identity. It never
+Three read-only MCP method calls plus the initialized lifecycle notification. It never
 provisions identities, modifies tasks, publishes events or executes a worker.
 HTTPS is required off loopback, redirects and proxies are disabled, and
 sensitive transport details are deliberately omitted from error messages.
@@ -76,15 +76,10 @@ def _validate_gateway_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def _rpc(client: AgentClient, request_id: int, method: str,
-         params: dict[str, Any], timeout: float) -> dict[str, Any]:
-    payload = {
-        "jsonrpc": "2.0", "id": request_id,
-        "method": method, "params": params,
-    }
-    body = canonical(payload).encode("utf-8")
-    req = Request(
-        client.url + "/mcp", body,
+def _request(client: AgentClient, payload: dict[str, Any]) -> Request:
+    """Prepare a single MCP POST without leaking or redirecting bearer tokens."""
+    return Request(
+        client.url + "/mcp", canonical(payload).encode("utf-8"),
         headers={
             "Authorization": "Bearer " + client.token,
             "Content-Type": "application/json",
@@ -93,6 +88,31 @@ def _rpc(client: AgentClient, request_id: int, method: str,
         },
         method="POST",
     )
+
+
+def _initialized(client: AgentClient, timeout: float) -> None:
+    """Complete MCP initialization before any tool discovery or execution."""
+    req = _request(client, {
+        "jsonrpc": "2.0", "method": "notifications/initialized",
+    })
+    try:
+        with client.opener.open(req, timeout=timeout) as response:
+            if response.status not in (202, 204):
+                raise DiagnosticError("MCP initialization notification not accepted")
+            if response.read(1):
+                raise DiagnosticError("MCP notification unexpectedly returned data")
+    except HTTPError as exc:
+        raise DiagnosticError("MCP initialization notification rejected (HTTP %d)" % exc.code) from None
+    except (URLError, TimeoutError, OSError, RuntimeError, HTTPException):
+        raise DiagnosticError("MCP transport unavailable or refused") from None
+
+
+def _rpc(client: AgentClient, request_id: int, method: str,
+         params: dict[str, Any], timeout: float) -> dict[str, Any]:
+    req = _request(client, {
+        "jsonrpc": "2.0", "id": request_id,
+        "method": method, "params": params,
+    })
     try:
         with client.opener.open(req, timeout=timeout) as response:
             if response.status != 200:
@@ -154,6 +174,7 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0) -> dict[str, Any]:
     info = initialise.get("serverInfo")
     if not isinstance(info, dict) or info.get("name") != "shards-mcp":
         raise DiagnosticError("unexpected MCP server identity")
+    _initialized(client, timeout)
     listed = _rpc(client, 2, "tools/list", {}, timeout)
     tools = listed.get("tools")
     if not isinstance(tools, list) or len(tools) > 200:
