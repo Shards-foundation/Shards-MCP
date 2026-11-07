@@ -1,0 +1,92 @@
+"use client";
+
+import { useState } from "react";
+
+type Client = "cursor" | "claude" | "codex" | "vscode" | "antigravity" | "other";
+type Transport = "stdio" | "remote";
+
+const clients: Array<{ id: Client; name: string; note: string }> = [
+  { id: "cursor", name: "Cursor", note: "MCP server configuration; validate against installed Cursor release." },
+  { id: "claude", name: "Claude Code", note: "CLI or MCP configuration; confirm your installed CLI's syntax." },
+  { id: "codex", name: "Codex", note: "MCP server configuration in the Codex CLI/IDE." },
+  { id: "vscode", name: "VS Code", note: "MCP configuration supported by your VS Code version." },
+  { id: "antigravity", name: "Antigravity", note: "Verify current MCP client and transport support before applying." },
+  { id: "other", name: "Other IDE", note: "Any client supporting MCP stdio or Streamable HTTP." },
+];
+
+function configuration(client: Client, transport: Transport, endpoint: string) {
+  if (transport === "stdio") {
+    const server = {
+      command: "shards-mcp-stdio",
+      env: {
+        SHARDS_GATEWAY_URL: endpoint,
+        SHARDS_AGENT_TOKEN: "<SCOPED_AGENT_TOKEN>",
+      },
+    };
+    if (client === "vscode") return JSON.stringify({ servers: { shards: { type: "stdio", ...server } } }, null, 2);
+    if (client === "codex") return [
+      "[mcp_servers.shards]",
+      'command = "shards-mcp-stdio"',
+      "",
+      "[mcp_servers.shards.env]",
+      `SHARDS_GATEWAY_URL = "${endpoint}"`,
+      'SHARDS_AGENT_TOKEN = "<SCOPED_AGENT_TOKEN>"',
+    ].join("\n");
+    return JSON.stringify({ mcpServers: { shards: server } }, null, 2);
+  }
+  if (client === "codex") return [
+    "[mcp_servers.shards]",
+    `url = "${endpoint.replace(/\/$/, "")}/mcp"`,
+    'bearer_token_env_var = "SHARDS_AGENT_TOKEN"',
+  ].join("\n");
+  if (client === "vscode") return JSON.stringify({
+    servers: { shards: { type: "http", url: endpoint.replace(/\/$/, "") + "/mcp",
+      headers: { Authorization: "Bearer ${input:shardsAgentToken}" } } },
+    inputs: [{ id: "shardsAgentToken", type: "promptString", description: "Scoped Shards agent token", password: true }],
+  }, null, 2);
+  return JSON.stringify({ mcpServers: {
+    shards: { type: "http", url: endpoint.replace(/\/$/, "") + "/mcp",
+      headers: { Authorization: "Bearer <SCOPED_AGENT_TOKEN>" } },
+  } }, null, 2);
+}
+
+export function ConnectionHub() {
+  const [client, setClient] = useState<Client>("cursor");
+  const [transport, setTransport] = useState<Transport>("stdio");
+  const [endpoint, setEndpoint] = useState("http://127.0.0.1:8787");
+  const [copied, setCopied] = useState(false);
+  const valid = (() => {
+    try {
+      const url = new URL(endpoint);
+      const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+      return !url.username && !url.password && !url.search && !url.hash &&
+        (url.pathname === "/" || url.pathname === "") &&
+        (url.protocol === "https:" || (url.protocol === "http:" && loopback));
+    } catch { return false; }
+  })();
+  const selected = clients.find(item => item.id === client)!;
+  const snippet = valid ? configuration(client, transport, endpoint) : "";
+  return <section className="panel" aria-labelledby="connections-title">
+    <div className="eyebrow">DEVELOPER CONNECTIVITY</div>
+    <h2 id="connections-title">IDE Connection Hub</h2>
+    <p>Select a client and generate a starter configuration for the existing Shards MCP gateway.</p>
+    <div className="connection-fields">
+      <label>Client<select value={client} onChange={event => { setClient(event.target.value as Client); setCopied(false); }}>
+        {clients.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+      </select></label>
+      <label>Transport<select value={transport} onChange={event => { setTransport(event.target.value as Transport); setCopied(false); }}>
+        <option value="stdio">Local stdio bridge (recommended initially)</option>
+        <option value="remote">Remote Streamable HTTP (client support required)</option>
+      </select></label>
+      <label>Gateway base URL<input value={endpoint} spellCheck={false} onChange={event => { setEndpoint(event.target.value); setCopied(false); }}/></label>
+    </div>
+    <p className="muted">{selected.note} These examples are starting points, not verified against every IDE release.</p>
+    {!valid ? <p role="alert">Use an HTTPS gateway URL or local loopback HTTP, with no path, query or embedded credentials.</p> :
+      <><pre className="snippet"><code>{snippet}</code></pre>
+      <button className="action" type="button" onClick={() => {
+        void navigator.clipboard.writeText(snippet).then(() => setCopied(true)).catch(() => setCopied(false));
+      }}>{copied ? "Copied" : "Copy configuration"}</button></>}
+    <p className="muted">Never use the bootstrap administrator token. Provision a different least-privilege agent token for each IDE, and store it in the client's secret configuration. JSON examples contain placeholders, not live credentials.</p>
+    <p className="muted">Validate the connection with <code>shards-mcp-doctor --protocol both --json</code> using that client's scoped credential from a trusted machine.</p>
+  </section>;
+}
