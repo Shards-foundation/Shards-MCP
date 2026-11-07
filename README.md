@@ -18,6 +18,7 @@
 - Scoped bearer-credential agent registration, agent enumeration, revocation and heartbeat.
 - Durable agent-to-agent messaging, idempotency and recipient isolation.
 - Assigned tasks with leases, checkpoint persistence, conservative failure recovery and independent task verification gate.
+- Atomic `task_claim_next` dequeue-and-lease: a scoped worker fetches its next assigned queued task and input in **one transaction** instead of racing between an inbox poll and claim; FIFO order, no duplicate claims, no implicit replay of running tasks.
 - Atomic cancellation of **unclaimed** queued tasks by their creator or the operator, exposed through MCP/REST and A2A `CancelTask`. Claimed/running work cannot be cancelled safely.
 - SQLite-backed transactionally appended audit hash chain and verification tool.
 - Durable interval schedules dispatched by explicit ticks or the independent `shards-scheduler` supervisor; expired leases are quarantined.
