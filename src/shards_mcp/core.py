@@ -397,10 +397,26 @@ class Gateway:
         return {"task_id": task_id, "state": "queued", "deduplicated": False}
 
 
+    def task_cancel(self, actor: Principal, task_id: str) -> dict[str, Any]:
+        """Cancel only unclaimed work; a claimed task might have external effects."""
+        actor.require("task:create")
+        self.required(task_id, "task_id")
+        with self.tx() as db:
+            row = db.execute("SELECT creator,state FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not row or (actor.agent_id != "operator" and row["creator"] != actor.agent_id):
+                raise GatewayError("task not found", "NOT_FOUND")
+            if row["state"] != "queued":
+                raise GatewayError("only unclaimed queued tasks can be cancelled", "CONFLICT")
+            db.execute("UPDATE tasks SET state='cancelled', updated=? WHERE id=?",
+                       (now(), task_id))
+            self.audit(db, actor.agent_id, "task.cancel", task_id,
+                       {"previous_state": "queued"})
+        return {"task_id": task_id, "state": "cancelled"}
+
     def task_inbox(self, actor: Principal, state: str = "queued",
                    limit: int = 50) -> list[dict[str, Any]]:
         actor.require("task:read")
-        if state not in ("queued", "running", "blocked", "reported", "succeeded", "failed"):
+        if state not in ("queued", "running", "blocked", "reported", "succeeded", "failed", "cancelled"):
             raise GatewayError("unsupported task state")
         if type(limit) is not int or not 1 <= limit <= 100:
             raise GatewayError("limit must be 1..100")
