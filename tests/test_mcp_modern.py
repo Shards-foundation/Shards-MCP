@@ -87,6 +87,8 @@ class StatelessMcpTests(unittest.TestCase):
         self.assertEqual(outcome["resultType"], "complete")
         self.assertEqual(outcome["supportedVersions"], list(SUPPORTED_VERSIONS))
         self.assertEqual(outcome["capabilities"]["tools"]["listChanged"], False)
+        self.assertEqual(outcome["ttlMs"], 0)
+        self.assertEqual(outcome["cacheScope"], "private")
         self.assertEqual(
             outcome["_meta"]["io.modelcontextprotocol/serverInfo"]["name"], "shards-mcp"
         )
@@ -95,6 +97,8 @@ class StatelessMcpTests(unittest.TestCase):
         status, listed = self.request(self.packet("tools/list"), route="tools/list")
         self.assertEqual(status, 200)
         self.assertEqual(listed["result"]["resultType"], "complete")
+        self.assertEqual(listed["result"]["ttlMs"], 0)
+        self.assertEqual(listed["result"]["cacheScope"], "private")
         names = {item["name"] for item in listed["result"]["tools"]}
         self.assertIn("agent_identity", names)
         self.assertIn("task_create", names)
