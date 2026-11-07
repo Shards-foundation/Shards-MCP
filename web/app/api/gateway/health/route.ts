@@ -18,7 +18,7 @@ export async function GET() {
     url = new URL(configured);
     const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
     if ((url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
-        url.username || url.password || url.search || url.hash) {
+        url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
       throw new Error("invalid gateway URL");
     }
   } catch {
