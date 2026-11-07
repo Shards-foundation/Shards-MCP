@@ -199,8 +199,10 @@ def diagnose(url: str, token: str, *, timeout: float = 10.0,
     modern = protocol == "modern"
     if modern:
         discovered = _rpc(client, 1, "server/discover", {}, timeout, modern=True)
+        supported = discovered.get("supportedVersions")
         if (discovered.get("resultType") != "complete"
-                or MODERN_VERSION not in discovered.get("supportedVersions", [])
+                or not isinstance(supported, list)
+                or MODERN_VERSION not in supported
                 or discovered.get("cacheScope") != "private"
                 or type(discovered.get("ttlMs")) is not int
                 or discovered["ttlMs"] != 0):
@@ -295,11 +297,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--token-file", help="Private file containing scoped agent token")
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--protocol", choices=("legacy", "modern", "both"), default="legacy",
+        help="Explicitly verify the legacy 2025, modern 2026, or both MCP wire contracts",
+    )
     parser.add_argument("--json", action="store_true", help="Machine-readable output")
     args = parser.parse_args(argv)
     try:
         token = read_agent_token(args.token_file)
-        report = diagnose(args.url, token, timeout=args.timeout)
+        report = diagnose(args.url, token, timeout=args.timeout, protocol=args.protocol)
     except (DiagnosticError, ValueError, OSError, UnicodeError) as exc:
         # Avoid exception repr/tracebacks/remote response bodies to prevent
         # inadvertent disclosure of agent tokens or untrusted server content.
@@ -313,11 +319,21 @@ def main(argv: list[str] | None = None) -> int:
         print(canonical(report))
     else:
         print("Shards MCP diagnostic: PASS")
-        print("Protocol: " + report["protocol_version"])
-        print("Server: " + report["server_name"] + " " + report["server_version"])
-        print("Agent: " + report["agent_id"])
-        print("Scoped tools: " + str(report["tool_count"]))
-        print("Round trip: " + str(report["round_trip_ms"]) + " ms")
+        if args.protocol == "both":
+            print("Protocols: " + report["legacy"]["protocol_version"]
+                  + ", " + report["modern"]["protocol_version"])
+            print("Server: " + report["legacy"]["server_name"]
+                  + " " + report["legacy"]["server_version"])
+            print("Agent: " + report["agent_id"])
+            print("Scoped tools: " + str(report["tool_count"]))
+            print("Round trips: legacy " + str(report["legacy"]["round_trip_ms"])
+                  + " ms, modern " + str(report["modern"]["round_trip_ms"]) + " ms")
+        else:
+            print("Protocol: " + report["protocol_version"])
+            print("Server: " + report["server_name"] + " " + report["server_version"])
+            print("Agent: " + report["agent_id"])
+            print("Scoped tools: " + str(report["tool_count"]))
+            print("Round trip: " + str(report["round_trip_ms"]) + " ms")
     return 0
 
 
