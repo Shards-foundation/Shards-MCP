@@ -173,6 +173,35 @@ class StatelessMcpTests(unittest.TestCase):
         with self.gateway.read_tx() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 0)
 
+    def test_unknown_metadata_never_downgrades_to_legacy_execution(self):
+        packet = self.packet("tools/call", {
+            "name": "task_create",
+            "arguments": {
+                "assignee": self.worker_id,
+                "payload": {"action": "health"},
+                "idempotency_key": "forbidden-downgrade",
+            },
+        })
+        packet["params"]["_meta"][
+            "io.modelcontextprotocol/protocolVersion"
+        ] = "1900-01-01"
+        for version in (None, LEGACY_VERSION):
+            with self.subTest(header=version):
+                status, data = self.request(packet, version=version)
+                self.assertEqual(status, 400, data)
+                self.assertEqual(data["error"]["code"], -32022)
+        packet["params"]["_meta"][
+            "io.modelcontextprotocol/protocolVersion"
+        ] = MODERN_VERSION
+        status, data = self.request(packet, version=LEGACY_VERSION)
+        self.assertEqual(status, 400)
+        self.assertEqual(data["error"]["code"], -32020)
+        with self.gateway.read_tx() as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 0,
+                "unsupported protocol metadata must never execute task_create",
+            )
+
     def test_stateless_requests_validate_metadata_per_call(self):
         no_meta = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
         bad_cap = self.packet("tools/list")
