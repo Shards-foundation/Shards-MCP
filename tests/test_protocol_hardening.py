@@ -136,7 +136,7 @@ class ProtocolHardeningTests(unittest.TestCase):
                 self.assertEqual(payload["error"]["code"], -32700)
 
     def test_jsonrpc_ids_must_be_scalar_and_not_boolean(self):
-        for bad_id in (True, False, [], {"nested": "id"}):
+        for bad_id in (True, False, None, [], {"nested": "id"}):
             with self.subTest(identifier=bad_id):
                 status, payload = self.raw(self.ping(bad_id))
                 self.assertEqual(status, 200)
