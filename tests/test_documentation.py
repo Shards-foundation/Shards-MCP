@@ -7,6 +7,10 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
+
+from scripts import demo_local, docs_check
+from shards_mcp.core import Gateway
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +27,35 @@ class DocumentationContractTests(unittest.TestCase):
         result = self._run("docs_check.py")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("DOC PASS:", result.stdout)
+
+    def test_skill_frontmatter_requires_closing_fence_and_populated_metadata(self):
+        good = "---\nname: task-lifecycle\ndescription: Run bounded task steps.\n---\n# Task\n"
+        self.assertTrue(docs_check.skill_frontmatter_valid(good))
+        for bad in (
+            good.replace("\n---\n# Task", "\n# Task"),
+            "---\nname: task-lifecycle\ndescription:\n---\n# Task\n",
+            "---\nname:\ndescription: Run bounded task steps.\n---\n# Task\n",
+            "---\nname: task-lifecycle\n---\n# Task\n## description: later\n",
+            "---\nname: task-lifecycle\nname: repeated\ndescription: Run.\n---\n",
+        ):
+            with self.subTest(header=bad):
+                self.assertFalse(docs_check.skill_frontmatter_valid(bad))
+
+    def test_demo_rejects_tampered_stored_result(self):
+        original_complete = Gateway.task_complete
+
+        def tamper_stored_result(gateway, actor, task_id, success, result):
+            report = original_complete(gateway, actor, task_id, success, result)
+            with gateway.tx() as db:
+                db.execute(
+                    "UPDATE tasks SET result=? WHERE id=?",
+                    (json.dumps({"echo": "tampered-output"}), task_id),
+                )
+            return report
+
+        with patch.object(Gateway, "task_complete", tamper_stored_result):
+            with self.assertRaisesRegex(RuntimeError, "persisted result differs"):
+                demo_local.main()
 
     def test_demo_checks_remain_active_in_optimized_python(self):
         script = ROOT / "scripts" / "demo_local.py"
