@@ -132,6 +132,28 @@ Launch shards-mcp-stdio from the client as its MCP stdio subprocess. On
 connection, call agent_identity and tools/list. The supplied mcp.json is a
 generic example; individual AI clients may require different configuration.
 
+## Scoped dual-protocol connection diagnostic
+
+`shards-mcp-doctor --protocol legacy --json` tests the 2025-11-25
+initialize/initialized and read-only identity lifecycle (default mode).
+`shards-mcp-doctor --protocol modern --json` independently sends
+2026-07-28 `server/discover`, `tools/list` and `tools/call` requests with
+matching per-request metadata and HTTP routing headers. It verifies the
+modern server advertises itself, that discovery and tool listing use
+`cacheScope: private` with `ttlMs: 0`, and that the identity tool returns a
+least-privilege enrolled agent.
+
+`shards-mcp-doctor --protocol both --json` runs both contracts and refuses to
+report success if principal identity, scopes or visible tool names disagree.
+It never substitutes legacy compatibility for a failed modern check.
+All modes use only scoped agent credentials, make no domain-state writes,
+reject remote plaintext and cross-origin redirects, and cannot authenticate
+with the bootstrap operator token. The report never contains an access token.
+
+These diagnostics can also check remote HTTPS endpoints with a pre-provisioned
+agent bearer token, but do **not** initiate OAuth authorization-code login,
+refresh or public ChatGPT App Directory validation.
+
 ## ChatGPT / Codex remote plugin requirements
 
 OpenAI's current guidance requires a stable publicly reachable **HTTPS**
