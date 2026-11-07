@@ -189,7 +189,8 @@ class StatelessMcpTests(unittest.TestCase):
             with self.subTest(header=version):
                 status, data = self.request(packet, version=version)
                 self.assertEqual(status, 400, data)
-                self.assertEqual(data["error"]["code"], -32022)
+                self.assertEqual(data["error"]["code"],
+                                 -32022 if version is None else -32020)
         packet["params"]["_meta"][
             "io.modelcontextprotocol/protocolVersion"
         ] = MODERN_VERSION
