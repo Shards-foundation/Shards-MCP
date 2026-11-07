@@ -52,12 +52,26 @@ def validate(root: Path = REPO) -> list[str]:
     for name in required:
         if not (root / name).exists():
             problems.append(f"required documentation missing: {name}")
-    for name in ("docs/legal/privacy.md", "docs/legal/terms.md", "docs/legal/dpa.md"):
+    for name in ("docs/legal/privacy.md", "docs/legal/terms.md", "docs/legal/dpa.md", "docs/legal/cookies.md"):
         file = root / name
         if file.exists():
             opening = "\n".join(file.read_text(encoding="utf-8").splitlines()[:8])
             if not re.search(r"(?i)\bstatus:\s*DRAFT\b", opening):
                 problems.append(f"{name}: missing explicit Status: DRAFT legal approval warning")
+    license_file = root / "LICENSE"
+    if license_file.exists():
+        license_text = license_file.read_text(encoding="utf-8")
+        for required_notice in (
+            "MIT License",
+            "Copyright (c)",
+            "Permission is hereby granted",
+            "The above copyright notice",
+            'THE SOFTWARE IS PROVIDED "AS IS"',
+            "WITHOUT WARRANTY",
+            "AUTHORS OR COPYRIGHT HOLDERS",
+        ):
+            if required_notice not in license_text:
+                problems.append(f"LICENSE: missing canonical MIT clause: {required_notice}")
     for skill in (root / "skills").glob("*/SKILL.md"):
         data = skill.read_text(encoding="utf-8")
         if not data.startswith("---\n") or "description:" not in data or "name:" not in data:
