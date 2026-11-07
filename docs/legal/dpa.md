@@ -1,6 +1,6 @@
 # Data Processing Agreement — required schedules and approval outline
 
-**NOT EXECUTED. NOT A CONTRACT.** No hosted processing service or signed customer DPA has been established by this repository. Use this as counsel's and procurement's checklist, not as a substitute for legal drafting.
+**Status: DRAFT — NOT EXECUTED, NOT A CONTRACT.** No hosted processing service or signed customer DPA has been established by this repository. Use this as counsel's and procurement's checklist, not as a substitute for legal drafting.
 
 ## Parties and roles
 
