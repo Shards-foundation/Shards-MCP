@@ -7,6 +7,8 @@ These recipes operate on a **local test gateway only** unless explicitly identif
 Operator on gateway host:
 
 ```bash
+mkdir -p "$HOME/.config/shards"
+chmod 700 "$HOME/.config/shards"
 shards-mcp-admin register --name doctor --provider cli \
   --scope agent:read \
   --token-file "$HOME/.config/shards/doctor.token"
@@ -51,7 +53,8 @@ Do not replace a failing modern check with silent legacy success. Record server 
 ## Recipe D — preserve a portable backup
 
 ```bash
-mkdir -m 700 "$HOME/.config/shards/backups"
+mkdir -p "$HOME/.config/shards/backups"
+chmod 700 "$HOME/.config/shards/backups"
 shards-mcp-admin backup --output "$HOME/.config/shards/backups/demo.sqlite"
 shards-mcp-admin verify-snapshot --input "$HOME/.config/shards/backups/demo.sqlite"
 ```
