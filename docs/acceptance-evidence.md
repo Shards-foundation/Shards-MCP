@@ -15,6 +15,24 @@ Record the exact commit SHA, interpreter, operating system, installed wheel hash
 | Container | `docker build --pull -t shards-mcp:acceptance .` | Image builds and non-loopback binding without explicit opt-in fails closed. |
 | Deployment config | `docker compose -f deploy/compose.yaml config --quiet` | Configuration parses with **test-only** secrets and example hostnames. |
 
+For the Compose syntax gate in a fresh checkout, run the following **locally only** from the repository root. The values are deliberately non-routable examples; this checks configuration parsing, not OAuth, TLS, container startup or deployment. Do not run `docker compose up` with these values. The temporary secret file is removed on exit, and an existing secret is never overwritten.
+
+```sh
+set -eu
+if [ -e secrets/admin_token ]; then
+  echo "Refusing to overwrite existing secrets/admin_token" >&2
+  exit 1
+fi
+mkdir -p secrets
+umask 077
+printf '%s\\n' 'compose-config-validation-only-not-a-real-secret' > secrets/admin_token
+trap 'rm -f secrets/admin_token' EXIT HUP INT TERM
+SHARDS_GATEWAY_DOMAIN=gateway.example.invalid \\
+SHARDS_OAUTH_ISSUER=https://issuer.example.invalid \\
+SHARDS_OAUTH_JWKS_URI=https://issuer.example.invalid/jwks.json \\
+  docker compose -f deploy/compose.yaml config --quiet
+```
+
 Use the CI workflow for the full Python 3.11–3.15 matrix. A single workstation run does not establish multi-interpreter or multi-platform compatibility. Verify the workflow run and external checks for the *same* commit before merging.
 
 ## Remote MCP / ChatGPT acceptance (requires a separately approved test deployment)
