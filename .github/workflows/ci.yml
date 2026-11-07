@@ -39,6 +39,12 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Cross-runtime end-to-end contract (MCP, stdio, worker, restart)
         run: python -m unittest discover -s tests -p 'test_gateway_e2e.py' -v
+      - name: Official MCP SDK 2.3.0 client interoperability (isolated)
+        run: |
+          python -m venv /tmp/shards-mcp-sdk-230
+          /tmp/shards-mcp-sdk-230/bin/python -m pip install -e '.[oauth]' 'mcp==2.3.0'
+          /tmp/shards-mcp-sdk-230/bin/python -c 'from importlib.metadata import version; import httpx2; from mcp import Client; from mcp.client.streamable_http import streamable_http_client; assert version("mcp") == "2.3.0"'
+          /tmp/shards-mcp-sdk-230/bin/python -m unittest discover -s tests -p 'test_official_sdk.py' -v
       - name: Import smoke test
         run: python -c "import shards_mcp; from shards_mcp.server import TOOL_LIST; assert len(TOOL_LIST) >= 15"
       - name: Verify distributable wheel and sdist

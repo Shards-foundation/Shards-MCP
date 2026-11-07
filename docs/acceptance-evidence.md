@@ -10,6 +10,7 @@ Record the exact commit SHA, interpreter, operating system, installed wheel hash
 | --- | --- | --- |
 | Unit and HTTP | `python -m unittest discover -s tests -v` | All tests pass; no skipped security tests without an explicit justification. |
 | Cross-runtime | `python -m unittest discover -s tests -p 'test_gateway_e2e.py' -v` | MCP, stdio, independent worker/reviewer, revocation and restart assertions pass. |
+| Official MCP SDK client compatibility | CI runs the `test_official_sdk.py` integration against `mcp==2.0.0` and isolated `mcp==2.3.0` environments on Python 3.11–3.15. | Each SDK must negotiate with Shards-MCP, discover tools, and execute the read-only system-status tool over HTTP. This is backward-compatibility evidence, not a claim that the gateway implements the MCP 2026-07-28 server protocol. |
 | Compilation | `python -m compileall -q src tests` | Exit status zero. |
 | Package | `python -m build && python -m twine check dist/*` | Wheel and sdist are valid; isolated wheel installation and CLI smoke tests pass. |
 | Container | `docker build --pull -t shards-mcp:acceptance .` | Image builds and non-loopback binding without explicit opt-in fails closed. |
