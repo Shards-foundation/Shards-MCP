@@ -26,6 +26,7 @@ from .doctor import (
     MAX_RESPONSE_BYTES,
     _validate_gateway_url,
     read_agent_token,
+    diagnose as diagnose_mcp,
 )
 from .json_limits import enforce_json_depth
 from .server import (
@@ -84,6 +85,19 @@ def diagnose(url: str, token: str, target_agent: str, *,
         raise DiagnosticError("invalid scoped credential or A2A endpoint address") from None
     endpoint = client.url + "/a2a/agents/" + target_agent
     started = time.monotonic()
+    # The A2A card and GetTask error do not reveal the caller's role.
+    # Independently query the Shards MCP read-only identity endpoint; its
+    # existing doctor rejects operator principals instead of trusting local
+    # SHARDS_ADMIN_TOKEN environment comparisons.
+    try:
+        identity = diagnose_mcp(origin, token, timeout=float(timeout))
+    except DiagnosticError:
+        raise DiagnosticError("scoped Shards agent identity verification failed") from None
+    if (not identity.get("ok") or
+            not isinstance(identity.get("agent_id"), str) or
+            re.fullmatch(AGENT_ID, identity["agent_id"]) is None or
+            not {"agent:read", "task:read"}.issubset(identity.get("scopes", []))):
+        raise DiagnosticError("A2A caller lacks required read-only agent scopes")
     card = _read_json(client, Request(
         endpoint + "/card",
         headers={
@@ -109,6 +123,10 @@ def diagnose(url: str, token: str, target_agent: str, *,
     scheme = bearer.get("httpAuthSecurityScheme") if isinstance(bearer, dict) else None
     if not isinstance(scheme, dict) or scheme.get("scheme") != "bearer":
         raise DiagnosticError("A2A Agent Card does not require bearer authentication")
+    required = card.get("securityRequirements")
+    if (not isinstance(required, list) or len(required) != 1 or
+            required[0] != {"schemes": {"bearer": {"list": []}}}):
+        raise DiagnosticError("A2A Agent Card has missing or ambiguous bearer requirements")
     if not isinstance(card.get("name"), str) or not card["name"].strip():
         raise DiagnosticError("A2A Agent Card lacks an agent name")
     probe = "shards-a2a-doctor-" + uuid.uuid4().hex
@@ -131,12 +149,14 @@ def diagnose(url: str, token: str, target_agent: str, *,
         raise DiagnosticError("A2A GetTask probe returned invalid JSON-RPC envelope")
     err = reply.get("error")
     if (not isinstance(err, dict) or type(err.get("code")) is not int
-            or err["code"] != -32001):
+            or err["code"] != -32001 or
+            not isinstance(err.get("message"), str)):
         raise DiagnosticError("A2A GetTask probe did not enforce task lookup")
     report = {
         "ok": True, "scope": "read-only-a2a-v1-card-and-gettask-probe",
         "protocol_binding": "JSONRPC", "protocol_version": "1.0",
-        "target_agent": target_agent, "card_verified": True,
+        "target_agent": target_agent, "caller_agent": identity["agent_id"],
+        "scoped_identity_verified": True, "card_verified": True,
         "get_task_probe": "not-found-as-expected",
         "methods_exercised": ["GetTask"],
         "tasks_created": 0,
