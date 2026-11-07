@@ -1,13 +1,11 @@
 """End-to-end read-only MCP connection doctor and credential isolation."""
 from __future__ import annotations
 
-from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import secrets
-import stat
 import subprocess
 import sys
 import tempfile
@@ -16,7 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from shards_mcp.core import Gateway
-from shards_mcp.doctor import DiagnosticError, diagnose, main, read_agent_token
+from shards_mcp.doctor import DiagnosticError, diagnose, read_agent_token
 from shards_mcp.server import make_handler
 
 
