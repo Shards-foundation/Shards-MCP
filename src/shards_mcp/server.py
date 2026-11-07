@@ -26,6 +26,8 @@ from .a2a import A2AAdapter
 from .observability import RequestMetrics, route_class
 from .config import admin_token_from_environment
 from .json_limits import enforce_json_depth
+from .mcp_modern import (MODERN_VERSION, SUPPORTED_VERSIONS,
+                         process_modern, unsupported)
 
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
@@ -361,8 +363,10 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                 if len(origins) > 1 or (origins and origins[0] not in allowed_origins):
                     return self.respond(403, {"error": "origin denied"})
                 versions = self.headers.get_all("MCP-Protocol-Version", [])
-                if len(versions) > 1 or (versions and versions[0] != MCP_PROTOCOL_VERSION):
-                    return self.respond(400, {"error": "unsupported MCP protocol version"})
+                if len(versions) > 1:
+                    return self.respond(400, {"error": "ambiguous MCP protocol version"})
+                if versions and versions[0] not in SUPPORTED_VERSIONS:
+                    return self.respond(*unsupported(versions[0]))
                 return self.respond(405, {"error": "GET streaming not supported; use POST"}, {"Allow": "POST"})
             card_target = a2a.route(self.path, card=True) if a2a else None
             if card_target:
@@ -407,8 +411,10 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                 return self.respond(403, {"error": "origin denied"})
             if self.path == "/mcp":
                 versions = self.headers.get_all("MCP-Protocol-Version", [])
-                if len(versions) > 1 or (versions and versions[0] != MCP_PROTOCOL_VERSION):
-                    return self.respond(400, {"error": "unsupported MCP protocol version"})
+                if len(versions) > 1:
+                    return self.respond(400, {"error": "ambiguous MCP protocol version"})
+                if versions and versions[0] not in SUPPORTED_VERSIONS:
+                    return self.respond(*unsupported(versions[0]))
             if len(self.headers.get_all("Authorization", [])) > 1:
                 return self.respond(400, {"error": "ambiguous Authorization headers"})
             if len(self.headers.get_all("Content-Length", [])) > 1:
@@ -463,6 +469,20 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                 except Exception:
                     self.log_error("Internal REST tool error")
                     return self.respond(500, {"ok": False, "error": {"code": "INTERNAL", "message": "Internal error"}})
+            if self.path == "/mcp" and self.headers.get("MCP-Protocol-Version") == MODERN_VERSION:
+                try:
+                    status_code, response = process_modern(
+                        payload, self.headers, principal, gateway, visible_tools,
+                        dispatch, set(SCHEMAS),
+                    )
+                except Exception:
+                    # Never expose internal details or credentials in the new era.
+                    self.log_error("Internal error in stateless MCP handler")
+                    status_code, response = 500, {
+                        "jsonrpc": "2.0", "id": None,
+                        "error": {"code": -32603, "message": "Internal error"},
+                    }
+                return self.respond(status_code, response)
             if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
                 return self.respond(400, {"jsonrpc": "2.0", "id": None,
                                           "error": {"code": -32600, "message": "Invalid Request"}})
