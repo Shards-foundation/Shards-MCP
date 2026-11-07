@@ -151,6 +151,18 @@ class ProtocolHardeningTests(unittest.TestCase):
                 self.assertIsNone(response["id"])
         self.assertEqual(self.raw(self.ping(1.125))[0], 200)
 
+    def test_http_rejects_deep_json_before_decoder_version_dependent_recursion(self):
+        depth = 180
+        payload = ('{"jsonrpc":"2.0","id":1,"method":"ping","params":{"x":'
+                   + "[" * depth + "0" + "]" * depth + '}}')
+        code, result = self.raw(payload)
+        self.assertEqual(code, 400)
+        self.assertEqual(result["error"]["code"], -32700)
+        # Delimiters inside a JSON string are data, not nesting.
+        valid = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping",
+                            "params": {"x": "[" * 800}})
+        self.assertEqual(self.raw(valid)[0], 200)
+
     def test_jsonrpc_ids_must_be_scalar_and_not_boolean(self):
         for bad_id in (True, False, None, [], {"nested": "id"}):
             with self.subTest(identifier=bad_id):
