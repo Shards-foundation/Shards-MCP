@@ -53,7 +53,7 @@ class Principal:
 
 SCOPES = (
     "agent:read", "agent:heartbeat", "message:send", "message:read",
-    "task:create", "task:read", "task:claim", "task:update", "task:verify",
+    "task:create", "task:read", "task:claim", "task:update", "task:cancel", "task:verify",
     "checkpoint:write", "audit:read", "event:read", "event:write",
 )
 
@@ -400,7 +400,7 @@ class Gateway:
     def task_inbox(self, actor: Principal, state: str = "queued",
                    limit: int = 50) -> list[dict[str, Any]]:
         actor.require("task:read")
-        if state not in ("queued", "running", "blocked", "reported", "succeeded", "failed"):
+        if state not in ("queued", "running", "blocked", "reported", "succeeded", "failed", "canceled"):
             raise GatewayError("unsupported task state")
         if type(limit) is not int or not 1 <= limit <= 100:
             raise GatewayError("limit must be 1..100")
@@ -426,6 +426,30 @@ class Gateway:
         item["input"] = json.loads(row["input"])
         item["result"] = json.loads(row["result"]) if row["result"] is not None else None
         return item
+
+    def task_cancel(self, actor: Principal, task_id: str) -> dict[str, Any]:
+        """Atomically cancel unclaimed work; never pretend running effects stopped.
+
+        The creator (or operator) may cancel only before a worker has acquired
+        a lease. Concurrent claim/cancel requests serialize on BEGIN IMMEDIATE.
+        Repeating a successful cancellation is safe and does not append audit.
+        """
+        actor.require("task:cancel")
+        self.required(task_id, "task_id")
+        with self.tx() as db:
+            task = db.execute("SELECT creator,state FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if task is None or (actor.agent_id != "operator" and task["creator"] != actor.agent_id):
+                raise GatewayError("task not found", "NOT_FOUND")
+            if task["state"] == "canceled":
+                return {"task_id": task_id, "state": "canceled", "already_canceled": True}
+            if task["state"] != "queued":
+                raise GatewayError("claimed or terminal task cannot be cancelled safely", "CONFLICT")
+            updated = now()
+            db.execute("UPDATE tasks SET state='canceled',updated=? WHERE id=?",
+                       (updated, task_id))
+            self.audit(db, actor.agent_id, "task.cancel", task_id,
+                       {"reason": "unclaimed"})
+        return {"task_id": task_id, "state": "canceled", "already_canceled": False}
 
     def task_claim(self, actor: Principal, task_id: str, lease_seconds: int = 60) -> dict[str, Any]:
         actor.require("task:claim")
