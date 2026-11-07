@@ -14,11 +14,13 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 from .core import canonical
+from .json_limits import enforce_json_depth
 from .worker import AgentClient
 
 
 def request_line(client: AgentClient, line: str) -> str | None:
     try:
+        enforce_json_depth(line)
         payload = json.loads(line)
         if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
             raise ValueError("invalid JSON-RPC request")
