@@ -27,7 +27,8 @@ from .observability import RequestMetrics, route_class
 from .config import admin_token_from_environment
 from .json_limits import enforce_json_depth
 from .mcp_modern import (MODERN_VERSION, SUPPORTED_VERSIONS,
-                         PROTOCOL_VERSION_KEY, process_modern, unsupported)
+                         PROTOCOL_VERSION_KEY, error as modern_error,
+                         process_modern, unsupported)
 
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
@@ -474,6 +475,21 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                 if isinstance(payload, dict) and isinstance(payload.get("params"), dict)
                 else {}
             )
+            if self.path == "/mcp" and isinstance(declared_meta, dict):
+                declared_version = declared_meta.get(PROTOCOL_VERSION_KEY)
+                if declared_version is not None:
+                    candidate_id = payload.get("id") if isinstance(payload, dict) else None
+                    if type(candidate_id) not in (str, int, float):
+                        candidate_id = None
+                    if declared_version not in SUPPORTED_VERSIONS:
+                        return self.respond(*unsupported(
+                            declared_version if isinstance(declared_version, str) else None,
+                            candidate_id,
+                        ))
+                    if declared_version != self.headers.get("MCP-Protocol-Version"):
+                        return self.respond(*modern_error(
+                            -32020, "Header mismatch: protocol version", candidate_id,
+                        ))
             if self.path == "/mcp" and (
                 self.headers.get("MCP-Protocol-Version") == MODERN_VERSION
                 or (isinstance(declared_meta, dict)
