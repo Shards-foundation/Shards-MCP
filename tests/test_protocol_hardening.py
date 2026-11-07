@@ -86,7 +86,7 @@ class ProtocolHardeningTests(unittest.TestCase):
                 "Origin": "https://trusted.example",
             })
             response = c.getresponse()
-            self.assertEqual(response.status, 400)
+            self.assertEqual(response.status, 405)
             response.read()
         finally:
             c.close()
