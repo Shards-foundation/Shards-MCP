@@ -1,34 +1,34 @@
-# Roadmap and release gates
+# Product Roadmap and Release Boundaries
 
-| Phase | Deliverable | Gate |
-|---|---|---|
-| 0 | Authenticated MCP, registry, messages, tasks, checkpoints, audit | Unit, HTTP and restart tests |
-| 1 | OAuth 2.1 resource server and official MCP SDK conformance | Denial, issuer/audience, tool, client integration tests |
-| 2 | Full A2A protocol adapter | Independent A2A agent interop and cancellation tests |
-| 3 | Postgres transactional outbox, fencing, reliable worker and cron | Crash/replay/failover fault injection |
-| 4 | OpenTelemetry, Sentry, dashboard and alarms | Traceability, health and incident drills |
-| 5 | GitHub, Vercel, Neon, Supabase, Shards-Kernel adapters | Scoped end-to-end tests and human approvals |
-| 6 | Security review, backups, disaster recovery and signed releases | Measured reliability and production release signoff |
-| 7 | Platform distribution | Verified ChatGPT plugin and other runtime compatibility matrix |
+**Maintained:** 7 November 2026. This roadmap distinguishes code shipped from live external verification, security assessment and future architecture. Dates are not commitments.
 
-## OAuth progress
+| Phase | Capability | Engineering status | Acceptance gap |
+| --- | --- | --- | --- |
+| Foundation | Scoped MCP/REST, messages, tasks, atomic claims, audit | **Implemented** in local single-host package | Live external operator acceptance |
+| Compatibility | 2025 MCP plus 2026 stateless tool subset, official SDK tests | **Implemented, subset** | Full optional features and per-vendor live tests |
+| Auth | Local bearer + external signed JWT resource server / RFC 9728 | **Implemented, partial OAuth** | Live external auth code/PKCE client, token lifecycle and edge hardening |
+| A2A | Authenticated cards, v1.0 text tasks, pre-claim cancel | **Implemented subset** | Streaming, push, multi-turn, files, wider conformance |
+| Operations | Single scheduler, metrics, snapshot/verify, Caddy Compose | **Implemented reference** | Alerts, off-host encryption/restore, SLO, audit anchoring |
+| Web | Allowlisted Google/GitHub/Discord NextAuth console + diagnostics | **Private-preview code** | Real provider deployment, persistent tenant IAM and task operations |
+| Distribution | CI, release/publishing workflow and security documentation | **Workflow implemented** | Verified PyPI public artifact, protected environment approvals, operator signing |
+| Enterprise | HA Postgres, fencing, RBAC, policy/audit controls, remote federation | **Not implemented** | Independent multi-host/tenant tests and security assurance |
+| Marketplace | ChatGPT and other agent platform submissions | **Not published** | Hosted endpoint, real client OAuth/tool tests and platform review |
 
-An optional external JWT resource-server verifier and RFC 9728 metadata endpoint have been added with automated signed-token negative tests. This is partial phase 1 progress. Full provider interoperability, actual ChatGPT connection, HTTPS deployment, OAuth refresh handling and broader production authentication assurance are still pending.
+## Shippable product boundary
 
-## Independent review — 4 November 2026
+**v0.1.x package:** useful as a deliberately bounded self-hosted single-organisation gateway. Do not postpone the package indefinitely for enterprise features; satisfy the [package gate](compliance/publication-gates.md).
 
-B1-B4 addressed in PR #1: audited bounded leases, verified non-empty evidence retention, read-only authentication and bounded HTTP parsing, and explicit Docker remote binding opt-in. Regression tests exercise these findings, together with cursor-based messaging, scheduling, audit integrity and credential hygiene. This is partial coverage; passing CI is not a complete formal security proof.
+**Hosted business:** requires separate security, data protection, OAuth, operation and legal controls. A deployable Compose example is not a hosted production service.
 
-Still pending: fine-grained per-topic grants beyond the current private/shared/system namespaces, per-agent quotas and retention, OAuth resource-server support, independent audit anchoring, distributed storage, deployment and multi-platform interoperability. Local out-of-band agent provisioning and agent-level audit isolation are implemented.
+## Next milestones (ordered by customer utility)
 
-Do not mark as production-ready until the applicable phases have independent evidence. Implementation presence is not verification.
+1. Verify actual first package release on PyPI/GitHub with hashes, provenance and reproducible install.
+2. Run a closed private deployment using a real protected HTTPS endpoint and independent OAuth issuer; test two external clients.
+3. Complete persistent console identity/roles, agent/task observability and a safe scoped write bridge.
+4. Establish off-host encrypted backups, restore RTO, rate limits/alerts and independently anchored audit before customer-hosted production.
+5. Validate connectors (Cursor, Claude Code, Codex, VS Code and ChatGPT) against installed versions, not generated templates.
+6. Add Postgres HA, multi-tenant boundaries and full A2A/MCP optional features only as independently scoped, demand-backed releases.
 
+## Evidence process
 
-## A2A v1.0 interoperability work
-
-An authenticated, explicitly opt-in JSON-RPC v1.0 adapter implements per-agent cards and text-only SendMessage/GetTask mapped to durable Shards tasks. This is a **partial adapter**, not a claim of full A2A compliance or compatibility with every AI platform. The A2A conformance and live multi-runtime interoperability gate remains open, along with streaming, push notification and cancellation.
-
-
-## Operations and observability progress
-
-A bounded-label Prometheus exporter, redacted structured HTTP logs, online SQLite snapshot creation/verification, a single-host scheduling supervisor and persistent Docker Compose reference deployment are implemented. These provide local operational utility but are **not** evidence of high availability, a running public service, external audit immutability, alert delivery, off-host automated backup or disaster recovery readiness. The related release gates remain open.
+Each milestone requires owner, commit SHA, CI, live test artefacts if applicable, explicit customer value, risks, acceptance thresholds and binary GO/NO-GO. Do not describe unresolved features as production-ready.
