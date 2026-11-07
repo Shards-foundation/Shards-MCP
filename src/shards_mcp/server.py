@@ -11,6 +11,7 @@ import re
 import socket
 import threading
 import json
+import math
 import sqlite3
 import os
 import sys
@@ -148,6 +149,13 @@ def decode_auth(value: str) -> str:
 
 def reject_nonfinite(value: str) -> None:
     raise ValueError("non-finite JSON constant")
+
+
+def reject_overflowing_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON numeric value")
+    return parsed
 
 
 def reject_duplicate_properties(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -430,6 +438,7 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                                     {"WWW-Authenticate": challenge})
             try:
                 payload = json.loads(self.rfile.read(length), parse_constant=reject_nonfinite,
+                                     parse_float=reject_overflowing_float,
                                      object_pairs_hook=reject_duplicate_properties)
             except (ValueError, UnicodeDecodeError, RecursionError):
                 return self.respond(400, {"jsonrpc": "2.0", "id": None,
