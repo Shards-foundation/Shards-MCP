@@ -59,6 +59,8 @@ TOOL_DEFS = [
     ("task_get", "Read task owned by creator or assignee.", schema({"task_id": S}, ("task_id",)), True),
     ("task_inbox", "List tasks assigned to caller and filtered by state.",
      schema({"state": S, "limit": INT}), True),
+    ("task_cancel", "Creator or operator: cancel a queued task before worker claim; cannot stop running work.",
+     schema({"task_id": S}, ("task_id",)), False),
     ("task_claim", "Claim assigned queued task with a bounded lease.",
      schema({"task_id": S, "lease_seconds": INT}, ("task_id",)), False),
     ("task_renew", "Renew an active task lease.",
@@ -102,7 +104,7 @@ TOOL_DEFS = [
 
 TOOL_LIST = [
     {"name": name, "description": description, "inputSchema": input_schema,
-     "annotations": {"readOnlyHint": read_only, "destructiveHint": False}}
+     "annotations": {"readOnlyHint": read_only, "destructiveHint": name == "task_cancel"}}
     for name, description, input_schema, read_only in TOOL_DEFS
 ]
 SCHEMAS = {item["name"]: item["inputSchema"] for item in TOOL_LIST}
@@ -113,7 +115,8 @@ TOOL_SCOPES = {
     "message_send": "message:send", "message_inbox": "message:read",
     "message_ack": "message:read", "message_poll": "message:read",
     "task_create": "task:create", "task_get": "task:read",
-    "task_inbox": "task:read", "task_claim": "task:claim",
+    "task_inbox": "task:read", "task_cancel": "task:cancel",
+    "task_claim": "task:claim",
     "task_renew": "task:update", "task_complete": "task:update",
     "task_verify": "task:verify", "verification_get": "task:read",
     "checkpoint_write": "checkpoint:write", "checkpoint_get": "task:read",
@@ -209,6 +212,7 @@ def dispatch(gateway: Gateway, principal: Principal, name: str, args: Any) -> An
         "task_create": lambda: gateway.task_create(principal, a["assignee"], a["payload"], a["idempotency_key"]),
         "task_get": lambda: gateway.task_get(principal, a["task_id"]),
         "task_inbox": lambda: gateway.task_inbox(principal, a.get("state", "queued"), a.get("limit", 50)),
+        "task_cancel": lambda: gateway.task_cancel(principal, a["task_id"]),
         "task_claim": lambda: gateway.task_claim(principal, a["task_id"], a.get("lease_seconds", 60)),
         "task_renew": lambda: gateway.task_renew(principal, a["task_id"], a.get("lease_seconds", 60)),
         "task_complete": lambda: gateway.task_complete(principal, a["task_id"], a["success"], a["result"]),

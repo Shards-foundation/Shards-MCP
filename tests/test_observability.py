@@ -81,15 +81,29 @@ class ObservabilityTests(unittest.TestCase):
 
     def test_metrics_gauges_reflect_durable_queue_state(self):
         origin = self.gateway.register(self.gateway.authenticate(self.token),
-            "origin", "test", [], ["task:create"])
+            "origin", "test", [], ["task:create", "task:cancel"])
         worker = self.gateway.register(self.gateway.authenticate(self.token),
             "worker", "test", [], ["task:read", "task:claim"])
         creator = self.gateway.authenticate(origin["token"])
-        self.gateway.task_create(creator, worker["agent_id"], {"action": "health"}, "metrics-queued")
+        created = self.gateway.task_create(
+            creator, worker["agent_id"], {"action": "health"}, "metrics-queued"
+        )
         code, body, _ = self.request("GET", "/metrics", self.token)
         self.assertEqual(code, 200)
         self.assertIn("shards_state_tasks_queued 1", body)
+        self.assertIn("shards_state_tasks_canceled 0", body)
         self.assertIn("shards_state_agents 2", body)
+
+        self.gateway.task_cancel(creator, created["task_id"])
+        code, body, _ = self.request("GET", "/metrics", self.token)
+        self.assertEqual(code, 200)
+        self.assertIn("shards_state_tasks_queued 0", body)
+        self.assertIn("shards_state_tasks_canceled 1", body)
+        self.assertEqual(
+            sum(int(line.split()[-1]) for line in body.splitlines()
+                if line.startswith("shards_state_tasks_")), 1,
+            "every persisted task must be reflected in exactly one state gauge",
+        )
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ from typing import Any
 
 BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0)
 ROUTES = frozenset(("health", "mcp", "rest", "a2a", "oauth_metadata", "metrics", "other"))
-STATES = ("queued", "running", "reported", "blocked", "succeeded", "failed")
+STATES = ("queued", "running", "reported", "blocked", "succeeded", "failed", "canceled")
 
 
 def route_class(path: str) -> str:

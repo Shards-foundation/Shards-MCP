@@ -18,16 +18,17 @@
 - Scoped bearer-credential agent registration, agent enumeration, revocation and heartbeat.
 - Durable agent-to-agent messaging, idempotency and recipient isolation.
 - Assigned tasks with leases, checkpoint persistence, conservative failure recovery and independent task verification gate.
+- Atomic cancellation of **unclaimed** queued tasks by their creator or the operator, exposed through MCP/REST and A2A `CancelTask`. Claimed/running work cannot be cancelled safely.
 - SQLite-backed transactionally appended audit hash chain and verification tool.
 - Durable interval schedules dispatched by explicit ticks or the independent `shards-scheduler` supervisor; expired leases are quarantined.
 - Operator-only Prometheus metrics and redacted structured HTTP access logs.
 - Local-only consistent SQLite snapshots with integrity/audit verification and recovery rehearsal.
-- Optional external OAuth JWT mode and constrained A2A v1.0 agent delegation interface.
+- Optional external OAuth JWT mode and constrained A2A v1.0 agent delegation interface, now including pre-claim `CancelTask` with protocol-specific not-cancelable errors.
 - Docker Compose reference stack for persistent single-host deployment with Caddy HTTPS and protected secret files.
 - Local readiness and liveness endpoints; Python standard library runtime; automated tests.
 - Explicit cross-runtime E2E suite for MCP, stdio, independent worker/reviewer, revocation and gateway restart, gated in CI.
 
-**Not yet implemented:** complete OAuth provider/client-flow interoperability, full A2A conformance, remote tool federation, server-pushed events, production rate limiting/alerting, multi-host Postgres, independent audit anchoring, distributed leader election, automatic external-effect rollback, hosted service and ChatGPT Apps SDK UI. The snapshot feature backs up local SQLite state only.
+**Not yet implemented:** complete OAuth provider/client-flow interoperability, full A2A conformance, remote tool federation, server-pushed events, production rate limiting/alerting, multi-host Postgres, independent audit anchoring, distributed leader election, interruption/cancellation of running tasks, automatic external-effect rollback, hosted service and ChatGPT Apps SDK UI. The snapshot feature backs up local SQLite state only.
 
 See [interoperability and ChatGPT plugin gates](docs/interoperability.md) for the E2E contract and what still needs external deployment validation.
 
