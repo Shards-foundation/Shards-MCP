@@ -348,6 +348,12 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                 except sqlite3.Error:
                     return self.respond(503, {"status": "not_ready"})
             if self.path == "/mcp":
+                origins = self.headers.get_all("Origin", [])
+                if len(origins) > 1 or (origins and origins[0] not in allowed_origins):
+                    return self.respond(403, {"error": "origin denied"})
+                versions = self.headers.get_all("MCP-Protocol-Version", [])
+                if len(versions) > 1 or (versions and versions[0] != MCP_PROTOCOL_VERSION):
+                    return self.respond(400, {"error": "unsupported MCP protocol version"})
                 return self.respond(405, {"error": "GET streaming not supported; use POST"}, {"Allow": "POST"})
             card_target = a2a.route(self.path, card=True) if a2a else None
             if card_target:
