@@ -1,8 +1,9 @@
 """Constrained A2A v1.0 JSON-RPC adapter for Shards agent task delegation.
 
-The adapter supports authenticated per-agent Agent Cards and SendMessage/GetTask
-with text-only input and polling. Unsupported methods fail explicitly.
-No streaming, cancellation, push subscriptions or multi-turn semantics are claimed.
+The adapter supports authenticated per-agent Agent Cards, SendMessage/GetTask
+and queued-only CancelTask with text-only input and polling. Unsupported methods
+fail explicitly. No streaming, running-task cancellation, push subscriptions or
+multi-turn semantics are claimed.
 """
 from __future__ import annotations
 
@@ -84,6 +85,7 @@ class A2AAdapter:
             "blocked": "TASK_STATE_WORKING",
             "succeeded": "TASK_STATE_COMPLETED",
             "failed": "TASK_STATE_FAILED",
+            "cancelled": "TASK_STATE_CANCELED",
         }
         state = mapping[task["state"]]
         result: dict[str, Any] = {
@@ -135,6 +137,18 @@ class A2AAdapter:
             raise GatewayError("task not found", "NOT_FOUND")
         return self.mapped_task(task)
 
+    def cancel_task(self, actor: Principal, target: str, params: Any) -> dict[str, Any]:
+        """A2A cancellation is legal only before a worker has claimed the task."""
+        actor.require("task:create")
+        task_id = params.get("id") if isinstance(params, dict) else None
+        if not isinstance(task_id, str) or not 1 <= len(task_id) <= 200:
+            raise GatewayError("task id required")
+        task = self.gateway.task_get(actor, task_id)
+        if task["assignee"] != target:
+            raise GatewayError("task not found", "NOT_FOUND")
+        self.gateway.task_cancel(actor, task_id)
+        return self.mapped_task(self.gateway.task_get(actor, task_id))
+
     def process(self, actor: Principal, target: str, request: Any) -> dict[str, Any]:
         request_id = request.get("id") if isinstance(request, dict) else None
         def error(code: int, message: str) -> dict[str, Any]:
@@ -144,17 +158,20 @@ class A2AAdapter:
         if not isinstance(request, dict) or request.get("jsonrpc") != "2.0" or "id" not in request:
             return error(-32600, "Invalid JSON-RPC request")
         method = request.get("method")
-        if method not in ("SendMessage", "GetTask"):
+        if method not in ("SendMessage", "GetTask", "CancelTask"):
             return error(-32601, "Unsupported A2A method")
         params = request.get("params", {})
         try:
             if method == "SendMessage":
                 response = self.send_message(actor, target, params)
-            else:
+            elif method == "GetTask":
                 response = self.get_task(actor, target, params)
+            else:
+                response = self.cancel_task(actor, target, params)
             return {"jsonrpc": "2.0", "id": request_id, "result": response}
         except GatewayError as exc:
-            code = (-32001 if exc.code == "NOT_FOUND"
+            code = (-32002 if method == "CancelTask" and exc.code == "CONFLICT"
+                    else -32001 if exc.code == "NOT_FOUND"
                     else -32602 if exc.code == "INVALID_REQUEST"
                     else -32003 if exc.code in ("FORBIDDEN", "UNAUTHENTICATED")
                     else -32603)
