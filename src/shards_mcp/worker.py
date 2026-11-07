@@ -99,9 +99,14 @@ def process_once(client: AgentClient) -> int:
     # cannot take the same task between an inbox poll and separate lease claim.
     for _ in range(10):
         claimed = client.call("task_claim_next", {"lease_seconds": 60})
+        if not isinstance(claimed, dict) or type(claimed.get("claimed")) is not bool:
+            raise RuntimeError("gateway returned an invalid task claim")
         if not claimed["claimed"]:
             break
-        task = claimed["task"]
+        task = claimed.get("task")
+        if (not isinstance(task, dict) or not isinstance(task.get("id"), str)
+                or not task["id"] or "input" not in task):
+            raise RuntimeError("gateway returned an invalid claimed task")
         task_id = task["id"]
         try:
             client.call("checkpoint_write", {"task_id": task_id, "body": {"stage": "started"}})
