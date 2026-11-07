@@ -20,7 +20,7 @@ class A2ATests(unittest.TestCase):
         self.gateway = Gateway(str(Path(self.tmp.name) / "a2a.sqlite"), self.admin_token)
         self.root = self.gateway.authenticate(self.admin_token)
         self.sender = self.gateway.register(self.root, "sender", "test", [],
-                                            ["agent:read", "task:create", "task:read"])
+                                            ["agent:read", "task:create", "task:read", "task:cancel"])
         self.worker = self.gateway.register(self.root, "worker", "test", ["a2a/1.0"],
                                             ["agent:read", "task:read", "task:claim", "task:update"])
         self.reviewer = self.gateway.register(self.root, "reviewer", "test", [],
@@ -154,7 +154,7 @@ class A2ATests(unittest.TestCase):
                                       version=None)[0], 400)
         self.assertEqual(self.request("POST", self.path, self.sender["token"], send,
                                       version="0.3")[0], 400)
-        for method in ("SendStreamingMessage", "CancelTask", "ListTasks"):
+        for method in ("SendStreamingMessage", "SubscribeToTask", "ListTasks"):
             result = self.request("POST", self.path, self.sender["token"],
                                   self.rpc(method, {}))[1]
             self.assertEqual(result["error"]["code"], -32601)
