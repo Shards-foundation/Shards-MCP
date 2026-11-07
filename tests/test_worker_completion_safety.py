@@ -18,14 +18,14 @@ class CompletionClient:
             return ({"claimed": True, "task": {"id": "t-1", "input": self.payload}}
                     if self.claims == 1 else {"claimed": False})
         if name == self.failure:
-            raise ValueError("simulated gateway failure")
+            raise RuntimeError("simulated gateway failure")
         return {"ok": True}
 
 
 class WorkerCompletionSafetyTests(unittest.TestCase):
     def test_successful_completion_value_error_is_not_retried(self):
         client = CompletionClient(failure="task_complete")
-        with self.assertRaisesRegex(ValueError, "simulated gateway failure"):
+        with self.assertRaisesRegex(RuntimeError, "simulated gateway failure"):
             process_once(client)
         self.assertEqual(sum(name == "task_complete" for name, _ in client.calls), 1)
         self.assertIs(client.calls[-1][1]["success"], True)
