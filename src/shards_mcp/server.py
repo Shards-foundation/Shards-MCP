@@ -506,10 +506,15 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                         dispatch, set(SCHEMAS),
                     )
                 except Exception:
-                    # Never expose internal details or credentials in the new era.
+                    # A valid request ID must survive an unexpected handler
+                    # failure so clients can match the response. Never echo
+                    # untrusted request IDs of invalid types or error details.
                     self.log_error("Internal error in stateless MCP handler")
+                    request_id = payload.get("id") if isinstance(payload, dict) else None
+                    if type(request_id) not in (str, int, float):
+                        request_id = None
                     status_code, response = 500, {
-                        "jsonrpc": "2.0", "id": None,
+                        "jsonrpc": "2.0", "id": request_id,
                         "error": {"code": -32603, "message": "Internal error"},
                     }
                 return self.respond(status_code, response)
