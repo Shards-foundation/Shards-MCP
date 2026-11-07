@@ -27,7 +27,7 @@ from .observability import RequestMetrics, route_class
 from .config import admin_token_from_environment
 from .json_limits import enforce_json_depth
 from .mcp_modern import (MODERN_VERSION, SUPPORTED_VERSIONS,
-                         process_modern, unsupported)
+                         PROTOCOL_VERSION_KEY, process_modern, unsupported)
 
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
@@ -469,7 +469,16 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                 except Exception:
                     self.log_error("Internal REST tool error")
                     return self.respond(500, {"ok": False, "error": {"code": "INTERNAL", "message": "Internal error"}})
-            if self.path == "/mcp" and self.headers.get("MCP-Protocol-Version") == MODERN_VERSION:
+            declared_meta = (
+                payload.get("params", {}).get("_meta", {})
+                if isinstance(payload, dict) and isinstance(payload.get("params"), dict)
+                else {}
+            )
+            if self.path == "/mcp" and (
+                self.headers.get("MCP-Protocol-Version") == MODERN_VERSION
+                or (isinstance(declared_meta, dict)
+                    and declared_meta.get(PROTOCOL_VERSION_KEY) == MODERN_VERSION)
+            ):
                 try:
                     status_code, response = process_modern(
                         payload, self.headers, principal, gateway, visible_tools,
