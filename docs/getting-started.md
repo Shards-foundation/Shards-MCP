@@ -34,6 +34,7 @@ Use the **same existing** protected admin token file and database path from term
 
 ```bash
 cd Shards-MCP
+. .venv/bin/activate
 export SHARDS_ADMIN_TOKEN_FILE="$HOME/.config/shards/admin.token"
 export SHARDS_DB="$PWD/shards.local.sqlite"
 shards-mcp-admin register --name local-diagnostic --provider cli \
