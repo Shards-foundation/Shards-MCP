@@ -18,20 +18,24 @@ A private repository requires GitHub access; the command does not imply anonymou
 ## 2. Start local gateway (terminal one)
 
 ```bash
-export SHARDS_ADMIN_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+mkdir -p "$HOME/.config/shards"
+chmod 700 "$HOME/.config/shards"
+python -c 'import os,pathlib,secrets; p=pathlib.Path.home()/".config/shards/admin.token"; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(fd,secrets.token_urlsafe(48).encode()); os.close(fd)'
+export SHARDS_ADMIN_TOKEN_FILE="$HOME/.config/shards/admin.token"
 export SHARDS_DB="$PWD/shards.local.sqlite"
 shards-mcp
 ```
 
-The gateway listens on `127.0.0.1:8787` by default. Do not expose the bootstrap credential to another process or model. The terminal retains the secret; use protected secret files outside demonstrations.
+The gateway listens on `127.0.0.1:8787` by default. The generator creates an exclusive owner-readable file (`0600`) and **refuses to overwrite existing secrets**. Do not regenerate the bootstrap token against an existing database. Never expose this file to any IDE, model or web process.
 
 ## 3. Enrol a diagnostic agent (terminal two)
 
-Use the **same** `SHARDS_ADMIN_TOKEN` and `SHARDS_DB` as terminal one, supplied securely by the operator. Do not generate a new admin secret for the existing database.
+Use the **same existing** protected admin token file and database path from terminal one. A new terminal does not inherit the first terminal's environment; configure both variables explicitly. These commands assume the second terminal starts in the same parent directory as the initial clone.
 
 ```bash
-mkdir -p "$HOME/.config/shards"
-chmod 700 "$HOME/.config/shards"
+cd Shards-MCP
+export SHARDS_ADMIN_TOKEN_FILE="$HOME/.config/shards/admin.token"
+export SHARDS_DB="$PWD/shards.local.sqlite"
 shards-mcp-admin register --name local-diagnostic --provider cli \
   --scope agent:read \
   --token-file "$HOME/.config/shards/diagnostic.token"
