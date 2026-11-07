@@ -70,7 +70,7 @@ def read_agent_token(filename: str | None = None) -> str:
 def _validate_gateway_url(value: str) -> str:
     """Reject ambiguous origins before urllib can normalise control characters."""
     if (not isinstance(value, str) or not value or
-            any(ord(char) <= 32 or ord(char) == 127 for char in value) or
+            any(char.isspace() or ord(char) <= 32 or ord(char) == 127 for char in value) or
             "\\" in value):
         raise DiagnosticError("gateway URL must be a valid origin")
     try:
@@ -80,7 +80,7 @@ def _validate_gateway_url(value: str) -> str:
         hostname = parts.hostname
     except ValueError:
         raise DiagnosticError("gateway URL must be a valid origin") from None
-    if (parts.scheme not in ("http", "https") or not hostname or
+    # urllib accepts bracketed IPv6 literals followed by invalid suffixes.\n    # Require the authority to match the parsed hostname and port exactly.\n    expected_authority = (f"[{hostname}]" if hostname and ":" in hostname else hostname or "")\n    if port is not None:\n        expected_authority += f":{port}"\n    if parts.netloc != expected_authority:\n        raise DiagnosticError("gateway URL must be a valid origin")\n    if (parts.scheme not in ("http", "https") or not hostname or
             parts.username is not None or parts.password is not None or
             parts.query or parts.fragment or parts.path not in ("", "/") or
             port == 0 or not parts.netloc):
