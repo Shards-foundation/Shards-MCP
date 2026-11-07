@@ -20,6 +20,30 @@ enrol other agents or change permissions. Every authenticated agent may call it.
 MCP exposes tools to an AI runtime; A2A delegates work between agents. These
 interfaces must not be confused with unrestricted tool execution.
 
+## Cancellation semantics across clients
+
+The scoped MCP/REST **task_cancel** tool requires task:cancel and lets the
+original task creator or the operator cancel a queued task. The underlying
+SQLite transaction serializes cancellation against worker claim; exactly one
+operation can succeed. Repeated cancellation through MCP/REST is idempotent
+and does not generate extra audit entries.
+
+A2A v1 CancelTask accepts an id for a task routed to that A2A agent. It
+requires task:cancel plus task:read, returns a Task with
+TASK_STATE_CANCELED, and returns the protocol TaskNotCancelableError (-32002)
+if the task was already cancelled or has been claimed. GetTask preserves
+that terminal state. An unrelated agent cannot cancel another creator's task
+and an id for a different A2A target is not accessible.
+
+**This is queue cancellation, not execution cancellation.** Once a task is
+running, reporting a successful cancellation would be unsafe: the worker may
+already have called external systems. A failed, reported or completed task
+is likewise not cancellable. Expired running leases remain blocked until the
+operator reconciles potential external effects. No rollback is implied.
+
+The concurrency and HTTP cancellation regression suite is included in CI
+test discovery on all supported Python versions.
+
 ## Run the end-to-end checks
 
 ~~~bash
