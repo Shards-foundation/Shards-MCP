@@ -10,6 +10,7 @@ import secrets
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from shards_mcp.core import Gateway
 from shards_mcp.mcp_modern import MODERN_VERSION, LEGACY_VERSION, SUPPORTED_VERSIONS
@@ -202,6 +203,22 @@ class StatelessMcpTests(unittest.TestCase):
                 db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 0,
                 "unsupported protocol metadata must never execute task_create",
             )
+
+    def test_unexpected_modern_error_preserves_valid_request_id_without_details(self):
+        for request_id in ("modern-incident-123", 9001):
+            with self.subTest(request_id=request_id):
+                with patch("shards_mcp.server.process_modern",
+                           side_effect=RuntimeError("private internal error details")):
+                    status, response = self.request(
+                        self.packet("tools/list", request_id=request_id),
+                        route="tools/list",
+                    )
+                self.assertEqual(status, 500, response)
+                self.assertEqual(response["id"], request_id)
+                self.assertEqual(response["error"],
+                                 {"code": -32603, "message": "Internal error"})
+                self.assertNotIn("private internal error details",
+                                 json.dumps(response))
 
     def test_stateless_requests_validate_metadata_per_call(self):
         no_meta = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
