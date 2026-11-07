@@ -154,11 +154,49 @@ class A2ATests(unittest.TestCase):
                                       version=None)[0], 400)
         self.assertEqual(self.request("POST", self.path, self.sender["token"], send,
                                       version="0.3")[0], 400)
-        for method in ("SendStreamingMessage", "CancelTask", "ListTasks"):
+        for method in ("SendStreamingMessage", "ListTasks"):
             result = self.request("POST", self.path, self.sender["token"],
                                   self.rpc(method, {}))[1]
             self.assertEqual(result["error"]["code"], -32601)
         self.assertEqual(self.request("POST", self.path, data=send)[0], 401)
+
+    def test_queued_task_cancellation_is_durable_and_scope_bounded(self):
+        sent = self.request("POST", self.path, self.sender["token"],
+                            self.rpc("SendMessage", self.message("cancel-1", "Do not run")))[1]
+        tid = sent["result"]["task"]["id"]
+        cancel = self.request("POST", self.path, self.sender["token"],
+                              self.rpc("CancelTask", {"id": tid}, 12))[1]
+        self.assertEqual(cancel["id"], 12)
+        self.assertEqual(cancel["result"]["status"]["state"], "TASK_STATE_CANCELED")
+        self.assertEqual(cancel["result"]["id"], tid)
+        status = self.request("POST", self.path, self.sender["token"],
+                              self.rpc("GetTask", {"id": tid}, 13))[1]
+        self.assertEqual(status["result"]["status"]["state"], "TASK_STATE_CANCELED")
+        self.assertEqual(self.gateway.task_inbox(
+            self.gateway.authenticate(self.worker["token"])), [])
+        self.assertEqual(self.request("POST", self.path, self.sender["token"],
+                         self.rpc("CancelTask", {"id": tid}))[1]["error"]["code"], -32002)
+        self.assertEqual(self.request("POST", self.path, self.outsider["token"],
+                         self.rpc("CancelTask", {"id": tid}))[1]["error"]["code"], -32003)
+        self.assertTrue(self.gateway.audit_verify(self.root)["valid"])
+        self.assertEqual(self.gateway.audit_list(self.root, 1)[0]["action"], "task.cancel")
+
+    def test_cancel_refused_after_work_started_and_for_other_assignee(self):
+        sent = self.request("POST", self.path, self.sender["token"],
+                            self.rpc("SendMessage", self.message("cancel-2", "already started")))[1]
+        tid = sent["result"]["task"]["id"]
+        self.gateway.task_claim(self.gateway.authenticate(self.worker["token"]), tid)
+        denied = self.request("POST", self.path, self.sender["token"],
+                              self.rpc("CancelTask", {"id": tid}))[1]
+        self.assertEqual(denied["error"]["code"], -32002)
+        self.assertEqual(self.gateway.task_get(self.root, tid)["state"], "running")
+
+        other = self.gateway.register(self.root, "different-worker", "test", [],
+                                      ["agent:read", "task:read"])
+        other_path = "/a2a/agents/" + other["agent_id"]
+        denied = self.request("POST", other_path, self.sender["token"],
+                              self.rpc("CancelTask", {"id": tid}))[1]
+        self.assertEqual(denied["error"]["code"], -32001)
 
     def test_bad_inputs_and_permissions_do_not_create_tasks(self):
         invalid = [
