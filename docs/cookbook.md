@@ -38,8 +38,8 @@ curl --fail-with-body --silent --show-error \
 shards-worker --once
 ```
 
-5. Creator or verifier reads `task_get` by returned task ID. A successful worker result is only `reported`.
-6. Verifier **independently inspects** the output and calls `task_verify` with non-empty meaningful evidence, such as a reviewed expected/actual output digest. Until then do not claim `succeeded`.
+5. **Only task creator or assignee** (or the host operator) can inspect this task via `task_get`. A verifier with `task:read` alone cannot call `task_get` on another principal's task; the gateway returns `NOT_FOUND`. The worker's successful report remains `reported`.
+6. Arrange a separately authorised result/evidence handoff to the independent verifier, for example a scoped `message_send` to a verifier identity with `message:read`, or a trusted out-of-band review channel. The reference worker does **not** automatically deliver that handoff. The verifier must establish expected vs actual behaviour independently, not simply trust the worker's claim, then call `task_verify` with the task ID, approval decision and meaningful evidence. Until then do not claim `succeeded`. This limitation is an integration step, **not** built-in verifier access to arbitrary tasks.
 
 ## Recipe C — diagnose without mutation
 
