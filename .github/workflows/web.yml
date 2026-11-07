@@ -10,7 +10,7 @@ on:
       - "web/**"
       - ".github/workflows/web.yml"
 permissions:
-  contents: read
+  contents: write
 jobs:
   console:
     runs-on: ubuntu-latest
@@ -34,6 +34,19 @@ jobs:
           name: web-package-lock
           path: web/package-lock.json
           retention-days: 1
+      - name: Commit registry-resolved lockfile to this PR branch
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/web-auth-control-plane-foundation-20261107'
+        working-directory: .
+        env:
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add web/package-lock.json
+          if ! git diff --cached --quiet; then
+            git commit -m "build(web): commit registry-resolved dependency lockfile"
+            git push origin "HEAD:refs/heads/$PR_BRANCH"
+          fi
       - name: Typecheck
         run: npm run typecheck
       - name: Build
