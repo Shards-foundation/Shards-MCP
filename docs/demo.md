@@ -14,7 +14,7 @@ Expected: JSON with `ok:true`, `task_state:"succeeded"`, distinct creator/worker
 For a **network** integration demo instead, use [getting started](getting-started.md) to start local HTTP, enrol a scoped token with host-only admin CLI, and run:
 
 ```bash
-shards-mcp-doctor --protocol both --token-file "$HOME/.config/shards/doctor.token" --json
+shards-mcp-doctor --protocol both --token-file "$HOME/.config/shards/diagnostic.token" --json
 ```
 
 The diagnostic is read-only and does not simulate external OAuth or live ChatGPT login. To exercise stdio, worker and restart over HTTP with isolated clients, CI runs:
