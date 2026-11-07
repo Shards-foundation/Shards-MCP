@@ -154,6 +154,27 @@ These diagnostics can also check remote HTTPS endpoints with a pre-provisioned
 agent bearer token, but do **not** initiate OAuth authorization-code login,
 refresh or public ChatGPT App Directory validation.
 
+## Scoped A2A v1.0 read-only connection diagnostic
+
+Use shards-a2a-doctor against an enrolled target agent to test the
+authenticated Agent Card and the read-only GetTask JSON-RPC error
+contract without creating any task:
+
+~~~bash
+shards-a2a-doctor --target-agent agt_REPLACE_WITH_ENROLLED_ID \
+  --url http://127.0.0.1:8787 --token-file "$HOME/.config/shards/reader.token" --json
+~~~
+
+This verifies the caller is a scoped agent through the existing read-only MCP agent_identity contract, then requires agent:read and task:read on that credential;
+it rejects admin tokens, non-loopback HTTP, redirects and malformed
+response envelopes, missing bearer security requirements and invalid JSON-RPC error messages. The random GetTask probe must return task-not-found
+rather than a successful task response or permission error. The
+diagnostic cannot prove SendMessage/CancelTask, streaming, multi-turn
+interoperability or full protocol conformance.
+
+See [A2A read-only diagnostic](a2a-doctor.md) and the dedicated loopback
+E2E suite (test_a2a_doctor.py), run on Python 3.11–3.15 in CI.
+
 ## ChatGPT / Codex remote plugin requirements
 
 OpenAI's current guidance requires a stable publicly reachable **HTTPS**
