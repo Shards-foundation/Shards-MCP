@@ -74,7 +74,7 @@ class OAuthResourceServer:
         return {
             "resource": self.resource,
             "authorization_servers": [self.issuer],
-            "scopes_supported": ["agent:read"],
+            "scopes_supported": list(SCOPES),
             "bearer_methods_supported": ["header"],
         }
 

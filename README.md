@@ -13,6 +13,7 @@
 - Agent-private event topics `agent.<agent_id>.<topic>`, untrusted shared broadcasts `shared.<topic>`, and operator-only `system.*` topics; audit queries scoped to the authenticated actor.
 
 - MCP stdio bridge for compatible local AI runtimes, forwarding to the authenticated HTTP server.
+- Authenticated `agent_identity` tool for effective principal and scope discovery without exposing credentials.
 - MCP JSON-RPC 2.0 stateless HTTP at POST /mcp: initialize, ping, tools/list, tools/call. Authenticated generic HTTP clients may instead invoke POST /v1/tools/{name} with JSON arguments, or discover GET /v1/tools.
 - Scoped bearer-credential agent registration, agent enumeration, revocation and heartbeat.
 - Durable agent-to-agent messaging, idempotency and recipient isolation.
@@ -24,8 +25,11 @@
 - Optional external OAuth JWT mode and constrained A2A v1.0 agent delegation interface.
 - Docker Compose reference stack for persistent single-host deployment with Caddy HTTPS and protected secret files.
 - Local readiness and liveness endpoints; Python standard library runtime; automated tests.
+- Explicit cross-runtime E2E suite for MCP, stdio, independent worker/reviewer, revocation and gateway restart, gated in CI.
 
 **Not yet implemented:** complete OAuth provider/client-flow interoperability, full A2A conformance, remote tool federation, server-pushed events, production rate limiting/alerting, multi-host Postgres, independent audit anchoring, distributed leader election, automatic external-effect rollback, hosted service and ChatGPT Apps SDK UI. The snapshot feature backs up local SQLite state only.
+
+See [interoperability and ChatGPT plugin gates](docs/interoperability.md) for the E2E contract and what still needs external deployment validation.
 
 ## Run locally
 

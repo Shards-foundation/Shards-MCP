@@ -39,6 +39,8 @@ BOOL = {"type": "boolean"}
 
 # Tool descriptions deliberately state authority boundaries. They do not grant authority.
 TOOL_DEFS = [
+    ("agent_identity", "Identify the authenticated agent and its granted scopes without exposing credentials.",
+     schema({}), True),
     ("agent_list", "List registered agents (credentials never returned).",
      schema({}), True),
     ("agent_heartbeat", "Record authenticated agent liveness.", schema({}), False),
@@ -105,6 +107,7 @@ TOOL_LIST = [
 ]
 SCHEMAS = {item["name"]: item["inputSchema"] for item in TOOL_LIST}
 TOOL_SCOPES = {
+    "agent_identity": "__authenticated__",
     "agent_list": "agent:read",
     "agent_heartbeat": "agent:heartbeat",
     "message_send": "message:send", "message_inbox": "message:read",
@@ -128,7 +131,8 @@ if set(TOOL_SCOPES) != set(SCHEMAS):
 def visible_tools(principal: Principal) -> list[dict[str, Any]]:
     if "*" in principal.scopes:
         return TOOL_LIST
-    return [tool for tool in TOOL_LIST if TOOL_SCOPES[tool["name"]] in principal.scopes]
+    return [tool for tool in TOOL_LIST if (TOOL_SCOPES[tool["name"]] in principal.scopes
+            or TOOL_SCOPES[tool["name"]] == "__authenticated__")]
 
 
 def decode_auth(value: str) -> str:
@@ -192,6 +196,9 @@ def validate_args(name: str, args: Any) -> dict[str, Any]:
 def dispatch(gateway: Gateway, principal: Principal, name: str, args: Any) -> Any:
     a = validate_args(name, args)
     calls: dict[str, Callable[[], Any]] = {
+        "agent_identity": lambda: {"agent_id": principal.agent_id,
+                                    "scopes": list(principal.scopes),
+                                    "role": "operator" if "*" in principal.scopes else "agent"},
         "agent_list": lambda: gateway.agents(principal),
         "agent_heartbeat": lambda: gateway.heartbeat(principal),
         "message_send": lambda: gateway.send(principal, a["destination"], a["body"], a["idempotency_key"], a.get("task_id")),
