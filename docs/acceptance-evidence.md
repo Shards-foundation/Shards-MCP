@@ -25,11 +25,11 @@ if [ -e secrets/admin_token ]; then
 fi
 mkdir -p secrets
 umask 077
-printf '%s\\n' 'compose-config-validation-only-not-a-real-secret' > secrets/admin_token
+printf '%s\n' 'compose-config-validation-only-not-a-real-secret' > secrets/admin_token
 trap 'rm -f secrets/admin_token' EXIT HUP INT TERM
-SHARDS_GATEWAY_DOMAIN=gateway.example.invalid \\
-SHARDS_OAUTH_ISSUER=https://issuer.example.invalid \\
-SHARDS_OAUTH_JWKS_URI=https://issuer.example.invalid/jwks.json \\
+SHARDS_GATEWAY_DOMAIN=gateway.example.invalid \
+SHARDS_OAUTH_ISSUER=https://issuer.example.invalid \
+SHARDS_OAUTH_JWKS_URI=https://issuer.example.invalid/jwks.json \
   docker compose -f deploy/compose.yaml config --quiet
 ```
 
