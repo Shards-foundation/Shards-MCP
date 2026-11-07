@@ -22,15 +22,16 @@ export const authOptions: NextAuthOptions = {
   session: { strategy: "jwt", maxAge: 60 * 60 * 8 },
   pages: { signIn: "/signin" },
   callbacks: {
-    async signIn({ user }) {
-      // First deployment is private by default. Social authentication alone
-      // must never make the operator console open to the entire internet.
+    async signIn({ account }) {
+      // Provider-scoped subject IDs, not email addresses, are the admission key.
+      // Email may be unverified, mutable or shared across providers.
       const allowed = new Set(
-        (process.env.SHARDS_CONSOLE_ALLOWED_EMAILS ?? "")
-          .split(",").map(email => email.trim().toLowerCase()).filter(Boolean),
+        (process.env.SHARDS_CONSOLE_ALLOWED_IDENTITIES ?? "")
+          .split(",").map(identity => identity.trim()).filter(Boolean),
       );
-      const email = user.email?.trim().toLowerCase();
-      return Boolean(email && allowed.has(email));
+      const provider = account?.provider;
+      const subject = account?.providerAccountId;
+      return Boolean(provider && subject && allowed.has(`${provider}:${subject}`));
     },
     async session({ session }) {
       // Social login proves identity, not Shards operator/agent authority.
