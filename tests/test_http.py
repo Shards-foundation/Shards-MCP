@@ -71,10 +71,12 @@ class HttpTests(unittest.TestCase):
 
 
     def test_rest_bridge_and_version_guard(self):
+        # Modern clients no longer use initialize; omitting the mandatory
+        # per-request metadata must fail instead of negotiating implicitly.
         status, data = self.req("POST", "/mcp", self.rpc("initialize"), self.token,
                                 {"MCP-Protocol-Version": "2026-07-28"})
         self.assertEqual(status, 400)
-        self.assertIn("unsupported", data["error"])
+        self.assertEqual(data["error"]["code"], -32602)
         status, data = self.req("POST", "/mcp", self.rpc("initialize"), self.token,
                                 {"MCP-Protocol-Version": "2025-11-25"})
         self.assertEqual(status, 200)
