@@ -438,7 +438,7 @@ def make_handler(gateway: Gateway, allowed_origins: set[str],
                 return self.respond(401, {"error": "invalid credentials"},
                                     {"WWW-Authenticate": challenge})
             try:
-                raw = self.rfile.read(length)
+                raw = self.rfile.read(length).decode("utf-8")
                 enforce_json_depth(raw)
                 payload = json.loads(raw, parse_constant=reject_nonfinite,
                                      parse_float=reject_overflowing_float,
