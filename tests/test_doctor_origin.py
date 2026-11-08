@@ -12,6 +12,8 @@ class DoctorOriginTests(unittest.TestCase):
             "http://[::1]:8080",
             "https://gateway.example.test",
             "https://gateway.example.test:443/",
+            "https://Gateway.Example.test",
+            "http://LOCALHOST:8080",
         ):
             with self.subTest(value=value):
                 self.assertEqual(_validate_gateway_url(value), value.rstrip("/"))
@@ -28,6 +30,11 @@ class DoctorOriginTests(unittest.TestCase):
             "https://[::1",
             "http://[::1]evil:8080",
             "http://[::1]evil",
+            "http://[::1]EVIL:8080",
+            "https://gateway.example.test?",
+            "https://gateway.example.test#",
+            "https://gateway.example.test/?",
+            "https://gateway.example.test/#",
             "https://gate\u00a0way.example.test",
             "https://gateway.example.test\u2028",
             "https://user:password@gateway.example.test",
