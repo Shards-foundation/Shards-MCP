@@ -73,10 +73,11 @@ export async function readBoundedJson(response: Response): Promise<unknown> {
   }
 }
 
-export async function invokeReadTool(origin: URL, token: string, name: "agent_identity" | "agent_list"): Promise<unknown> {
+export async function invokeReadTool(origin: URL, token: string, name: "agent_identity" | "agent_list",
+                                     fetcher: typeof fetch = fetch): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch(new URL("/v1/tools/" + name, origin), {
+    response = await fetcher(new URL("/v1/tools/" + name, origin), {
       method: "POST",
       headers: {
         Authorization: "Bearer " + token,
