@@ -23,14 +23,16 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function gatewayOrigin(value: string): URL {
   // URL() normalises newlines and whitespace: reject the original input first.
-  if (!value || /[\s\u0000-\u001f\u007f\\?#]/u.test(value)) {
+  if (!value || /[\s\u0000-\u001f\u007f\\?#]/u.test(value) ||
+      !/^https?:\/\/[^/?#]+\/?$/i.test(value)) {
     throw new InventoryError("configuration_error");
   }
   try {
     const url = new URL(value);
     const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
     if ((url.protocol !== "https:" && !(url.protocol === "http:" && local)) ||
-        url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+        url.username || url.password || url.port === "0" ||
+        url.pathname !== "/" || url.search || url.hash) {
       throw new InventoryError("configuration_error");
     }
     return url;
