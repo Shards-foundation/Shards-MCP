@@ -12,8 +12,10 @@ type InventoryState =
   | "invalid_gateway_response";
 
 export class InventoryError extends Error {
-  constructor(readonly state: InventoryState) {
+  readonly state: InventoryState;
+  constructor(state: InventoryState) {
     super(state);
+    this.state = state;
   }
 }
 
