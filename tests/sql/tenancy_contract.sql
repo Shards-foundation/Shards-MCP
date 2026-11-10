@@ -212,7 +212,7 @@ RESET ROLE;
 DO $$
 BEGIN
   BEGIN
-    TRUNCATE TABLE shards_v2.audit_entries;
+    TRUNCATE TABLE shards_v2.audit_entries CASCADE;
     RAISE EXCEPTION 'FAIL: audit truncate succeeded';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
