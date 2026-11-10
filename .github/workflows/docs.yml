@@ -7,6 +7,10 @@ on:
       - "LICENSE"
       - "scripts/docs_check.py"
       - "scripts/demo_local.py"
+      - "scripts/skillctl.py"
+      - "scripts/skill_evidence.py"
+      - "skills/**"
+      - "tests/test_skills.py"
       - "tests/test_documentation.py"
       - ".github/workflows/docs.yml"
   push:
@@ -38,7 +42,17 @@ jobs:
         run: python -m pip install -e .
       - name: Validate doc links and skill metadata
         run: python scripts/docs_check.py
+      - name: Validate Shards skills catalog
+        run: python scripts/skillctl.py validate
+      - name: First-run preflight (read-only)
+        run: python skills/get-started/scripts/preflight.py --json
+      - name: Validate conservative release evidence template
+        run: |
+          if python scripts/skill_evidence.py --input skills/release-readiness/assets/evidence-template.json --envelope hosted; then
+            echo "Unverified release template must fail closed" >&2
+            exit 1
+          fi
       - name: Safe deterministic agent demo
         run: python scripts/demo_local.py
       - name: Regression suite
-        run: python -m unittest discover -s tests -p 'test_documentation.py' -v
+        run: python -m unittest discover -s tests -p 'test_*skills*.py' -v && python -m unittest discover -s tests -p 'test_documentation.py' -v

@@ -9,7 +9,7 @@ Shards-MCP is a self-hosted, single-organisation gateway. The Python package, op
 | Audience | First document | Follow-on |
 | --- | --- | --- |
 | Developer | [Quick start](getting-started.md) | [Cookbook](cookbook.md), [spec](specification.md) |
-| AI/IDE agent | [AGENTS.md](../AGENTS.md) | [Agent onboarding](agent-onboarding.md), [skills](../skills/README.md) |
+| AI/IDE agent | [AGENTS.md](../AGENTS.md) | [Get started skill](../skills/get-started/SKILL.md), [skills map](../skills/MAP.md) |
 | Operator | [Rulebook](rulebook.md) | [Operations](operations.md), [security](../SECURITY.md), [release gates](releasing.md) |
 | Reviewer | [Acceptance evidence](acceptance-evidence.md) | [Compliance mapping](compliance/controls.md), [threat model](threat-model.md) |
 | Business/legal | [Terms draft](legal/terms.md) | [Privacy draft](legal/privacy.md), [DPA outline](legal/dpa.md), [licensing](../LICENSING.md) |

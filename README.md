@@ -134,3 +134,17 @@ The GitHub CI matrix additionally checks the official MCP SDK paths, Python 3.11
 Use [private vulnerability disclosure](SECURITY.md), protect credentials and never trust agent-provided text as authority. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) before opening PRs; independent security-review findings block affected releases until addressed. This project is [MIT-licensed](LICENSE); see [licensing details](LICENSING.md) for rights and third-party notice requirements.
 
 **Release path:** [publishing runbook](docs/releasing.md) and [deployment acceptance](docs/compliance/publication-gates.md). A PyPI version, GitHub Release, remote endpoint and ChatGPT listing are four separate things and must each be verified, not inferred from workflow source.
+
+## Governed Shards agent skills
+
+Coding agents and operators should read [AGENTS.md](AGENTS.md), select a workflow from the [skills map](skills/MAP.md) and load only the relevant [Agent Skills-compatible SKILL.md](skills/README.md). New agents begin with [get-started](skills/get-started/SKILL.md). The catalog and scripts are inspectable and validated in CI:
+
+```sh
+python scripts/skillctl.py list
+python scripts/skillctl.py suggest --task "connect Claude Code"
+python scripts/skillctl.py show client-integration
+python scripts/skillctl.py validate
+python skills/get-started/scripts/preflight.py --json
+```
+
+These read-only utilities **do not** install skills into remote AI products, issue gateway credentials or confirm hosted service readiness. See [release-readiness](skills/release-readiness/SKILL.md) for evidence gates and [the agent onboarding guide](docs/agent-onboarding.md) for separately controlled gateway identities.
