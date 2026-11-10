@@ -2,13 +2,14 @@ import Link from "next/link";
 import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
 import { authOptions } from "@/lib/auth";
+import { operatorSession } from "@/lib/operator-access";
 import { SignOutButton } from "../signout-button";
 
 export const dynamic = "force-dynamic";
 export default async function Account({ searchParams }: { searchParams?: { restricted?: string } }) {
   const session = await getServerSession(authOptions);
   if (!session?.user) redirect("/signin?callbackUrl=%2Faccount");
-  const operator = Boolean((session as typeof session & { shardsOperator?: boolean }).shardsOperator);
+  const operator = operatorSession(session);
   return <main className="public-shell">
     <header className="public-header"><Link className="public-brand" href="/"><span className="public-logo">S</span> SHARDS <span className="brand-sub">/ IDENTITY</span></Link><nav><Link href="/get-started">Connections</Link><Link href="/">Overview</Link></nav></header>
     <section className="account-card"><div className="eyebrow">AUTHENTICATED SESSION</div><h1>{session.user.name ?? "Signed in"}</h1><p>{session.user.email ?? "Identity provider email not shared"}</p>{searchParams?.restricted && <p role="alert">This identity is authenticated but is not enrolled as a Shards operator.</p>}

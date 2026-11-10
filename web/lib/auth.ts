@@ -3,6 +3,7 @@ import GoogleProvider from "next-auth/providers/google";
 import GitHubProvider from "next-auth/providers/github";
 import DiscordProvider from "next-auth/providers/discord";
 import AppleProvider from "next-auth/providers/apple";
+import { approvedOperator } from "./operator-access";
 
 function credentials(name: string) {
   const clientId = process.env[name + "_CLIENT_ID"];
@@ -18,11 +19,6 @@ const chatgpt = credentials("CHATGPT");
 const chatgptIssuer = process.env.CHATGPT_OIDC_ISSUER;
 // Sign in with ChatGPT is partner-gated. No fake button or fabricated issuer.
 const chatgptEnabled = Boolean(chatgpt && chatgptIssuer && /^https:\/\/[^/]+\/?$/.test(chatgptIssuer));
-
-function operatorSubjects() {
-  return new Set((process.env.SHARDS_CONSOLE_ALLOWED_IDENTITIES ?? "")
-    .split(",").map(x => x.trim()).filter(Boolean));
-}
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -64,7 +60,7 @@ export const authOptions: NextAuthOptions = {
       const identity = typeof token.shardsIdentity === "string" ? token.shardsIdentity : "";
       // Ordinary authenticated users may access onboarding and /account only.
       // Operator authority is recomputed from server configuration on every session read.
-      return Object.assign(session, { shardsOperator: Boolean(identity && operatorSubjects().has(identity)) });
+      return Object.assign(session, { shardsOperator: approvedOperator(identity, process.env.SHARDS_CONSOLE_ALLOWED_IDENTITIES) });
     },
   },
 };
