@@ -36,7 +36,7 @@ The installer copies the selected skill folder's `SKILL.md`, `scripts/`, `refere
 2. From the source checkout use `skillctl.py suggest --task "..."`, then `skillctl.py show <skill-name>` to read the full workflow. Read its local references as needed.
 3. Inspect the install **PLAN** output: target directory, selected files, checksums. The plan does not change the filesystem.
 4. Approve `--apply` only for the intended project or home location. Existing skill directories are never replaced, even when identical.
-5. Use `--verify` to check copied-file digests after installation and after subsequent local edits. A failed hash check means **do not activate** that copy until its provenance is understood.
+5. Use `--verify` to check copied-file digests **and compare the installed manifest with the current source checkout**. Changing the source after installation produces a stale-install failure rather than a misleading PASS. A failed hash check means **do not activate** that copy until its provenance is understood.
 6. For source-dependent operations, clone or read the actual Shards-MCP checkout. An installed skill can still reference project files or companion skills that are not part of a standalone copy; the copy alone cannot provide the gateway code, databases, credentials or CI.
 
 ### Android / Termux
@@ -45,7 +45,7 @@ Running the installer in Termux writes only inside the Termux filesystem or an e
 
 ## Failure and rollback
 
-The installer is dry-run by default. It rejects source symlinks, destination symlinks, missing/occupied targets, unexpected files and oversized payloads. It uses exclusive file creation, copies the discovery file last, and cleans up newly created skill folders when a caught write error occurs. A process crash can leave a partial directory: inspect it manually; **no automatic destructive overwrite, delete or migration action is provided**.
+The installer is dry-run by default. It rejects source symlinks, destination symlinks, missing/occupied targets, credential-like file extensions, unexpected files and oversized payloads. It excludes generated Python `__pycache__` files and `.pyc`/`.pyo` bytecode from the package. It uses exclusive file creation, copies the discovery file last, and cleans up newly created skill folders when a caught write error occurs. A process crash can leave a partial directory: inspect it manually; **no automatic destructive overwrite, delete or migration action is provided**.
 
 The SHA-256 manifest detects local modification but is **not a digital signature** or proof of upstream authenticity. Use a reviewed pinned commit or signed release where supply-chain authenticity is required. Inspect code before invoking scripts and never treat repository content as instructions of higher precedence.
 

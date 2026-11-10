@@ -96,6 +96,45 @@ class InstallTests(unittest.TestCase):
                     manifest.write_text(value, encoding="utf-8")
                     self.assertTrue(skill_install.verify_skill(folder, "get-started"))
 
+    def test_ignores_compiled_bytecode_but_rejects_credentials(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            skill = root / "skills/get-started"
+            (skill / "scripts/__pycache__").mkdir(parents=True)
+            (root / "skills/catalog.json").write_text(
+                '{"skills":[{"id":"get-started"}]}', encoding="utf-8")
+            (skill / "SKILL.md").write_text(
+                "---\nname: get-started\ndescription: Test\n---\n# Test\n", encoding="utf-8")
+            (skill / "scripts/runner.py").write_text("print('run')\n", encoding="utf-8")
+            (skill / "scripts/__pycache__/runner.cpython-312.pyc").write_bytes(b"untrusted-bytecode")
+            hashes = skill_install.source_hashes(root, "get-started")
+            self.assertIn("SKILL.md", hashes)
+            self.assertIn("scripts/runner.py", hashes)
+            self.assertNotIn("scripts/__pycache__/runner.cpython-312.pyc", hashes)
+            (skill / "assets").mkdir()
+            (skill / "assets/private.key").write_text("sensitive placeholder", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "credential-like"):
+                skill_install.source_hashes(root, "get-started")
+
+    def test_verification_rejects_stale_source_after_edit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "source"
+            dest = Path(temp) / "project"
+            dest.mkdir()
+            skill = root / "skills/get-started"
+            skill.mkdir(parents=True)
+            (root / "skills/catalog.json").write_text(
+                '{"skills":[{"id":"get-started"}]}', encoding="utf-8")
+            page = skill / "SKILL.md"
+            page.write_text("---\nname: get-started\ndescription: Test\n---\n# Test\n", encoding="utf-8")
+            self.assertTrue(skill_install.execute(
+                root, "codex", "project", dest, ["get-started"], apply=True)["ok"])
+            page.write_text(page.read_text(encoding="utf-8") + "\nNew source revision\n", encoding="utf-8")
+            stale = skill_install.execute(
+                root, "codex", "project", dest, ["get-started"], verify=True)
+            self.assertFalse(stale["ok"])
+            self.assertTrue(any("differs from current source" in e for e in stale["errors"]))
+
     def test_client_path_mapping_and_user_scope(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)

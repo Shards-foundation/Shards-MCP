@@ -36,6 +36,10 @@ def source_hashes(root: Path, name: str) -> dict[str, str]:
     total = 0
     for item in sorted(src.rglob("*")):
         rel = item.relative_to(src)
+        # Local Python imports may leave bytecode inside the skill tree.
+        # Cache output is never part of the portable source distribution.
+        if "__pycache__" in rel.parts or item.suffix.lower() in {".pyc", ".pyo"}:
+            continue
         if item.is_symlink():
             raise ValueError(f"{name}: symlink in skill content: {rel}")
         if item.is_dir():
@@ -44,6 +48,8 @@ def source_hashes(root: Path, name: str) -> dict[str, str]:
                                   and (rel.parts[0] not in ALLOWED or len(rel.parts) < 2
                                        or any(p.startswith(".") for p in rel.parts))):
             raise ValueError(f"{name}: unsupported skill file: {rel}")
+        if item.suffix.lower() in {".pem", ".key", ".token", ".p12", ".pfx"}:
+            raise ValueError(f"{name}: refusing credential-like file: {rel}")
         size = item.stat().st_size
         total += size
         if size > 512 * 1024 or total > 2 * 1024 * 1024 or len(found) >= 100:
@@ -161,7 +167,17 @@ def execute(root: Path, client: str, scope: str, project_dir: Path | None,
     target = destination(client, scope, project_dir, home)
     checked = {name: source_hashes(root, name) for name in names}
     if verify:
-        failures = [e for name in names for e in verify_skill(target / name, name)]
+        failures: list[str] = []
+        for name in names:
+            local_errors = verify_skill(target / name, name)
+            if not local_errors:
+                try:
+                    installed = json.loads((target / name / MANIFEST).read_text(encoding="utf-8"))
+                    if installed.get("files") != checked[name]:
+                        local_errors.append(f"{name}: installed version differs from current source checkout")
+                except (OSError, ValueError, UnicodeError, AttributeError):
+                    local_errors.append(f"{name}: source comparison unavailable")
+            failures.extend(local_errors)
         return {"ok": not failures, "action": "VERIFY", "errors": failures, "files_written": 0}
     conflicts = [name for name in names if (target / name).exists() or (target / name).is_symlink()]
     report: dict[str, Any] = {
