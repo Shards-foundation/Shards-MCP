@@ -105,17 +105,17 @@ INSERT INTO shards_v2.tasks
 VALUES
  ('00000000-0000-4000-8000-000000000001','task_a','agt_a_creator','agt_a_worker','{"task":"safe test"}',
   sha256(convert_to('{"task":"safe test"}','UTF8')),'task-idem');
-DO $success_denial$
+DO $queued_denial$
 BEGIN
  BEGIN
    UPDATE shards_v2.tasks SET state='succeeded' WHERE task_id='task_a';
    RAISE EXCEPTION 'FAIL: queued->succeeded accepted';
  EXCEPTION WHEN check_violation THEN NULL;
  END;
-END $$;
+END $queued_denial$;
 UPDATE shards_v2.tasks SET state='running',attempts=1 WHERE task_id='task_a';
 UPDATE shards_v2.tasks SET state='reported',result_json='{"status":"checked"}' WHERE task_id='task_a';
-DO $$
+DO $success_denial$
 BEGIN
  BEGIN
    UPDATE shards_v2.tasks SET state='succeeded' WHERE task_id='task_a';
