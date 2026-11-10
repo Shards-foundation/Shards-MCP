@@ -244,14 +244,15 @@ FOR EACH STATEMENT EXECUTE FUNCTION shards_v2.reject_audit_mutation();
 -- Separate enrolment and retention privileges from the runtime role.
 CREATE ROLE shards_v2_runtime NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
 CREATE ROLE shards_v2_maintenance NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
+CREATE ROLE shards_v2_verifier NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
 REVOKE ALL ON SCHEMA shards_v2 FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA shards_v2 FROM PUBLIC;
-GRANT USAGE ON SCHEMA shards_v2 TO shards_v2_runtime, shards_v2_maintenance;
+GRANT USAGE ON SCHEMA shards_v2 TO shards_v2_runtime, shards_v2_maintenance, shards_v2_verifier;
 -- No INSERT/UPDATE of controllers, principals, memberships, grants or keys.
 GRANT SELECT ON
  shards_v2.organizations,shards_v2.controllers,shards_v2.principals,
  shards_v2.memberships,shards_v2.agent_grants,
- shards_v2.tasks,shards_v2.messages,shards_v2.verifications,
+ shards_v2.tasks,shards_v2.messages,
  shards_v2.checkpoints,shards_v2.schedules,shards_v2.events,
  shards_v2.idempotency_requests,shards_v2.effect_outbox,
  shards_v2.edge_request_nonces,shards_v2.token_revocations,
@@ -267,6 +268,12 @@ GRANT UPDATE ON
  shards_v2.tasks,shards_v2.messages,shards_v2.idempotency_requests,
  shards_v2.effect_outbox
  TO shards_v2_runtime;
+-- Independent reviewer connections use their own non-inheriting role.
+-- Reviewers cannot update tasks, audit heads, credentials or agent grants.
+GRANT SELECT ON shards_v2.tasks,shards_v2.principals,shards_v2.memberships,
+ shards_v2.verifications TO shards_v2_verifier;
+GRANT INSERT ON shards_v2.verifications TO shards_v2_verifier;
+REVOKE UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA shards_v2 FROM shards_v2_verifier;
 -- Intentionally NEVER grant UPDATE/INSERT/DELETE/TRUNCATE on audit_heads,
 -- or DELETE/TRUNCATE on audit/outbox/verifications to runtime.
 REVOKE ALL ON shards_v2.audit_heads FROM shards_v2_runtime;

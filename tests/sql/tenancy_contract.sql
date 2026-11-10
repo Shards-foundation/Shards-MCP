@@ -122,6 +122,26 @@ BEGIN
    RAISE EXCEPTION 'FAIL: succeeded without independent approval';
  EXCEPTION WHEN insufficient_privilege THEN NULL;
  END;
+END $;
+
+-- Generic worker role cannot write approval evidence at all.
+DO $worker_privilege$
+BEGIN
+ BEGIN
+  INSERT INTO shards_v2.verifications
+   (org_id,task_id,creator_id,worker_id,verifier_id,decision,evidence_sha256,result_sha256,evidence_json)
+  VALUES ('00000000-0000-4000-8000-000000000001','task_a','agt_a_creator','agt_a_worker',
+   'agt_a_verifier','approved',decode(repeat('11',32),'hex'),
+   sha256(convert_to('{"status":"checked"}'::jsonb::text,'UTF8')),'{}');
+  RAISE EXCEPTION 'FAIL: worker inserted a forged reviewer record';
+ EXCEPTION WHEN insufficient_privilege THEN NULL;
+ END;
+END $worker_privilege$;
+
+SET ROLE shards_v2_verifier;
+SELECT set_config('shards.principal_id','agt_a_same',true);
+DO $same_controller$
+BEGIN
  BEGIN
    INSERT INTO shards_v2.verifications
       (org_id,task_id,creator_id,worker_id,verifier_id,decision,evidence_sha256,result_sha256,evidence_json)
@@ -130,11 +150,14 @@ BEGIN
    RAISE EXCEPTION 'FAIL: same-controller verifier approved';
  EXCEPTION WHEN insufficient_privilege THEN NULL;
  END;
-END $$;
+END $same_controller$;
+SELECT set_config('shards.principal_id','agt_a_verifier',true);
 INSERT INTO shards_v2.verifications
  (org_id,task_id,creator_id,worker_id,verifier_id,decision,evidence_sha256,result_sha256,evidence_json)
  VALUES ('00000000-0000-4000-8000-000000000001','task_a','agt_a_creator','agt_a_worker',
   'agt_a_verifier','approved',decode(repeat('11',32),'hex'),sha256(convert_to('{"status": "checked"}'::jsonb::text,'UTF8')),'{"ci":"independent fixture"}');
+SET ROLE shards_v2_runtime;
+SELECT set_config('shards.principal_id','',true);
 UPDATE shards_v2.tasks SET state='succeeded' WHERE task_id='task_a';
 DO $$
 BEGIN
@@ -294,14 +317,14 @@ RESET ROLE;
 SET ROLE shards_v2_maintenance;
 BEGIN;
 SELECT set_config('shards.org_id','00000000-0000-4000-8000-000000000001',true);
-DO $
+DO $maintenance$
 BEGIN
  BEGIN
   DELETE FROM shards_v2.edge_request_nonces;
   RAISE EXCEPTION 'FAIL: live nonce could be purged';
  EXCEPTION WHEN insufficient_privilege THEN NULL;
  END;
-END $;
+END $maintenance$;
 COMMIT;
 RESET ROLE;
 

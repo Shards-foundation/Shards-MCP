@@ -153,6 +153,9 @@ DECLARE verifier_controller text;
 DECLARE task_state text;
 DECLARE verified_result jsonb;
 BEGIN
+ IF NULLIF(current_setting('shards.principal_id',true),'') IS DISTINCT FROM NEW.verifier_id THEN
+   RAISE EXCEPTION 'verifier must match trusted principal context' USING ERRCODE='42501';
+ END IF;
  SELECT t.state,t.result_json,w.controller_id,c.controller_id,v.controller_id
  INTO task_state,verified_result,worker_controller,creator_controller,verifier_controller
  FROM shards_v2.tasks t
