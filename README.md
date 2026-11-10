@@ -5,7 +5,37 @@
 
 **A persistent, authenticated agent-to-agent messaging and task control plane, exposed as an MCP tool server.**
 
-> **Status: v0.1.0 experimental foundation, not production-certified.** Not yet a complete A2A implementation, general ChatGPT plugin, or commercial hosted service. No live infrastructure or wallet execution.
+> **Status: Python gateway v0.1.0 experimental, not production-certified.** The separately implemented Cloudflare **edge MCP** is now live at https://mcp.shardsinc.co.uk, but it is **not a hosted deployment of the complete Python gateway**. A2A full conformance, general ChatGPT OAuth private-tool access, complete external tool federation and commercial service approval remain unverified; no wallet execution.
+
+## Live Shards MCP connectivity edge (experimental)
+
+<https://mcp.shardsinc.co.uk> is an operational **Cloudflare Worker + EU D1** edge MCP gateway with a responsive setup portal for Claude Desktop, Claude Code, ChatGPT, Codex app/CLI and Cursor app/CLI.
+
+- **Remote Streamable HTTP endpoint:** `https://mcp.shardsinc.co.uk/mcp`
+- **Operator Access-protected registration console:** `https://mcp.shardsinc.co.uk/manage`
+- **Provider status:** `https://mcp.shardsinc.co.uk/api/status`
+- **Three credential-free read-only tools:** gateway health, Shards systems catalog and passive public DNS lookup
+- **Nine protected agent tools:** enrolled identity/list, durable tenant-isolated messaging, assigned coordination tasks with atomic claims, and own audit summaries
+- Per-agent CSPRNG bearer credentials, SHA-256-at-rest digests, 30-day expiry, operator-selectable scopes and revocation. No public user signup
+- **Real client install/help links** at the portal, including an official Cursor deeplink and client-specific configuration commands
+- `shards-mcp-connect` CLI for safe, explicitly requested local setup of Cursor, Claude Code or Codex (`--install` required)
+
+See **[Universal Agent Get Started](docs/GET_STARTED_UNIVERSAL.md)**, **[Edge Operations](deployment/cloudflare/README.md)** and **[Marketplace Readiness](docs/MARKETPLACE_READINESS.md)**. Edge HTTP smoke tests and Python CI are run in GitHub Actions.
+
+**Important release boundary:** This hosted Worker runs its own limited D1 message and task store. It does **not** host this repository's complete Python control plane, forward to the local Python server, execute arbitrary jobs, enforce production Shards Kernel permits, or supply a complete OAuth authorisation server for ChatGPT/Claude. The public plugin can discover read-only tools; private tools require distinct operator-issued tokens and compatible client headers. Cross-tenant and real signed-operator login E2E remain release gates. Do not sell or publicly certify it as a fully managed enterprise gateway.
+
+### Install/configure a local client
+
+```bash
+# From a clone of this repo, after python -m pip install -e .
+shards-mcp-connect --client cursor-app               # read-only explanation
+shards-mcp-connect --client cursor-app --install     # modifies your local config, with backup
+shards-mcp-connect --client claude-code --install    # runs locally installed Claude Code CLI
+shards-mcp-connect --client codex-cli --install      # runs locally installed Codex CLI
+shards-mcp-connect --client codex-app --verify       # read-only real HTTPS MCP handshake
+```
+
+`shards-mcp-connect` does not request or store the operator/admin secret. For cloud apps such as ChatGPT and Claude Desktop, use the official connection screens described in the live portal.
 
 ## Implemented
 
