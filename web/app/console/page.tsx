@@ -1,6 +1,6 @@
 import Link from "next/link";
-import { ConsoleLayout } from "./console-layout";
-import { GatewayHealth } from "./status";
+import { ConsoleLayout } from "../console-layout";
+import { GatewayHealth } from "../status";
 
 const modules = [
   { href: "/connections", title: "IDE connections", description: "Generate client configurations for Cursor, Claude Code, Codex, VS Code and more.", category: "INTEGRATIONS" },
