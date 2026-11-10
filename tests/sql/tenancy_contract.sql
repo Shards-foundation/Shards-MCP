@@ -238,6 +238,59 @@ UPDATE shards_v2.effect_outbox
   SET state='reconciled',reconciliation_evidence='{"provider":"checked","status":"unexecuted"}'
   WHERE effect_id='00000000-0000-4000-8000-000000001111';
 
+-- A delivered message cannot be rewritten, and an acknowledgment is one-way.
+INSERT INTO shards_v2.messages
+ (org_id,message_id,source_id,destination_id,body_json,payload_sha256,idempotency_key)
+ VALUES ('00000000-0000-4000-8000-000000000001','message_a',
+         'agt_a_creator','agt_a_worker','{"body":"original"}',
+         sha256(convert_to('{"body":"original"}','UTF8')),'message-idem');
+DO $message_rewrite$
+BEGIN
+ BEGIN
+  UPDATE shards_v2.messages SET body_json='{"body":"forged"}' WHERE message_id='message_a';
+  RAISE EXCEPTION 'FAIL: message payload changed after delivery';
+ EXCEPTION WHEN insufficient_privilege THEN NULL;
+ END;
+END $message_rewrite$;
+UPDATE shards_v2.messages SET acknowledged_at=now() WHERE message_id='message_a';
+DO $message_repeat$
+BEGIN
+ BEGIN
+  UPDATE shards_v2.messages SET acknowledged_at=now() WHERE message_id='message_a';
+  RAISE EXCEPTION 'FAIL: acknowledged message changed again';
+ EXCEPTION WHEN insufficient_privilege THEN NULL;
+ END;
+END $message_repeat$;
+
+-- Canonical request ledger cannot rewrite payload or restart ambiguous effects.
+INSERT INTO shards_v2.idempotency_requests
+ (org_id,actor_id,operation,idempotency_key,payload_sha256,state)
+ VALUES ('00000000-0000-4000-8000-000000000001','agt_a_creator','github-pr',
+         'canonical-request',decode(repeat('cd',32),'hex'),'pending');
+DO $request_mutation$
+BEGIN
+ BEGIN
+  UPDATE shards_v2.idempotency_requests
+  SET payload_sha256=decode(repeat('ee',32),'hex')
+  WHERE idempotency_key='canonical-request';
+  RAISE EXCEPTION 'FAIL: request digest was rewritten';
+ EXCEPTION WHEN insufficient_privilege THEN NULL;
+ END;
+END $request_mutation$;
+UPDATE shards_v2.idempotency_requests
+ SET state='needs_reconciliation',receipt_json='{"provider":"uncertain"}'
+ WHERE idempotency_key='canonical-request';
+DO $request_replay$
+BEGIN
+ BEGIN
+  UPDATE shards_v2.idempotency_requests
+  SET state='pending',receipt_json=NULL
+  WHERE idempotency_key='canonical-request';
+  RAISE EXCEPTION 'FAIL: uncertain request restarted';
+ EXCEPTION WHEN insufficient_privilege THEN NULL;
+ END;
+END $request_replay$;
+
 -- Audit chain test: construct canonical bytes independently and append #1.
 WITH c AS (
  SELECT convert_to(jsonb_build_object('version',2,'org_id','00000000-0000-4000-8000-000000000001',

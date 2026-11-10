@@ -264,10 +264,9 @@ GRANT INSERT ON
  shards_v2.idempotency_requests,shards_v2.effect_outbox,
  shards_v2.edge_request_nonces,shards_v2.audit_entries
  TO shards_v2_runtime;
-GRANT UPDATE ON
- shards_v2.tasks,shards_v2.messages,shards_v2.idempotency_requests,
- shards_v2.effect_outbox
- TO shards_v2_runtime;
+GRANT UPDATE ON shards_v2.tasks,shards_v2.effect_outbox TO shards_v2_runtime;
+GRANT UPDATE (acknowledged_at) ON shards_v2.messages TO shards_v2_runtime;
+GRANT UPDATE (state,receipt_json) ON shards_v2.idempotency_requests TO shards_v2_runtime;
 -- Runtime reads approved verdicts when checking task state, but only the
 -- separate verifier role is allowed to create one.
 GRANT SELECT ON shards_v2.verifications TO shards_v2_runtime;

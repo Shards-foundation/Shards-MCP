@@ -123,6 +123,29 @@ CREATE TABLE shards_v2.messages (
     FOREIGN KEY (org_id, task_id) REFERENCES shards_v2.tasks(org_id, task_id)
 );
 CREATE INDEX messages_inbox_tenant ON shards_v2.messages(org_id, destination_id, sent_at);
+-- Only a one-time recipient acknowledgement is mutable.
+CREATE FUNCTION shards_v2.guard_message_ack() RETURNS trigger
+LANGUAGE plpgsql AS $body$
+BEGIN
+ IF NEW.org_id IS DISTINCT FROM OLD.org_id OR
+    NEW.message_id IS DISTINCT FROM OLD.message_id OR
+    NEW.source_id IS DISTINCT FROM OLD.source_id OR
+    NEW.destination_id IS DISTINCT FROM OLD.destination_id OR
+    NEW.task_id IS DISTINCT FROM OLD.task_id OR
+    NEW.body_json IS DISTINCT FROM OLD.body_json OR
+    NEW.payload_sha256 IS DISTINCT FROM OLD.payload_sha256 OR
+    NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key OR
+    NEW.sent_at IS DISTINCT FROM OLD.sent_at OR
+    OLD.acknowledged_at IS NOT NULL OR NEW.acknowledged_at IS NULL THEN
+     RAISE EXCEPTION 'message intent immutable; only first acknowledgment allowed'
+      USING ERRCODE='42501';
+ END IF;
+ RETURN NEW;
+END
+$body$;
+CREATE TRIGGER message_ack_only BEFORE UPDATE ON shards_v2.messages
+FOR EACH ROW EXECUTE FUNCTION shards_v2.guard_message_ack();
+
 
 -- Include creator/worker identity in FK, so a verifier cannot spoof the
 -- task parties using a locally valid but unrelated principal.
@@ -329,6 +352,39 @@ CREATE TABLE shards_v2.idempotency_requests (
     PRIMARY KEY (org_id, actor_id, operation, idempotency_key),
     FOREIGN KEY (org_id, actor_id) REFERENCES shards_v2.principals(org_id, principal_id)
 );
+
+-- Canonical idempotency ledger: NEW rows begin pending. The only permitted
+-- transition is pending -> completed or pending -> needs_reconciliation, with
+-- a receipt. Both outcomes are terminal; ambiguous effects require a NEW,
+-- separately authorised operation and explicit downstream reconciliation.
+CREATE FUNCTION shards_v2.guard_idempotency_request() RETURNS trigger
+LANGUAGE plpgsql AS $body$
+BEGIN
+ IF TG_OP='INSERT' THEN
+    IF NEW.state<>'pending' OR NEW.receipt_json IS NOT NULL THEN
+      RAISE EXCEPTION 'request must start pending without a receipt' USING ERRCODE='23514';
+    END IF;
+ ELSE
+    IF NEW.org_id IS DISTINCT FROM OLD.org_id OR
+       NEW.actor_id IS DISTINCT FROM OLD.actor_id OR
+       NEW.operation IS DISTINCT FROM OLD.operation OR
+       NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key OR
+       NEW.payload_sha256 IS DISTINCT FROM OLD.payload_sha256 OR
+       NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+      RAISE EXCEPTION 'request identity and payload digest immutable' USING ERRCODE='42501';
+    END IF;
+    IF OLD.state<>'pending' OR
+       NEW.state NOT IN ('completed','needs_reconciliation') OR
+       NEW.receipt_json IS NULL THEN
+      RAISE EXCEPTION 'request state can only finalise once with evidence'
+        USING ERRCODE='42501';
+    END IF;
+ END IF;
+ RETURN NEW;
+END
+$body$;
+CREATE TRIGGER request_state_guard BEFORE INSERT OR UPDATE ON shards_v2.idempotency_requests
+FOR EACH ROW EXECUTE FUNCTION shards_v2.guard_idempotency_request();
 
 -- RLS denies missing/invalid tenant context. Only the trusted Python gateway
 -- may set shards.org_id, after verified membership. Never grant raw SQL to users.
