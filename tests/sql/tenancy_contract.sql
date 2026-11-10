@@ -105,7 +105,7 @@ INSERT INTO shards_v2.tasks
 VALUES
  ('00000000-0000-4000-8000-000000000001','task_a','agt_a_creator','agt_a_worker','{"task":"safe test"}',
   sha256(convert_to('{"task":"safe test"}','UTF8')),'task-idem');
-DO $$
+DO $success_denial$
 BEGIN
  BEGIN
    UPDATE shards_v2.tasks SET state='succeeded' WHERE task_id='task_a';
@@ -122,7 +122,7 @@ BEGIN
    RAISE EXCEPTION 'FAIL: succeeded without independent approval';
  EXCEPTION WHEN insufficient_privilege THEN NULL;
  END;
-END $;
+END $success_denial$;
 
 -- Generic worker role cannot write approval evidence at all.
 DO $worker_privilege$
