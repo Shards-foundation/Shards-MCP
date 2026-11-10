@@ -21,9 +21,10 @@ The Python `Gateway` in `src/shards_mcp/core.py` uses single-host SQLite and cre
 
 ## Schema guarantees and explicit gaps
 
-- \`principals.controller_id\` references tenant-scoped \`controllers\`; independent approval requires a distinct verifier controller and active auditor membership. Authority-side controller enrolment is **not yet built**, so controller strings alone cannot certify independence.
-- Task-state triggers enforce \`queued → running → reported → succeeded\` with approved verification, plus explicit failure/cancellation/reconciliation paths; no resurrection of terminal or uncertain tasks.
-- Audit append validates \`seq\`, the previous hash and SHA-256 of independently constructed canonical JSONB, then updates the head under a per-org row lock. Only the SECURITY DEFINER trigger has permission to modify the head; the v2 runtime role lacks it. This does not prevent database owner tampering or replace off-host anchoring.
+- Runtime worker and reviewer use different, non-inheriting database roles; only the reviewer role may insert a verification. The gate checks transaction-local `shards.principal_id`, which is safe only when a trusted identity middleware controls the connection.
+- `principals.controller_id` references tenant-scoped `controllers`; independent approval requires a distinct verifier controller and active auditor membership. Authority-side controller enrolment is **not yet built**, so controller strings alone cannot certify independence.
+- Task-state triggers enforce `queued → running → reported → succeeded` with approved verification, plus explicit failure/cancellation/reconciliation paths; no resurrection of terminal or uncertain tasks.
+- Audit append validates `seq`, the previous hash and SHA-256 of independently constructed canonical JSONB, then updates the head under a per-org row lock. Only the SECURITY DEFINER trigger has permission to modify the head; the v2 runtime role lacks it. This does not prevent database owner tampering or replace off-host anchoring.
 - No raw SQL/API permission is offered to tenants. The DB role is a **NOLOGIN, NOBYPASSRLS** role with constrained grants; authenticated tenancy enforcement is still a mandatory application-layer control.
 - Token revocation and edge nonce tables exist, but safe expiry cleanup under a separately authorised maintenance role and scheduled retention evidence still need implementation.
 - The SQL migration is intentionally mutable **in this draft PR only**. Once a production database applies either migration, future changes must use an additive versioned migration. Do not reapply these files to an existing schema.
