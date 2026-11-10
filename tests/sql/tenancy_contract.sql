@@ -41,6 +41,7 @@ BEGIN
     OR has_table_privilege(current_user,'shards_v2.audit_heads','DELETE')
     OR has_table_privilege(current_user,'shards_v2.audit_entries','DELETE')
     OR has_table_privilege(current_user,'shards_v2.effect_outbox','DELETE')
+    OR has_table_privilege(current_user,'shards_v2.verifications','INSERT')
     OR has_table_privilege(current_user,'shards_v2.principals','INSERT')
     OR has_table_privilege(current_user,'shards_v2.memberships','UPDATE')
     OR has_table_privilege(current_user,'shards_v2.agent_grants','INSERT') THEN

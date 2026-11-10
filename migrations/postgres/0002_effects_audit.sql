@@ -268,6 +268,10 @@ GRANT UPDATE ON
  shards_v2.tasks,shards_v2.messages,shards_v2.idempotency_requests,
  shards_v2.effect_outbox
  TO shards_v2_runtime;
+-- Runtime reads approved verdicts when checking task state, but only the
+-- separate verifier role is allowed to create one.
+GRANT SELECT ON shards_v2.verifications TO shards_v2_runtime;
+REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON shards_v2.verifications FROM shards_v2_runtime;
 -- Independent reviewer connections use their own non-inheriting role.
 -- Reviewers cannot update tasks, audit heads, credentials or agent grants.
 GRANT SELECT ON shards_v2.tasks,shards_v2.principals,shards_v2.memberships,
