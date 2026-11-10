@@ -163,7 +163,7 @@ CREATE TABLE shards_v2.governance_receipts (
 CREATE TRIGGER receipt_immutable BEFORE UPDATE OR DELETE ON shards_v2.governance_receipts
 FOR EACH ROW EXECUTE FUNCTION shards_v2.reject_audit_mutation();
 
-DO $
+DO $$
 DECLARE table_name text;
 BEGIN
     FOREACH table_name IN ARRAY ARRAY[
