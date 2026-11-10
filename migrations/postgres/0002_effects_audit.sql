@@ -142,6 +142,7 @@ CREATE TABLE shards_v2.audit_entries (
     action text NOT NULL,
     subject_id text NOT NULL,
     -- Authoritative canonical bytes MUST include org_id, seq, action and digests.
+    details_json jsonb NOT NULL,
     canonical_record bytea NOT NULL,
     previous_sha256 bytea NOT NULL CHECK (octet_length(previous_sha256) = 32),
     entry_sha256 bytea NOT NULL CHECK (octet_length(entry_sha256) = 32),
@@ -150,6 +151,44 @@ CREATE TABLE shards_v2.audit_entries (
     FOREIGN KEY (org_id) REFERENCES shards_v2.organizations(org_id),
     FOREIGN KEY (org_id, actor_id) REFERENCES shards_v2.principals(org_id, principal_id)
 );
+-- The application supplies the *expected* canonical record/hash. The database
+-- independently reconstructs them, serialises on the tenant head row, validates
+-- every link and atomically advances the head in the insert transaction.
+-- No runtime UPDATE/DELETE privilege is granted on audit_heads.
+CREATE FUNCTION shards_v2.guard_audit_append() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, shards_v2 AS $body$
+DECLARE head record;
+DECLARE expected_canonical bytea;
+DECLARE expected_hash bytea;
+BEGIN
+  IF NULLIF(current_setting('shards.org_id',true),'')::uuid IS DISTINCT FROM NEW.org_id THEN
+    RAISE EXCEPTION 'audit append requires transaction-bound tenant' USING ERRCODE='42501';
+  END IF;
+  INSERT INTO shards_v2.audit_heads(org_id) VALUES (NEW.org_id)
+  ON CONFLICT (org_id) DO NOTHING;
+  SELECT last_seq,head_sha256 INTO STRICT head
+    FROM shards_v2.audit_heads WHERE org_id=NEW.org_id FOR UPDATE;
+  expected_canonical := convert_to(jsonb_build_object(
+    'version',NEW.canonical_version, 'org_id',NEW.org_id::text,
+    'seq',NEW.seq, 'actor_id',NEW.actor_id,'action',NEW.action,
+    'subject_id',NEW.subject_id,'details',NEW.details_json)::text,'UTF8');
+  expected_hash := sha256(head.head_sha256 || expected_canonical);
+  IF NEW.seq <> head.last_seq + 1 OR
+     NEW.previous_sha256 <> head.head_sha256 OR
+     NEW.canonical_record <> expected_canonical OR
+     NEW.entry_sha256 <> expected_hash THEN
+    RAISE EXCEPTION 'invalid audit sequence, canonical bytes or hash link'
+      USING ERRCODE='23514';
+  END IF;
+  UPDATE shards_v2.audit_heads SET last_seq=NEW.seq,
+       head_sha256=expected_hash,updated_at=now()
+    WHERE org_id=NEW.org_id;
+  RETURN NEW;
+END
+$body$;
+CREATE TRIGGER audit_append_guard BEFORE INSERT ON shards_v2.audit_entries
+FOR EACH ROW EXECUTE FUNCTION shards_v2.guard_audit_append();
+
 CREATE FUNCTION shards_v2.reject_audit_mutation() RETURNS trigger
 LANGUAGE plpgsql AS $body$
 BEGIN
@@ -183,7 +222,43 @@ FOR EACH ROW EXECUTE FUNCTION shards_v2.reject_audit_mutation();
 CREATE TRIGGER receipt_no_truncate BEFORE TRUNCATE ON shards_v2.governance_receipts
 FOR EACH STATEMENT EXECUTE FUNCTION shards_v2.reject_audit_mutation();
 
-DO $$
+-- Only trusted gateway processes may be granted the NOLOGIN runtime role.
+-- No browser, agent, tool, or arbitrary SQL account gets membership in it.
+-- Separate enrolment and retention privileges from the runtime role.
+CREATE ROLE shards_v2_runtime NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
+CREATE ROLE shards_v2_maintenance NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
+REVOKE ALL ON SCHEMA shards_v2 FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA shards_v2 FROM PUBLIC;
+GRANT USAGE ON SCHEMA shards_v2 TO shards_v2_runtime, shards_v2_maintenance;
+-- No INSERT/UPDATE of controllers, principals, memberships, grants or keys.
+GRANT SELECT ON
+ shards_v2.organizations,shards_v2.controllers,shards_v2.principals,
+ shards_v2.memberships,shards_v2.agent_grants,
+ shards_v2.tasks,shards_v2.messages,shards_v2.verifications,
+ shards_v2.checkpoints,shards_v2.schedules,shards_v2.events,
+ shards_v2.idempotency_requests,shards_v2.effect_outbox,
+ shards_v2.edge_request_nonces,shards_v2.token_revocations,
+ shards_v2.audit_entries
+ TO shards_v2_runtime;
+GRANT INSERT ON
+ shards_v2.tasks,shards_v2.messages,shards_v2.verifications,
+ shards_v2.checkpoints,shards_v2.events,
+ shards_v2.idempotency_requests,shards_v2.effect_outbox,
+ shards_v2.edge_request_nonces,shards_v2.audit_entries
+ TO shards_v2_runtime;
+GRANT UPDATE ON
+ shards_v2.tasks,shards_v2.messages,shards_v2.idempotency_requests,
+ shards_v2.effect_outbox
+ TO shards_v2_runtime;
+-- Intentionally NEVER grant UPDATE/INSERT/DELETE/TRUNCATE on audit_heads,
+-- or DELETE/TRUNCATE on audit/outbox/verifications to runtime.
+REVOKE ALL ON shards_v2.audit_heads FROM shards_v2_runtime;
+REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA shards_v2 FROM shards_v2_runtime;
+-- Expiry cleanup must run as a separately approved maintenance identity.
+GRANT SELECT,DELETE ON shards_v2.edge_request_nonces,
+ shards_v2.token_revocations TO shards_v2_maintenance;
+
+DO $
 DECLARE table_name text;
 BEGIN
     FOREACH table_name IN ARRAY ARRAY[
