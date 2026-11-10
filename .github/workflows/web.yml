@@ -32,7 +32,9 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
-      - name: Onboarding tests\n        run: node --experimental-strip-types --test tests/connectors.test.ts\n      - name: Typecheck
+      - name: Onboarding tests
+        run: node --experimental-strip-types --test tests/connectors.test.ts
+      - name: Typecheck
         run: npm run typecheck
       - name: Build
         run: npm run build
