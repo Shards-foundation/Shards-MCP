@@ -1,0 +1,66 @@
+{
+  "envelope": "hosted",
+  "revision": null,
+  "gates": {
+    "source_revision": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "unit_tests": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "protocol_e2e": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "dependency_review": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "artifact_integrity": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "independent_review": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "operator_approval": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "dns_tls": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "oauth_e2e": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "scope_denial": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "tenant_isolation": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "backup_restore": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "audit_integrity": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "observability": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    },
+    "incident_runbook": {
+      "status": "NOT_VERIFIED",
+      "evidence": []
+    }
+  }
+}
