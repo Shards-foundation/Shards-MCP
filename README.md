@@ -147,4 +147,14 @@ python scripts/skillctl.py validate
 python skills/get-started/scripts/preflight.py --json
 ```
 
+To copy selected skill folders into supported **local** agent installations, use the [portable skills distribution guide](docs/skills-distribution.md). Preview by default, then explicitly apply and verify:
+
+```sh
+python scripts/skill_install.py --client cursor --project-dir . --skill get-started
+python scripts/skill_install.py --client cursor --project-dir . --skill get-started --apply
+python scripts/skill_install.py --client cursor --project-dir . --skill get-started --verify
+```
+
+Installations never overwrite existing skills, and no scripts inside the copied skills are executed. Other options support Codex, Claude Code and per-user directories.
+
 These read-only utilities **do not** install skills into remote AI products, issue gateway credentials or confirm hosted service readiness. See [release-readiness](skills/release-readiness/SKILL.md) for evidence gates and [the agent onboarding guide](docs/agent-onboarding.md) for separately controlled gateway identities.
