@@ -31,6 +31,8 @@ jobs:
           }
           console.log('Worker and all 8 client setup modules parse correctly');
           NODE
+      - name: Isolated edge protocol and quota regression tests
+        run: node --test deployment/cloudflare/worker.test.mjs
       - name: Verify real website and database status
         run: |
           set -euo pipefail

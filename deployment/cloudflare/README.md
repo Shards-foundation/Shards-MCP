@@ -100,3 +100,7 @@ The workflow `.github/workflows/edge-smoke.yml` executes real public requests ag
 Source: https://github.com/Shards-foundation/Shards-MCP
 
 Commercial deployment status: **experimental**, no public OAuth sign-in, no retail customers and no marketplace listing claimed.
+
+## Edge rate limits and verification
+
+Public tools are constrained by a global daily D1 budget and a lower daily budget per caller. Caller keys are SHA-256 digests of the UTC day and Cloudflare-provided client IP, never raw IPs. DNS input is validated **before** budget charging; invalid input cannot exhaust the shared DNS quota. The caller budget is a best-effort availability control, not a substitute for account quotas, edge WAF enforcement, abuse monitoring or periodic D1 budget cleanup. `node --test deployment/cloudflare/worker.test.mjs` checks protocol negotiation, early DNS validation, per-caller budget partitioning and token-display formatting using isolated local mocks. These tests do not prove private agent/token E2E or a new Worker deployment.
