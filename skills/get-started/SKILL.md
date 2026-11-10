@@ -4,7 +4,7 @@ description: First-run Shards-MCP onboarding for a new human contributor or AI c
 ---
 # Get started — first agent session
 
-**Trigger:** new AI coding agent, new contributor, first interaction with Shards-MCP, or a clean environment. This is **developer onboarding**, not privileged gateway agent registration; see [agent-onboarding](../agent-onboarding/SKILL.md) separately.
+**Trigger:** new AI coding agent, new contributor, first interaction with Shards-MCP, or a clean environment. This is **developer onboarding**, not privileged gateway agent registration; see the source checkout's `skills/agent-onboarding/SKILL.md` for privileged enrolment.
 
 ## Preconditions
 
@@ -28,7 +28,7 @@ Repository path, requested role (reviewer/implementer/operator), intended task, 
    ```
 4. If Python distribution is absent, follow `docs/getting-started.md` to create an isolated venv and install from this checkout. Never create or overwrite admin tokens as part of automatic onboarding.
 5. For a minimal safe smoke check, run `python scripts/demo_local.py` **after inspecting that script**. It uses a temporary local database and distinct creator, worker and verifier, with no network side effects.
-6. To use Shards skills in a local Codex, Cursor or Claude Code project, consult [skill distribution](../../docs/skills-distribution.md). Preview with `python scripts/skill_install.py --client codex --project-dir . --skill get-started` from the Shards source checkout and require explicit approval before `--apply`. Copied skills outside the checkout require access to the Shards repository to run project-level commands.
+6. To use Shards skills in a local Codex, Cursor or Claude Code project, consult `docs/skills-distribution.md` in the [canonical Shards-MCP repository](https://github.com/Shards-foundation/Shards-MCP). Preview with `python scripts/skill_install.py --client codex --project-dir . --skill get-started` from the Shards source checkout and require explicit approval before `--apply`. Copied skills outside the checkout require access to the Shards repository to run project-level commands.
 7. Select the next task-specific skill. For CLI/IDE connection use `client-integration`; for scoped credential issuance obtain a human operator and use `agent-onboarding`.
 
 ## Verification

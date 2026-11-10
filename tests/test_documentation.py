@@ -4,12 +4,13 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
+import tempfile
 import subprocess
 import sys
 import unittest
 from unittest.mock import patch
 
-from scripts import demo_local, docs_check
+from scripts import demo_local, docs_check, skill_install
 from shards_mcp.core import Gateway
 
 
@@ -27,6 +28,18 @@ class DocumentationContractTests(unittest.TestCase):
         result = self._run("docs_check.py")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("DOC PASS:", result.stdout)
+
+    def test_native_installed_skills_are_excluded_from_source_doc_validation(self):
+        with tempfile.TemporaryDirectory(prefix="shards-doc-scan-") as location:
+            root = Path(location)
+            (root / "README.md").write_text("# Source documentation\n", encoding="utf-8")
+            for client in ("codex", "cursor", "claude"):
+                result = skill_install.execute(ROOT, client, "project", root,
+                                               ["get-started"], apply=True)
+                self.assertTrue(result["ok"])
+            scanned = {page.relative_to(root).as_posix()
+                       for page in docs_check.markdown_files(root)}
+            self.assertEqual(scanned, {"README.md"})
 
     def test_skill_frontmatter_requires_closing_fence_and_populated_metadata(self):
         good = "---\nname: task-lifecycle\ndescription: Run bounded task steps.\n---\n# Task\n"

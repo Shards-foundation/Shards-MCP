@@ -11,7 +11,7 @@ from urllib.parse import unquote, urlsplit
 
 REPO = Path(__file__).resolve().parents[1]
 LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)\n]+)\)")
-IGNORED = {".git", ".venv", "node_modules", "dist", "build", "__pycache__"}
+IGNORED = {".git", ".venv", "node_modules", "dist", "build", "__pycache__", ".agents", ".cursor", ".claude", ".codex"}
 
 
 def markdown_files(root: Path):

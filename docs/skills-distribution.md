@@ -37,11 +37,13 @@ The installer copies the selected skill folder's `SKILL.md`, `scripts/`, `refere
 3. Inspect the install **PLAN** output: target directory, selected files, checksums. The plan does not change the filesystem.
 4. Approve `--apply` only for the intended project or home location. Existing skill directories are never replaced, even when identical.
 5. Use `--verify` to check copied-file digests **and compare the installed manifest with the current source checkout**. Changing the source after installation produces a stale-install failure rather than a misleading PASS. A failed hash check means **do not activate** that copy until its provenance is understood.
-6. For source-dependent operations, clone or read the actual Shards-MCP checkout. An installed skill can still reference project files or companion skills that are not part of a standalone copy; the copy alone cannot provide the gateway code, databases, credentials or CI.
+6. For source-dependent operations, clone or read the actual Shards-MCP checkout. An installed skill can still reference project files or companion skills that are not part of a standalone copy. These references must be resolved against the original Shards-MCP checkout, not a fabricated adjacent client directory; the copy alone cannot provide the gateway code, databases, credentials or CI.
 
 ### Android / Termux
 
 Running the installer in Termux writes only inside the Termux filesystem or an explicitly selected project path. User scope uses that shell's home directory; it cannot install skills inside the sandboxed storage of the ChatGPT mobile app, Cursor desktop or Claude desktop. A separate machine/remote agent must independently receive its own authorised skills.
+
+Generated client directories (`.agents/`, `.cursor/`, `.claude/`, `.codex/`) are deliberately excluded from **source documentation link checks**. The canonical skill files remain independently validated by `skillctl.py` and `docs_check.py`; the installed copy is validated by the installer's hash receipt.
 
 ## Failure and rollback
 
