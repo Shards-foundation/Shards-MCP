@@ -44,8 +44,8 @@ def configuration(client: str, endpoint: str) -> dict[str, object]:
         "warning": "This generates local setup instructions, NOT a live test. Cloudflare edge private tools currently use scoped bearer credentials; OAuth client login is not implemented there.",
     }
     if client.startswith("cursor-"):
-        server = {"shards": {"url": endpoint}}
-        config = {"mcpServers": server}
+        entry = {"url": endpoint}
+        config = {"mcpServers": {"shards": entry}}
         deeplink = "cursor://anysphere.cursor-deeplink/mcp/install?name=shards&config=" + quote(
             base64.b64encode(json.dumps(entry, separators=(",", ":")).encode("utf-8")).decode("ascii"), safe=""
         )
