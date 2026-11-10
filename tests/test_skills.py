@@ -1,7 +1,9 @@
 """No-network, no-write regression tests for skill catalog and release gates."""
 from __future__ import annotations
 
+import base64
 import json
+from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 import subprocess
 import sys
@@ -64,6 +66,30 @@ class SkillsContractTests(unittest.TestCase):
                          "ELIGIBLE_FOR_INDEPENDENT_REVIEW")
         data["gates"]["protocol_e2e"]["evidence"] = []
         self.assertEqual(skill_evidence.assess(data, "package")["verdict"], "NO_GO")
+
+    def test_native_client_config_generator(self):
+        # Import by file path because Agent Skills directories use hyphens.
+        import importlib.util
+        path = ROOT / "skills/client-integration/scripts/generate_config.py"
+        spec = importlib.util.spec_from_file_location("shards_client_config", path)
+        self.assertIsNotNone(spec)
+        module = importlib.util.module_from_spec(spec)
+        self.assertIsNotNone(spec.loader)
+        spec.loader.exec_module(module)
+        endpoint = module.DEFAULT_ENDPOINT
+        config = module.configuration("cursor-app", endpoint)
+        self.assertEqual(config["config"]["mcpServers"]["shards"]["url"], endpoint)
+        parsed = urlsplit(config["install_url"])
+        self.assertEqual(parsed.scheme, "cursor")
+        payload = parse_qs(parsed.query)["config"][0]
+        self.assertEqual(json.loads(base64.b64decode(payload))["shards"]["url"], endpoint)
+        self.assertTrue(module.configuration("codex-cli", endpoint)["commands"][0].startswith("codex mcp add"))
+        for bad in ["http://evil.example/mcp", "https://a.example/mcp?token=x", "https://user:secret@example.com/mcp", "https://a.example/other", "https://a.example:0/mcp"]:
+            with self.subTest(url=bad):
+                with self.assertRaises(ValueError):
+                    module.validate_endpoint(bad)
+        self.assertEqual(module.validate_endpoint("http://127.0.0.1:8787/mcp", allow_loopback=True),
+                         "http://127.0.0.1:8787/mcp")
 
     def test_duplicate_json_receipt_keys_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "duplicate JSON field"):

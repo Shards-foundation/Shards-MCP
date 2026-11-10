@@ -45,7 +45,8 @@
         "mcp client"
       ],
       "scripts": [
-        "scripts/skillctl.py"
+        "scripts/skillctl.py",
+        "skills/client-integration/scripts/generate_config.py"
       ]
     },
     {

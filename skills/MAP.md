@@ -20,7 +20,7 @@ python scripts/skillctl.py validate
 | --- | --- | --- | --- |
 | Fresh contributor or AI worker, first local run | [get-started](get-started/SKILL.md) | Low | `skills/get-started/scripts/preflight.py` |
 | Enrol or rotate a scoped gateway identity | [agent-onboarding](agent-onboarding/SKILL.md) | Privileged | Host-local admin CLI, denial receipt |
-| Connect Claude, ChatGPT, Codex, Cursor, other MCP client | [client-integration](client-integration/SKILL.md) | Bounded | Transport configuration and auth verification |
+| Connect Claude, ChatGPT, Codex, Cursor, other MCP client | [client-integration](client-integration/SKILL.md) | Bounded | `skills/client-integration/scripts/generate_config.py` and auth verification |
 | Investigate handshake, transport, scope mismatch | [connection-doctor](connection-doctor/SKILL.md) | Low | `shards-mcp-doctor` output |
 | Assign, claim, checkpoint, independently verify work | [task-lifecycle](task-lifecycle/SKILL.md) | Bounded | `scripts/demo_local.py` and task audit |
 | Diagnose broken GitHub Actions or failing tests | [ci-triage](ci-triage/SKILL.md) | Low | Pinpoint failing step and regression |
