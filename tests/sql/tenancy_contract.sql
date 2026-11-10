@@ -274,6 +274,49 @@ BEGIN
  END;
 END $$;
 
+
+-- Audit chain: reject the three independent ways a purported second link can lie.
+DO $prev_mismatch$
+BEGIN
+ BEGIN
+  INSERT INTO shards_v2.audit_entries (org_id,seq,actor_id,action,subject_id,details_json,canonical_record,previous_sha256,entry_sha256)
+SELECT '00000000-0000-4000-8000-000000000001',2,'agt_a_creator','fixture.b','task_a','{"test":"two"}',convert_to(jsonb_build_object('version',2,'org_id','00000000-0000-4000-8000-000000000001','seq',2,'actor_id','agt_a_creator','action','fixture.b','subject_id','task_a','details','{"test":"two"}'::jsonb)::text,'UTF8'),decode(repeat('00',32),'hex'),sha256(decode(repeat('00',32),'hex') || convert_to(jsonb_build_object('version',2,'org_id','00000000-0000-4000-8000-000000000001','seq',2,'actor_id','agt_a_creator','action','fixture.b','subject_id','task_a','details','{"test":"two"}'::jsonb)::text,'UTF8'))
+FROM shards_v2.audit_entries e WHERE e.org_id='00000000-0000-4000-8000-000000000001' AND e.seq=1;
+  RAISE EXCEPTION 'FAIL: wrong previous chain hash was accepted';
+ EXCEPTION WHEN check_violation THEN NULL;
+ END;
+END $prev_mismatch$;
+DO $digest_mismatch$
+BEGIN
+ BEGIN
+  INSERT INTO shards_v2.audit_entries (org_id,seq,actor_id,action,subject_id,details_json,canonical_record,previous_sha256,entry_sha256)
+SELECT '00000000-0000-4000-8000-000000000001',2,'agt_a_creator','fixture.b','task_a','{"test":"two"}',convert_to(jsonb_build_object('version',2,'org_id','00000000-0000-4000-8000-000000000001','seq',2,'actor_id','agt_a_creator','action','fixture.b','subject_id','task_a','details','{"test":"two"}'::jsonb)::text,'UTF8'),e.entry_sha256,decode(repeat('ef',32),'hex')
+FROM shards_v2.audit_entries e WHERE e.org_id='00000000-0000-4000-8000-000000000001' AND e.seq=1;
+  RAISE EXCEPTION 'FAIL: forged digest was accepted';
+ EXCEPTION WHEN check_violation THEN NULL;
+ END;
+END $digest_mismatch$;
+DO $canon_mismatch$
+BEGIN
+ BEGIN
+  INSERT INTO shards_v2.audit_entries (org_id,seq,actor_id,action,subject_id,details_json,canonical_record,previous_sha256,entry_sha256)
+SELECT '00000000-0000-4000-8000-000000000001',2,'agt_a_creator','fixture.b','task_a','{"test":"two"}',convert_to('forged','UTF8'),e.entry_sha256,sha256(e.entry_sha256 || convert_to('forged','UTF8'))
+FROM shards_v2.audit_entries e WHERE e.org_id='00000000-0000-4000-8000-000000000001' AND e.seq=1;
+  RAISE EXCEPTION 'FAIL: forged canonical bytes was accepted';
+ EXCEPTION WHEN check_violation THEN NULL;
+ END;
+END $canon_mismatch$;
+
+-- A correctly linked second entry advances the tenant head atomically.
+WITH predecessor AS (
+ SELECT entry_sha256 AS prev FROM shards_v2.audit_entries
+ WHERE org_id='00000000-0000-4000-8000-000000000001' AND seq=1
+), content AS (
+ SELECT prev,convert_to(jsonb_build_object('version',2,'org_id','00000000-0000-4000-8000-000000000001','seq',2,'actor_id','agt_a_creator','action','fixture.b','subject_id','task_a','details','{"test":"two"}'::jsonb)::text,'UTF8') AS body FROM predecessor
+)
+INSERT INTO shards_v2.audit_entries (org_id,seq,actor_id,action,subject_id,details_json,canonical_record,previous_sha256,entry_sha256)
+SELECT '00000000-0000-4000-8000-000000000001',2,'agt_a_creator','fixture.b','task_a','{"test":"two"}',body,prev,sha256(prev || body) FROM content;
+
 -- Replay assertion JTI is unique across organisations, even when scoped.
 INSERT INTO shards_v2.edge_request_nonces
  (org_id,edge_key_id,jti_sha256,request_sha256,expires_at)
@@ -360,7 +403,7 @@ BEGIN
  END LOOP;
  IF NOT EXISTS(
   SELECT 1 FROM shards_v2.audit_heads
-   WHERE org_id='00000000-0000-4000-8000-000000000001' AND last_seq=1
+   WHERE org_id='00000000-0000-4000-8000-000000000001' AND last_seq=2
  ) THEN RAISE EXCEPTION 'FAIL: audit head not advanced atomically'; END IF;
 END $$;
 SELECT 'TENANCY_SCHEMA_ACCEPTANCE_PASS' AS result;
