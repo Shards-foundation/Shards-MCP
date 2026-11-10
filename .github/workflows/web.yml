@@ -34,6 +34,8 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: Read-only gateway bridge contract tests
         run: npm test
+      - name: Onboarding connector tests
+        run: node --experimental-strip-types --test tests/connectors.test.ts
       - name: Typecheck
         run: npm run typecheck
       - name: Build

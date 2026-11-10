@@ -1,26 +1,19 @@
 import Link from "next/link";
-import { ConsoleLayout } from "./console-layout";
-import { GatewayHealth } from "./status";
-
-const modules = [
-  { href: "/connections", title: "IDE connections", description: "Generate client configurations for Cursor, Claude Code, Codex, VS Code and more.", category: "INTEGRATIONS" },
-  { href: "/agents", title: "Agent registry", description: "Inspect live registered agents and observed heartbeats through scoped read-only access.", category: "IDENTITY" },
-  { href: "/tasks", title: "Task orchestration", description: "Review worker and task lifecycle integration requirements.", category: "EXECUTION" },
-  { href: "/audit", title: "Audit and events", description: "Review security-ledger and telemetry integration requirements.", category: "OBSERVABILITY" },
-];
+import { CLIENTS } from "@/lib/connectors";
 
 export default function Home() {
-  return <ConsoleLayout active="/">
-    <div className="page-heading"><div><div className="eyebrow">OPERATIONS / OVERVIEW</div><h1>Control plane</h1><p className="muted">Your central workspace for Shards MCP clients, agents, tasks and security.</p></div>
-      <Link className="action" href="/connections">Connect an IDE</Link></div>
-    <div className="overview-hero"><div><div className="eyebrow">GATEWAY STATUS</div><h2>Infrastructure reachability</h2>
-      <GatewayHealth /><p className="muted">Authenticated server-side liveness check. Gateway credentials are never sent to the browser.</p></div>
-      <div className="hero-metadata"><span>CONSOLE ACCESS</span><strong>Identity-gated</strong><span>AGENT REGISTRY</span><strong>Read-only when configured</strong></div></div>
-    <div className="section-heading"><h2>Workspace modules</h2><span className="muted">Available and planned capabilities</span></div>
-    <div className="module-grid">{modules.map(module => <Link key={module.href} href={module.href} className="module-card">
-      <span className="eyebrow">{module.category}</span><h3>{module.title}</h3><p>{module.description}</p><span className="module-arrow">Explore →</span>
-    </Link>)}</div>
-    <div className="panel"><div className="eyebrow">DEPLOYMENT NOTE</div><h2>Operator actions are not enabled</h2>
-      <p>This interface currently provides authenticated diagnostics and connection templates. A scoped, server-only agent:read bridge can show the live directory when explicitly configured. Task mutations, provisioning and audit queries remain disabled. No sample data is presented as real telemetry.</p></div>
-  </ConsoleLayout>;
+  return <main className="public-shell">
+    <header className="public-header"><Link className="public-brand" href="/"><span className="public-logo">S</span> SHARDS <span className="brand-sub">/ MCP GATEWAY</span></Link><nav><Link href="/get-started">Get started</Link><Link href="/account">Account</Link><a href="https://github.com/Shards-foundation/Shards-MCP" rel="noopener noreferrer" target="_blank">GitHub</a></nav></header>
+    <section className="public-hero">
+      <div className="public-hero-copy"><div className="eyebrow">UNIVERSAL AI CONNECTIVITY / SHARDS FOUNDATION</div>
+        <h1>One gateway.<br/><em>Every agent.</em></h1><p>Connect your AI clients to a governed MCP control plane. Standard transports, scoped identities, durable tasks and inspectable audit evidence — without handing every agent your infrastructure keys.</p>
+        <div className="hero-buttons"><Link className="primary-cta" href="/get-started">Connect your agent <span aria-hidden="true">↗</span></Link><a className="secondary-cta" href="https://github.com/Shards-foundation/Shards-MCP" target="_blank" rel="noopener noreferrer">Explore the source</a></div>
+        <div className="hero-chips"><span>Streamable HTTP</span><span>Identity-bound tools</span><span>Open source</span></div>
+      </div>
+      <div className="network-art" aria-label="Visual illustration of clients connected through a single gateway" role="img"><div className="art-grid"/><div className="art-ring ring-one"/><div className="art-ring ring-two"/><div className="art-center"><strong>S</strong><small>GATEWAY</small></div><span className="satellite sat-one">CLAUDE</span><span className="satellite sat-two">CODEX</span><span className="satellite sat-three">CURSOR</span><span className="satellite sat-four">CHATGPT</span><span className="art-caption">MCP / SHARDS / CONNECT</span></div>
+    </section>
+    <section className="public-section"><div className="section-heading"><div><div className="eyebrow">SUPPORTED ONBOARDING PATHS</div><h2>Your tools. One connection protocol.</h2></div><Link className="secondary-cta" href="/get-started">View client setup</Link></div><div className="public-client-grid">{CLIENTS.map(c => <Link key={c.id} href="/get-started" className="public-client"><strong>{c.name}</strong><small>{c.category}</small><span>↗</span></Link>)}</div></section>
+    <section className="public-section"><div className="eyebrow">ARCHITECTURE</div><h2>Identity, tools, authority. Separate by design.</h2><div className="feature-grid"><article><strong>01 / AUTHENTICATE</strong><p>Sign in to the portal; MCP clients use their own OAuth authorization flow.</p></article><article><strong>02 / CONNECT</strong><p>Use native client MCP configuration and real transport adapters — not a proprietary SDK lock-in.</p></article><article><strong>03 / CONTROL</strong><p>Enforce individual agent scopes, durable task boundaries and audit trails server-side.</p></article></div></section>
+    <footer className="public-footer"><span>SHARDS / OPEN INFRASTRUCTURE</span><Link href="/get-started">Connect</Link><Link href="/account">Identity</Link><a href="https://github.com/Shards-foundation/Shards-MCP">Source</a></footer>
+  </main>;
 }

@@ -2,47 +2,65 @@ import type { NextAuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
 import GitHubProvider from "next-auth/providers/github";
 import DiscordProvider from "next-auth/providers/discord";
+import AppleProvider from "next-auth/providers/apple";
 import { approvedOperator } from "./operator-access";
 
-function credentials(id: string) {
-  const clientId = process.env[id + "_CLIENT_ID"];
-  const clientSecret = process.env[id + "_CLIENT_SECRET"];
+function credentials(name: string) {
+  const clientId = process.env[name + "_CLIENT_ID"];
+  const clientSecret = process.env[name + "_CLIENT_SECRET"];
   return clientId && clientSecret ? { clientId, clientSecret } : null;
 }
 
 const google = credentials("GOOGLE");
 const github = credentials("GITHUB");
 const discord = credentials("DISCORD");
+const apple = credentials("APPLE");
+const chatgpt = credentials("CHATGPT");
+const chatgptIssuer = process.env.CHATGPT_OIDC_ISSUER;
+// Sign in with ChatGPT is partner-gated. No fake button or fabricated issuer.
+const chatgptEnabled = Boolean(chatgpt && chatgptIssuer && /^https:\/\/[^/]+\/?$/.test(chatgptIssuer));
 
 export const authOptions: NextAuthOptions = {
   providers: [
     ...(google ? [GoogleProvider(google)] : []),
     ...(github ? [GitHubProvider(github)] : []),
     ...(discord ? [DiscordProvider(discord)] : []),
+    ...(apple ? [AppleProvider(apple)] : []),
+    ...(chatgptEnabled && chatgpt ? [{
+      id: "chatgpt",
+      name: "ChatGPT",
+      type: "oauth" as const,
+      wellKnown: `${chatgptIssuer!.replace(/\/$/, "")}/.well-known/openid-configuration`,
+      idToken: true,
+      checks: ["pkce", "state"] as Array<"pkce" | "state">,
+      clientId: chatgpt.clientId,
+      clientSecret: chatgpt.clientSecret,
+      authorization: { params: { scope: "openid profile email" } },
+      profile(profile: Record<string, unknown>) {
+        return {
+          id: String(profile.sub),
+          name: typeof profile.name === "string" ? profile.name : null,
+          email: typeof profile.email === "string" ? profile.email : null,
+          image: typeof profile.picture === "string" ? profile.picture : null,
+        };
+      },
+    }] : []),
   ],
   session: { strategy: "jwt", maxAge: 60 * 60 * 8 },
   pages: { signIn: "/signin" },
   callbacks: {
-    async signIn({ account }) {
-      // Provider-scoped subject IDs, not email addresses, are the admission key.
-      // Email may be unverified, mutable or shared across providers.
-      const identity = account?.provider && account.providerAccountId
-        ? `${account.provider}:${account.providerAccountId}` : null;
-      return approvedOperator(identity, process.env.SHARDS_CONSOLE_ALLOWED_IDENTITIES);
-    },
     async jwt({ token, account }) {
+      // Never derive access from user-editable email or display name.
       if (account?.provider && account.providerAccountId) {
         Object.assign(token, { shardsIdentity: `${account.provider}:${account.providerAccountId}` });
       }
       return token;
     },
     async session({ session, token }) {
-      // Recheck allowlist on each session read: removing an identity revokes console access.
-      // A valid social session by itself must never authorise privileged gateway routes.
-      const identity = typeof token.shardsIdentity === "string" ? token.shardsIdentity : null;
-      return Object.assign(session, {
-        shardsOperator: approvedOperator(identity, process.env.SHARDS_CONSOLE_ALLOWED_IDENTITIES),
-      });
+      const identity = typeof token.shardsIdentity === "string" ? token.shardsIdentity : "";
+      // Ordinary authenticated users may access onboarding and /account only.
+      // Operator authority is recomputed from server configuration on every session read.
+      return Object.assign(session, { shardsOperator: approvedOperator(identity, process.env.SHARDS_CONSOLE_ALLOWED_IDENTITIES) });
     },
   },
 };

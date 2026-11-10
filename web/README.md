@@ -82,3 +82,21 @@ This first slice is intentionally **not** a production multi-tenant control plan
 ### Operator session boundary
 
 All privileged console routes, including `/api/gateway/health` and `/api/gateway/agents`, require a server-issued `shardsOperator: true` session. The JWT stores the stable identity provider + subject, and server callbacks re-evaluate the current `SHARDS_CONSOLE_ALLOWED_IDENTITIES` setting each time; removing a principal from the allowlist denies existing sessions. Other social accounts have **no operator access**. Run `npm test` for the access-contract regressions.
+
+## Universal client onboarding (2026-11-10)
+
+- Public landing route `/` and `/get-started` support Cursor app/CLI, Claude Desktop/Code, ChatGPT, Codex app/CLI.
+- Cursor's documented deep-link uses base64-encoded MCP server settings. Other buttons copy **real supported commands or URL**; there is deliberately no fake automatic installer for clients that require their own Add Server / OAuth UI.
+- Social login at `/signin` and authenticated `/account` supports **Google, GitHub, Discord, Apple** only when their individual OAuth client credentials are configured. If an approved Sign in with ChatGPT partnership provides OIDC endpoints and credentials, the ChatGPT option becomes available. Never show it as working before approval.
+- Existing operator routes move from `/` to `/console`; `/agents`, `/tasks`, `/audit`, `/connections` remain operator-only, protected by the stable `provider:subject` allowlist. All authenticated users may access `/account`. Social login alone grants **no gateway authority**.
+- The Python MCP service and the Next.js frontend are **separate workloads**. The endpoint `https://mcp.shardsinc.co.uk/mcp` must forward to a real MCP resource server, not the static frontend. Do not repoint the existing Cloudflare Worker custom domain without reviewing its current configuration and rollback.
+- Full customer organisations, persistent identity linking, entitlement management and provisioning are not implemented by JWT-session sign-in. Do not describe this as a production multi-tenant account service.
+
+Provider production callback URLs on the **web origin** are `https://<web-origin>/api/auth/callback/google`, `/github`, `/discord`, `/apple` and (only with approved credentials) `/chatgpt`. Set `NEXTAUTH_URL` to the exact front-end origin, `NEXTAUTH_SECRET` to a strong random secret, and register each callback with the provider.
+
+See [connectivity launch gates](../docs/connectivity-launch-gates.md).
+
+
+### Authentication compatibility note
+
+The deployed Cloudflare Edge at `mcp.shardsinc.co.uk` currently supports three unauthenticated read-only discovery tools, plus operator-provisioned bearer keys for its private tools. It does **not** yet implement an MCP OAuth authorization server. Codex, Cursor, ChatGPT and Claude client setup instructions therefore intentionally do **not** issue `codex mcp login` or other OAuth login instructions as a mandatory step. An imported connector URL alone does not prove that private tools are usable.
