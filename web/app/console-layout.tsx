@@ -14,7 +14,8 @@ const navigation = [
 
 export async function ConsoleLayout({ children, active }: { children: React.ReactNode; active: string }) {
   const session = await getServerSession(authOptions);
-  if (!session?.user) redirect("/signin?callbackUrl=%2Fconsole");\n  if (!Boolean((session as typeof session & { shardsOperator?: boolean }).shardsOperator)) redirect("/account?restricted=1");
+  if (!session?.user) redirect("/signin?callbackUrl=%2Fconsole");
+  if (!Boolean((session as typeof session & { shardsOperator?: boolean }).shardsOperator)) redirect("/account?restricted=1");
   return <main className="console-layout">
     <aside className="console-sidebar">
       <Link href="/console" className="console-brand"><span className="brand-mark">S</span><span><strong>SHARDS</strong><small>MCP CONTROL PLANE</small></span></Link>
