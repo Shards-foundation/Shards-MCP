@@ -9,8 +9,10 @@ on:
       - "scripts/demo_local.py"
       - "scripts/skillctl.py"
       - "scripts/skill_evidence.py"
+      - "scripts/skill_install.py"
       - "skills/**"
       - "tests/test_skills.py"
+      - "tests/test_skill_install.py"
       - "tests/test_documentation.py"
       - ".github/workflows/docs.yml"
   push:
@@ -44,6 +46,8 @@ jobs:
         run: python scripts/docs_check.py
       - name: Validate Shards skills catalog
         run: python scripts/skillctl.py validate
+      - name: Test native skill installation and denial guards
+        run: python -m unittest discover -s tests -p 'test_skill_install.py' -v
       - name: First-run preflight (read-only)
         run: python skills/get-started/scripts/preflight.py --json
       - name: Validate conservative release evidence template

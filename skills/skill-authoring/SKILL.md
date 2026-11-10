@@ -27,7 +27,8 @@ Proposed lowercase-hyphen skill ID, precise trigger, permission requirements, su
    python scripts/docs_check.py
    python -m unittest discover -s tests -p 'test_skills.py' -v
    ```
-7. Test both expected success and denied/missing-precondition outcomes. Open PR with exact evidence, no auto-publication; resolve independent reviewer feedback.
+7. Confirm any truly portable helper scripts live inside the selected skill's own `scripts/` directory; source-checkout scripts remain source-dependent. Test the installer with `python -m unittest discover -s tests -p 'test_skill_install.py' -v` against disposable directories, never a real user's home.
+8. Test both expected success and denied/missing-precondition outcomes. Open PR with exact evidence, no auto-publication; resolve independent reviewer feedback.
 
 ## Verification
 

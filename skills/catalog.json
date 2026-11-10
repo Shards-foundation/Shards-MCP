@@ -16,7 +16,8 @@
       ],
       "scripts": [
         "scripts/skillctl.py",
-        "skills/get-started/scripts/preflight.py"
+        "skills/get-started/scripts/preflight.py",
+        "scripts/skill_install.py"
       ]
     },
     {

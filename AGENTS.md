@@ -28,6 +28,8 @@ Run on every **new task** unless only a trivial question is being answered:
 6. Record preconditions, approved scope, intended mutation, rollback and evidence requirements **before** making changes. If no matching skill exists, follow [skill-authoring](skills/skill-authoring/SKILL.md) or perform a narrow, reviewable task without inventing a skill.
 7. After the change, run `python scripts/skillctl.py validate` and `python scripts/docs_check.py` for skill/doc edits. Use `python scripts/skill_evidence.py --input <receipt.json> --envelope package` only when evaluating real, externally referenced release evidence.
 
+**Explicit local distribution:** after inspecting the source and target, preview with `python scripts/skill_install.py --client codex --project-dir . --skill get-started`. Only an authorised `--apply` copies files; `--verify` compares installed hashes. See [portable skill distribution](docs/skills-distribution.md). It does not log in to MCP clients, register identities or execute copied scripts.
+
 **No implicit loading:** a client that does not discover repository skills must be explicitly pointed to `AGENTS.md`, `skills/MAP.md` and the selected `SKILL.md`; never assert a skill is installed in ChatGPT, Claude, Codex or Cursor merely because files exist.
 
 ## Task modes: scope and actions
@@ -71,6 +73,7 @@ Parallel agents may take disjoint files/tasks only; assign one integrator for th
 
 ```sh
 python scripts/skillctl.py validate
+python -m unittest discover -s tests -p 'test_skill_install.py' -v
 python scripts/docs_check.py
 python -m compileall -q src tests scripts
 python -m unittest discover -s tests -v

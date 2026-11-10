@@ -14,6 +14,8 @@ python scripts/skillctl.py validate
 
 `show` emits the exact on-disk skill instructions; `suggest` is a **lexical hint**, not a model decision or authorization. When no unambiguous match exists, read this table and choose manually. All commands are read-only. A supported external agent must have repository/file access and permission to run local Python; otherwise it should retrieve the Markdown over the repository's authenticated GitHub reader.
 
+To install a selected skill into a client-native local directory, follow [skill distribution and verification](../docs/skills-distribution.md). The script does not grant OAuth or automatically sync skills to remote agents.
+
 ## Routing table
 
 | Need / trigger | Primary skill | Risk | Script or deliverable |

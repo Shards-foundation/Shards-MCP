@@ -15,6 +15,8 @@ Shards-MCP is a self-hosted, single-organisation gateway. The Python package, op
 | Business/legal | [Terms draft](legal/terms.md) | [Privacy draft](legal/privacy.md), [DPA outline](legal/dpa.md), [licensing](../LICENSING.md) |
 | Contributor | [CONTRIBUTING.md](../CONTRIBUTING.md) | [Code of Conduct](../CODE_OF_CONDUCT.md), [support](../SUPPORT.md) |
 
+- [Portable skill installation](skills-distribution.md) — supported clients, explicit dry run, file integrity and safe recovery
+
 ## Reference library
 
 - [Architecture](architecture.md), [protocol support](interoperability.md), [API specification](specification.md), [A2A diagnostics](a2a-doctor.md)
