@@ -71,6 +71,14 @@ END
 $body$;
 CREATE TRIGGER outbox_guard BEFORE UPDATE ON shards_v2.effect_outbox
 FOR EACH ROW EXECUTE FUNCTION shards_v2.enforce_outbox_transition();
+CREATE FUNCTION shards_v2.reject_outbox_delete() RETURNS trigger
+LANGUAGE plpgsql AS $body$
+BEGIN
+    RAISE EXCEPTION 'outbox intent cannot be deleted' USING ERRCODE = '42501';
+END
+$body$;
+CREATE TRIGGER outbox_no_delete BEFORE DELETE ON shards_v2.effect_outbox
+FOR EACH ROW EXECUTE FUNCTION shards_v2.reject_outbox_delete();
 
 -- First write of an edge-signed one-use assertion is committed by the Python
 -- origin *after* the user principal/org has been independently validated.
@@ -151,7 +159,11 @@ CREATE TABLE shards_v2.governance_receipts (
     FOREIGN KEY (org_id, audit_seq) REFERENCES shards_v2.audit_entries(org_id, seq)
 );
 
-DO $$
+-- Signed receipts are evidence, not mutable customer notes.
+CREATE TRIGGER receipt_immutable BEFORE UPDATE OR DELETE ON shards_v2.governance_receipts
+FOR EACH ROW EXECUTE FUNCTION shards_v2.reject_audit_mutation();
+
+DO $
 DECLARE table_name text;
 BEGIN
     FOREACH table_name IN ARRAY ARRAY[

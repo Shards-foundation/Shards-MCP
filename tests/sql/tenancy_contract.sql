@@ -121,7 +121,13 @@ BEGIN
     RAISE EXCEPTION 'FAIL: reconciliation without evidence succeeded';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
-END $$;
+  BEGIN
+    DELETE FROM shards_v2.effect_outbox
+     WHERE effect_id='00000000-0000-4000-8000-000000001111';
+    RAISE EXCEPTION 'FAIL: unresolved effect deletion succeeded';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+END $;
 UPDATE shards_v2.effect_outbox
   SET state='reconciled',reconciliation_evidence='{"provider":"checked","outcome":"not_executed"}'
  WHERE org_id='00000000-0000-4000-8000-000000000001'
@@ -147,6 +153,26 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
 END $$;
+
+
+-- Replayed edge assertion JTI is rejected independently of tenant context.
+INSERT INTO shards_v2.edge_request_nonces
+ (org_id,edge_key_id,jti_sha256,request_sha256,expires_at)
+ VALUES ('00000000-0000-4000-8000-000000000001','edge-test-key',
+         decode(repeat('33',32),'hex'),decode(repeat('44',32),'hex'),now()+interval '30 seconds');
+SELECT set_config('shards.org_id','00000000-0000-4000-8000-000000000002',false);
+DO $
+BEGIN
+  BEGIN
+    INSERT INTO shards_v2.edge_request_nonces
+      (org_id,edge_key_id,jti_sha256,request_sha256,expires_at)
+    VALUES ('00000000-0000-4000-8000-000000000002','edge-test-key',
+            decode(repeat('33',32),'hex'),decode(repeat('55',32),'hex'),now()+interval '30 seconds');
+    RAISE EXCEPTION 'FAIL: edge nonce reused across tenants';
+  EXCEPTION WHEN unique_violation THEN NULL;
+  END;
+END $;
+SELECT set_config('shards.org_id','00000000-0000-4000-8000-000000000001',false);
 
 -- Cross-org and missing-context reads remain denied after writes.
 SELECT set_config('shards.org_id','00000000-0000-4000-8000-000000000002',false);
