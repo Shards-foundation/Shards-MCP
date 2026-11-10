@@ -47,7 +47,7 @@ def configuration(client: str, endpoint: str) -> dict[str, object]:
         server = {"shards": {"url": endpoint}}
         config = {"mcpServers": server}
         deeplink = "cursor://anysphere.cursor-deeplink/mcp/install?name=shards&config=" + quote(
-            base64.b64encode(json.dumps(server, separators=(",", ":")).encode("utf-8")).decode("ascii"), safe=""
+            base64.b64encode(json.dumps(entry, separators=(",", ":")).encode("utf-8")).decode("ascii"), safe=""
         )
         return {**common, "config": config, "install_url": deeplink,
                 "instruction": "Use Cursor's MCP install link, review server permissions and independently verify tool calls."}

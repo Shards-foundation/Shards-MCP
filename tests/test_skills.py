@@ -84,7 +84,7 @@ class SkillsContractTests(unittest.TestCase):
         parsed = urlsplit(config["install_url"])
         self.assertEqual(parsed.scheme, "cursor")
         payload = parse_qs(parsed.query)["config"][0]
-        self.assertEqual(json.loads(base64.b64decode(payload))["shards"]["url"], endpoint)
+        self.assertEqual(json.loads(base64.b64decode(payload))["url"], endpoint)
         self.assertTrue(module.configuration("codex-cli", endpoint)["commands"][0].startswith("codex mcp add"))
         for bad in ["http://evil.example/mcp", "https://a.example/mcp?token=x", "https://user:secret@example.com/mcp", "https://a.example/other", "https://a.example:0/mcp"]:
             with self.subTest(url=bad):
