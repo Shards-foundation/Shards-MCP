@@ -54,7 +54,7 @@ jobs:
           test "$code" = 202
           curl -fsS -X POST "$URL" -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' -o /tmp/tools.json
-          node -e "const t=require('/tmp/tools.json').result.tools;if(t.length!==12||!t.some(x=>x.name==='shards_message_send')||!t.some(x=>x.name==='shards_task_claim'))process.exit(1);console.log(t.length+' genuine MCP tools discovered')"
+          node -e "const t=require('/tmp/tools.json').result.tools;if(t.length!==3||!t.some(x=>x.name==='shards_gateway_status')||t.some(x=>x.name==='shards_message_send'))process.exit(1);console.log(t.length+' public MCP tools discovered; private tools correctly hidden')"
       - name: Verify authenticated tools refuse anonymous access
         run: |
           set -euo pipefail
