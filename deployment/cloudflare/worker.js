@@ -59,7 +59,7 @@ if(req.method==='notifications/initialized'||req.method.startsWith('notification
 if(req.method==='initialize')return pub(rpc(id,{protocolVersion:version==='2026-07-28'?'2025-11-25':version,capabilities:{tools:{listChanged:false}},serverInfo:{name:'shards-mcp-edge',version:VERSION}}),200,{'mcp-protocol-version':version});
 if(req.method==='server/discover')return pub(rpc(id,{protocolVersion:'2026-07-28',serverInfo:{name:'shards-mcp-edge',version:VERSION},capabilities:{tools:{listChanged:false}}}),200,{'mcp-protocol-version':'2026-07-28'});
 if(req.method==='ping')return pub(rpc(id,{}));
-if(req.method==='tools/list')return pub(rpc(id,{tools:tools.map(({name,description,inputSchema,annotations,public:pub,scope})=>({name,description:description+(pub?'':' Requires an operator-issued scoped bearer key.'),inputSchema,annotations}))}));
+if(req.method==='tools/list'){const actor=await authenticate(request,env);const visible=tools.filter(t=>t.public||(actor&&actor.scopeSet.has(t.scope)));return pub(rpc(id,{tools:visible.map(({name,description,inputSchema,annotations,public:pub})=>({name,description:description+(pub?'':' Requires an operator-issued scoped bearer key.'),inputSchema,annotations}))}));}
 if(req.method==='resources/list')return pub(rpc(id,{resources:[]}));
 if(req.method==='prompts/list')return pub(rpc(id,{prompts:[]}));
 if(req.method==='tools/call'){const tname=req.params?.name;if(typeof tname!=='string')return pub(rpcError(id,-32602,'Tool name required'));const actor=await authenticate(request,env);const r=await runTool(tname,req.params?.arguments||{},actor,env);return pub(rpc(id,r))}
