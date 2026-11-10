@@ -80,13 +80,32 @@ def _validate_gateway_url(value: str) -> str:
         hostname = parts.hostname
     except ValueError:
         raise DiagnosticError("gateway URL must be a valid origin") from None
-    # urllib permits malformed bracketed IPv6 authorities with trailing junk.
-    # Compare the entire authority against the parsed host and port.
-    expected_authority = (f"[{hostname}]" if hostname and ":" in hostname else hostname or "")
-    if port is not None:
-        expected_authority += f":{port}"
-    if parts.netloc.lower() != expected_authority:
-        raise DiagnosticError("gateway URL must be a valid origin")
+    # Do not rebuild the authority using the parsed integer port: leading zero
+    # notation (e.g. :0443) is valid. Parse delimiters explicitly so suffix
+    # smuggling after bracketed IPv6 and malformed port text still fail closed.
+    authority = parts.netloc
+    if authority.startswith("["):
+        bracket = authority.find("]")
+        if bracket < 0:
+            raise DiagnosticError("gateway URL must be a valid origin")
+        raw_host = authority[1:bracket]
+        raw_port = authority[bracket + 1:]
+        # urllib lowercases the address but preserves scoped IPv6 interface IDs.
+        if not hostname or raw_host.lower() != hostname.lower():
+            raise DiagnosticError("gateway URL must be a valid origin")
+        if raw_port and (not raw_port.startswith(":")
+                         or not raw_port[1:].isascii() or not raw_port[1:].isdigit()):
+            raise DiagnosticError("gateway URL must be a valid origin")
+        if (not raw_port and port is not None) or (raw_port and port is None):
+            raise DiagnosticError("gateway URL must be a valid origin")
+    else:
+        # A bare colon denotes a port, not a second host or an IPv6 literal.
+        raw_host, sep, raw_port = authority.partition(":")
+        if (not raw_host or raw_host.lower() != (hostname or "").lower()
+                or (sep and (not raw_port or not raw_port.isascii()
+                             or not raw_port.isdigit()))
+                or (not sep and port is not None)):
+            raise DiagnosticError("gateway URL must be a valid origin")
     if (parts.scheme not in ("http", "https") or not hostname or
             parts.username is not None or parts.password is not None or
             parts.query or parts.fragment or parts.path not in ("", "/") or
