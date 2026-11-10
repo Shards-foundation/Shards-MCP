@@ -1,4 +1,4 @@
-# Shards MCP Console — first operational slice
+# Shards MCP Console — private-preview operational slices
 
 This is a **separate Next.js application** under `web/`, not a public deployment or a replacement for the Python gateway.
 
@@ -8,9 +8,10 @@ This is a **separate Next.js application** under `web/`, not a public deployment
 - Authentication-gated console; unauthenticated users are redirected to `/signin`.
 - A server-side, read-only gateway liveness probe at `/api/gateway/health` with a three-second timeout, no redirects, no user-supplied target URL, no credential forwarding and no response-body forwarding.
 - Interactive IDE Connection Hub with local stdio and remote HTTP configuration templates for Cursor, Claude Code, Codex, VS Code, Antigravity and generic MCP clients. Templates are not live connectivity tests; installed client versions and transport support must be verified.
+- A read-only agent-registry view backed by `POST /v1/tools/agent_identity` and `agent_list`, requiring a separate server-side `agent:read` credential. Raw gateway responses and credentials are never returned to the browser.
 - Visible connection guidance and explicit disclosure of functionality not yet implemented.
 
-**Social sign-in does not authorise gateway actions.** No administrator token, agent token or OAuth provider access token is sent to the browser. This version deliberately does not allow registration, agent management or task mutation. Those require tenant membership, roles, audit integration and a scoped backend bridge.
+**Social sign-in does not authorise gateway actions.** No administrator token, agent token or OAuth provider access token is sent to the browser. This version shows a read-only agent directory only when configured; it does not allow agent registration, revocation, task mutation or privilege changes. Those require tenant membership, roles, audit integration and a scoped backend bridge.
 
 ## Local setup
 
@@ -38,6 +39,22 @@ Set `SHARDS_GATEWAY_INTERNAL_URL` to the gateway address reachable from the **we
 
 For production, use a verified HTTPS domain and register corresponding provider callbacks. Configure `NEXTAUTH_URL` to the exact external origin and a strong `NEXTAUTH_SECRET`. Never commit `.env.local`. Do not expose the Python gateway bootstrap secret to the web application.
 
+## Read-only agent registry setup (local gateway tokens only)
+
+Provision a **separate local gateway identity** on the trusted gateway host with exactly the `agent:read` permission. `SHARDS_ADMIN_TOKEN` is only for the out-of-band local provisioning CLI and **must never be configured in Next.js**.
+
+```sh
+# On the gateway host, after configuring SHARDS_ADMIN_TOKEN and SHARDS_DB:
+shards-mcp-admin register --name console-inventory --provider local \
+  --scope agent:read --token-file /private/console-inventory.token
+```
+
+The CLI creates a new mode-0600 token file. Supply the secret to the web server through server-side secret management as `SHARDS_CONSOLE_READ_TOKEN` (never `NEXT_PUBLIC_`, committed settings, browser storage or responses). Keep `SHARDS_GATEWAY_INTERNAL_URL` as an operator-configured HTTPS origin or loopback HTTP origin. The web server must reach the gateway privately. Token value must have the local issuer's `shards_` format. A remote `SHARDS_AUTH_MODE=oauth` gateway is **not yet supported by this bridge**.
+
+The server makes two fixed REST calls: first `agent_identity` verifies the credential is a non-operator with **exactly** `agent:read`; only then does `agent_list` return selected directory fields. Invalid credentials, redirects, malformed responses, excessive payloads and failed scope checks return only generic failure states. The browser never sees the bearer token. The API requires a valid allowlisted console session.
+
+This is a **single-organisation private-preview** read interface. Anyone on the explicit social-subject sign-in allowlist who has a valid console session can see the directory. It is not tenant-isolated RBAC, immediate session revocation, a credential-rotation UI, or evidence that agent processes are alive. Gateway heartbeats are recent/stale observations with a 90-second threshold. If such exposure is too broad, do not enable the bridge; implement persistent operator roles first. For access removal, revoke the backend token out of band and expire console sessions as appropriate.
+
 ## IDE connection workflow
 
 1. Install the Python gateway/stdio bridge package on the machine where the IDE runs.
@@ -61,3 +78,7 @@ ChatGPT is an **MCP client integration**, not a configured OAuth sign-in provide
 5. **Live integrations**: real external OAuth IdP, ChatGPT MCP client validation, and deployment acceptance with backups and alerting.
 
 This first slice is intentionally **not** a production multi-tenant control plane. OAuth credentials, live deployment and integration testing are required before claiming it works on the internet.
+
+### Operator session boundary
+
+All privileged console routes, including `/api/gateway/health` and `/api/gateway/agents`, require a server-issued `shardsOperator: true` session. The JWT stores the stable identity provider + subject, and server callbacks re-evaluate the current `SHARDS_CONSOLE_ALLOWED_IDENTITIES` setting each time; removing a principal from the allowlist denies existing sessions. Other social accounts have **no operator access**. Run `npm test` for the access-contract regressions.

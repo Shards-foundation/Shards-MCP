@@ -2,6 +2,7 @@ import Link from "next/link";
 import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
 import { authOptions } from "@/lib/auth";
+import { operatorSession } from "@/lib/operator-access";
 import { SignOutButton } from "./signout-button";
 
 const navigation = [
@@ -14,7 +15,7 @@ const navigation = [
 
 export async function ConsoleLayout({ children, active }: { children: React.ReactNode; active: string }) {
   const session = await getServerSession(authOptions);
-  if (!session?.user) redirect("/signin");
+  if (!session?.user || !operatorSession(session)) redirect("/signin");
   return <main className="console-layout">
     <aside className="console-sidebar">
       <Link href="/" className="console-brand"><span className="brand-mark">S</span><span><strong>SHARDS</strong><small>MCP CONTROL PLANE</small></span></Link>
