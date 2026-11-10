@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "project": "Shards-MCP",
+  "canonical_instructions": "AGENTS.md",
+  "skills": [
+    {
+      "id": "get-started",
+      "category": "intake",
+      "risk": "low",
+      "triggers": [
+        "get started",
+        "new agent",
+        "first run",
+        "initial setup",
+        "onboarding"
+      ],
+      "scripts": [
+        "scripts/skillctl.py",
+        "skills/get-started/scripts/preflight.py"
+      ]
+    },
+    {
+      "id": "agent-onboarding",
+      "category": "identity",
+      "risk": "privileged",
+      "triggers": [
+        "register agent",
+        "agent enrollment",
+        "agent enrolment",
+        "rotate credential",
+        "offboard agent"
+      ],
+      "scripts": []
+    },
+    {
+      "id": "client-integration",
+      "category": "connectivity",
+      "risk": "bounded",
+      "triggers": [
+        "connect cursor",
+        "connect claude",
+        "connect codex",
+        "connect chatgpt",
+        "client integration",
+        "mcp client"
+      ],
+      "scripts": [
+        "scripts/skillctl.py"
+      ]
+    },
+    {
+      "id": "connection-doctor",
+      "category": "connectivity",
+      "risk": "low",
+      "triggers": [
+        "doctor",
+        "connection failure",
+        "http 401",
+        "http 403",
+        "mcp handshake",
+        "troubleshoot connection"
+      ],
+      "scripts": []
+    },
+    {
+      "id": "task-lifecycle",
+      "category": "execution",
+      "risk": "bounded",
+      "triggers": [
+        "task lifecycle",
+        "delegate task",
+        "claim task",
+        "verify task",
+        "worker checkpoint"
+      ],
+      "scripts": [
+        "scripts/demo_local.py"
+      ]
+    },
+    {
+      "id": "ci-triage",
+      "category": "engineering",
+      "risk": "low",
+      "triggers": [
+        "ci failure",
+        "failed build",
+        "test failure",
+        "lint failure",
+        "pipeline debug",
+        "github actions"
+      ],
+      "scripts": [
+        "scripts/skillctl.py"
+      ]
+    },
+    {
+      "id": "security-review",
+      "category": "governance",
+      "risk": "bounded",
+      "triggers": [
+        "security review",
+        "oauth review",
+        "authorization bypass",
+        "token leak",
+        "threat model"
+      ],
+      "scripts": []
+    },
+    {
+      "id": "incident-recovery",
+      "category": "operations",
+      "risk": "privileged",
+      "triggers": [
+        "incident",
+        "outage",
+        "credential compromise",
+        "rollback",
+        "lease expired"
+      ],
+      "scripts": []
+    },
+    {
+      "id": "release-readiness",
+      "category": "operations",
+      "risk": "privileged",
+      "triggers": [
+        "release",
+        "publish package",
+        "production readiness",
+        "deployment gate",
+        "go no go"
+      ],
+      "scripts": [
+        "scripts/skill_evidence.py"
+      ]
+    },
+    {
+      "id": "marketplace-gate",
+      "category": "distribution",
+      "risk": "privileged",
+      "triggers": [
+        "marketplace",
+        "list mcp server",
+        "publish directory",
+        "app directory",
+        "catalog submission"
+      ],
+      "scripts": [
+        "scripts/skill_evidence.py"
+      ]
+    },
+    {
+      "id": "skill-authoring",
+      "category": "engineering",
+      "risk": "bounded",
+      "triggers": [
+        "new skill",
+        "edit skill",
+        "skill map",
+        "write workflow",
+        "add automation"
+      ],
+      "scripts": [
+        "scripts/skillctl.py",
+        "scripts/docs_check.py"
+      ]
+    }
+  ]
+}

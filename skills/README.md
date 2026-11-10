@@ -1,18 +1,24 @@
-# Reusable Agent and Operator Skills
+# Shards Agent Skills — discoverable, repeatable operating procedures
 
-A **skill** is a documented repeatable workflow with a trigger, input contract, safe actions, verification, failure handling and output evidence. It is not a hidden agent permission, an automation scheduler or a substitute for a security policy.
+Shards skills implement bounded workflows for engineering, operations and MCP client integration. **They do not mint permissions, install a plugin into ChatGPT, or execute automatically.** Every skill is a directory containing a specification-compatible `SKILL.md`; selected skills provide local scripts, references and testable acceptance criteria.
 
-| Skill | Trigger | Output |
-| --- | --- | --- |
-| [agent-onboarding](agent-onboarding/SKILL.md) | New or rotating agent identity | Enrolment + denial-test receipt |
-| [connection-doctor](connection-doctor/SKILL.md) | Client/IDE connectivity failure | Scoped read-only diagnostics |
-| [task-lifecycle](task-lifecycle/SKILL.md) | Delegate/verify non-consequential work | Task state and review evidence |
-| [security-review](security-review/SKILL.md) | PR/auth boundary/incident audit | Finding severity, proof, acceptance |
-| [incident-recovery](incident-recovery/SKILL.md) | Expired lease, compromised credential or outage | Containment and recovery decision |
-| [release-readiness](release-readiness/SKILL.md) | Package release or hosted deployment request | Binary GO/NO-GO with references |
+Start at [AGENTS.md](../AGENTS.md), then consult the [skills map](MAP.md) or [machine-readable catalog](catalog.json). For a new session, activate [get-started](get-started/SKILL.md).
 
-## Skill execution contract
+## Discover a skill, load only what you need
 
-Read [AGENTS.md](../AGENTS.md) and [rulebook](../docs/rulebook.md). Check that input data has no secrets, confirm the operator's approval and current git SHA, execute only commands in scope, record negative as well as positive tests, fail closed on missing evidence. Skills cannot create credentials, publish a package or perform state changes without the actor's existing authority.
+```sh
+python scripts/skillctl.py list
+python scripts/skillctl.py suggest --task "set up Cursor MCP"
+python scripts/skillctl.py show client-integration
+python scripts/skillctl.py validate
+```
 
-These Markdown skills are compatible with agents that read `SKILL.md` workflows; no claim is made that the repository automatically installs them as ChatGPT plugins or grants external tool permissions.
+The skill router performs **read-only** local file operations. `suggest` returns lexical matches and will report ambiguity; an agent is responsible for selecting the correct skill and satisfying its prerequisites.
+
+For an agent without local shell access: read [MAP.md](MAP.md), open the matching `<skill-name>/SKILL.md` using a trusted repository reader, then load optional references/scripts only as needed. File availability is not proof that a remote AI client automatically loaded or installed a skill.
+
+## Safety and evidence
+
+Only perform mutations within explicitly approved authority; never expose bootstrap tokens to a model or client configuration. Use isolated databases for examples, enforce separate task creator/worker/verifier identities, prefer reversible changes and do not retry uncertain external effects. For executable release checks use [release-readiness](release-readiness/SKILL.md); the default verdict is **NO-GO** until evidence proves otherwise.
+
+See the [rulebook](../docs/rulebook.md), [agent identity onboarding](../docs/agent-onboarding.md) and [local getting started](../docs/getting-started.md).
