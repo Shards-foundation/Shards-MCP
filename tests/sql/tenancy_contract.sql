@@ -85,6 +85,21 @@ INSERT INTO shards_v2.verifications
  ('00000000-0000-4000-8000-000000000001','tsk_a','agt_a_creator','agt_a_worker',
   'agt_a_verifier','approved',decode(repeat('11',32),'hex'),'{"ci":"independent"}');
 
+-- A caller cannot insert a record already dispatched or with forged proof.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO shards_v2.effect_outbox
+     (org_id,task_id,actor_id,connector,idempotency_key,payload_sha256,payload_vault_ref,state)
+    VALUES
+     ('00000000-0000-4000-8000-000000000001','tsk_a','agt_a_worker',
+      'github-pr','forged-idem',decode(repeat('aa',32),'hex'),'vault://ci/no-secret',
+      'dispatching');
+    RAISE EXCEPTION 'FAIL: dispatched outbox intent inserted directly';
+  EXCEPTION WHEN check_violation THEN NULL;
+  END;
+END $$;
+
 -- Outbox pending -> dispatching -> uncertain, NEVER automatic replay.
 INSERT INTO shards_v2.effect_outbox
  (org_id,effect_id,task_id,actor_id,connector,idempotency_key,payload_sha256,payload_vault_ref)
@@ -127,7 +142,7 @@ BEGIN
     RAISE EXCEPTION 'FAIL: unresolved effect deletion succeeded';
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
-END $;
+END $$;
 UPDATE shards_v2.effect_outbox
   SET state='reconciled',reconciliation_evidence='{"provider":"checked","outcome":"not_executed"}'
  WHERE org_id='00000000-0000-4000-8000-000000000001'
@@ -161,7 +176,7 @@ INSERT INTO shards_v2.edge_request_nonces
  VALUES ('00000000-0000-4000-8000-000000000001','edge-test-key',
          decode(repeat('33',32),'hex'),decode(repeat('44',32),'hex'),now()+interval '30 seconds');
 SELECT set_config('shards.org_id','00000000-0000-4000-8000-000000000002',false);
-DO $
+DO $$
 BEGIN
   BEGIN
     INSERT INTO shards_v2.edge_request_nonces
@@ -171,7 +186,7 @@ BEGIN
     RAISE EXCEPTION 'FAIL: edge nonce reused across tenants';
   EXCEPTION WHEN unique_violation THEN NULL;
   END;
-END $;
+END $$;
 SELECT set_config('shards.org_id','00000000-0000-4000-8000-000000000001',false);
 
 -- Cross-org and missing-context reads remain denied after writes.
@@ -192,6 +207,27 @@ BEGIN
   END IF;
 END $$;
 RESET ROLE;
+-- Elevated DDL owners also hit the append-only TRUNCATE triggers.
+-- These are destructive statements against disposable CI fixtures only.
+DO $$
+BEGIN
+  BEGIN
+    TRUNCATE TABLE shards_v2.audit_entries;
+    RAISE EXCEPTION 'FAIL: audit truncate succeeded';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    TRUNCATE TABLE shards_v2.effect_outbox;
+    RAISE EXCEPTION 'FAIL: outbox truncate succeeded';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+  BEGIN
+    TRUNCATE TABLE shards_v2.governance_receipts;
+    RAISE EXCEPTION 'FAIL: signed receipt truncate succeeded';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+END $$;
+
 -- Ensure all tenant tables carry an org_id column and forced RLS.
 DO $$
 DECLARE item record;

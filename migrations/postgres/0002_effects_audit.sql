@@ -71,6 +71,19 @@ END
 $body$;
 CREATE TRIGGER outbox_guard BEFORE UPDATE ON shards_v2.effect_outbox
 FOR EACH ROW EXECUTE FUNCTION shards_v2.enforce_outbox_transition();
+CREATE FUNCTION shards_v2.enforce_outbox_insert() RETURNS trigger
+LANGUAGE plpgsql AS $body$
+BEGIN
+    IF NEW.state <> 'pending' OR NEW.provider_receipt IS NOT NULL OR
+       NEW.reconciliation_evidence IS NOT NULL OR NEW.dispatch_attempts <> 0 THEN
+        RAISE EXCEPTION 'new outbox intent must begin pending and unexecuted'
+           USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$body$;
+CREATE TRIGGER outbox_insert_guard BEFORE INSERT ON shards_v2.effect_outbox
+FOR EACH ROW EXECUTE FUNCTION shards_v2.enforce_outbox_insert();
 CREATE FUNCTION shards_v2.reject_outbox_delete() RETURNS trigger
 LANGUAGE plpgsql AS $body$
 BEGIN
@@ -79,6 +92,9 @@ END
 $body$;
 CREATE TRIGGER outbox_no_delete BEFORE DELETE ON shards_v2.effect_outbox
 FOR EACH ROW EXECUTE FUNCTION shards_v2.reject_outbox_delete();
+-- TRUNCATE bypasses row-level triggers and RLS. Deny it explicitly.
+CREATE TRIGGER outbox_no_truncate BEFORE TRUNCATE ON shards_v2.effect_outbox
+FOR EACH STATEMENT EXECUTE FUNCTION shards_v2.reject_outbox_delete();
 
 -- First write of an edge-signed one-use assertion is committed by the Python
 -- origin *after* the user principal/org has been independently validated.
@@ -142,6 +158,8 @@ END
 $body$;
 CREATE TRIGGER audit_immutable BEFORE UPDATE OR DELETE ON shards_v2.audit_entries
 FOR EACH ROW EXECUTE FUNCTION shards_v2.reject_audit_mutation();
+CREATE TRIGGER audit_no_truncate BEFORE TRUNCATE ON shards_v2.audit_entries
+FOR EACH STATEMENT EXECUTE FUNCTION shards_v2.reject_audit_mutation();
 
 CREATE TABLE shards_v2.governance_receipts (
     org_id uuid NOT NULL,
@@ -162,6 +180,8 @@ CREATE TABLE shards_v2.governance_receipts (
 -- Signed receipts are evidence, not mutable customer notes.
 CREATE TRIGGER receipt_immutable BEFORE UPDATE OR DELETE ON shards_v2.governance_receipts
 FOR EACH ROW EXECUTE FUNCTION shards_v2.reject_audit_mutation();
+CREATE TRIGGER receipt_no_truncate BEFORE TRUNCATE ON shards_v2.governance_receipts
+FOR EACH STATEMENT EXECUTE FUNCTION shards_v2.reject_audit_mutation();
 
 DO $$
 DECLARE table_name text;

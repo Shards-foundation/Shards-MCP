@@ -45,7 +45,7 @@ Cheap parallel changes (not substitutes for D0–D5): pin deployed Worker versio
 - **Customer social login as MCP OAuth** — rejected: upstream IdP login is not a properly audience-bound MCP resource token.
 - **Hand-roll issuer** — rejected: protocol and security lifetime is high-risk; integrate a maintained solution.
 - **PostgreSQL v2 vs SQLite v1** — choose PostgreSQL for the new multi-organisation shared authority, while retaining the single-organisation SQLite package. This is *not* a silent in-place migration.
-- **Row-level security** — use PostgreSQL RLS plus composite tenant FKs as defence-in-depth, not as a substitute for validated principal binding. Custom transaction settings such as `app.org_id` can be set by a raw SQL client, so unrestricted SQL/query tool access to the runtime database is forbidden.
+- **Row-level security** — use PostgreSQL RLS plus composite tenant FKs as defence-in-depth, not as a substitute for validated principal binding. Custom transaction settings such as `shards.org_id` can be set by a raw SQL client, so unrestricted SQL/query tool access to the runtime database is forbidden.
 
 ## Consequences and non-goals
 

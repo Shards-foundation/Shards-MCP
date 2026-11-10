@@ -28,7 +28,7 @@ The Python `Gateway` in `src/shards_mcp/core.py` uses single-host SQLite and cre
 
 | Gate | Failure test |
 | --- | --- |
-| Tenant default deny | No validated membership / no `app.org_id` returns no rows and cannot write |
+| Tenant default deny | No validated membership / no `shards.org_id` returns no rows and cannot write |
 | Tenant FKs | Cross-organisation creator, assignee, reviewer or task reference rejected |
 | Edge bypass | Direct origin call without trusted edge assertion denied |
 | Confused deputy | No downstream connector accepts an MCP user token |
