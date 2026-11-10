@@ -15,7 +15,7 @@ const navigation = [
 
 export async function ConsoleLayout({ children, active }: { children: React.ReactNode; active: string }) {
   const session = await getServerSession(authOptions);
-  if (!operatorSession(session)) redirect("/signin");
+  if (!session?.user || !operatorSession(session)) redirect("/signin");
   return <main className="console-layout">
     <aside className="console-sidebar">
       <Link href="/" className="console-brand"><span className="brand-mark">S</span><span><strong>SHARDS</strong><small>MCP CONTROL PLANE</small></span></Link>

@@ -7,5 +7,6 @@ export function approvedOperator(identity: unknown, configured: string | undefin
 export function operatorSession(session: unknown): boolean {
   return typeof session === "object" && session !== null &&
     !Array.isArray(session) && (session as { shardsOperator?: unknown }).shardsOperator === true &&
-    typeof (session as { user?: { email?: string; name?: string } }).user === "object";
+    (session as { user?: unknown }).user !== null &&
+    typeof (session as { user?: unknown }).user === "object";
 }
