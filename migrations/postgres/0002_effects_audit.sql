@@ -113,6 +113,20 @@ CREATE TABLE shards_v2.edge_request_nonces (
     CHECK (expires_at > first_seen_at)
 );
 
+-- Retention: only authorised maintenance may remove security markers,
+-- and never before token expiry plus ten minutes of clock-skew/retry margin.
+CREATE FUNCTION shards_v2.restrict_security_marker_cleanup() RETURNS trigger
+LANGUAGE plpgsql AS $body$
+BEGIN
+ IF OLD.expires_at >= clock_timestamp()-interval '10 minutes' THEN
+  RAISE EXCEPTION 'security marker still in active replay window' USING ERRCODE='42501';
+ END IF;
+ RETURN OLD;
+END
+$body$;
+CREATE TRIGGER nonce_expiry_guard BEFORE DELETE ON shards_v2.edge_request_nonces
+FOR EACH ROW EXECUTE FUNCTION shards_v2.restrict_security_marker_cleanup();
+
 CREATE TABLE shards_v2.token_revocations (
     org_id uuid NOT NULL,
     issuer text NOT NULL,
@@ -122,6 +136,9 @@ CREATE TABLE shards_v2.token_revocations (
     PRIMARY KEY (org_id, issuer, jti_sha256),
     FOREIGN KEY (org_id) REFERENCES shards_v2.organizations(org_id)
 );
+
+CREATE TRIGGER revocation_expiry_guard BEFORE DELETE ON shards_v2.token_revocations
+FOR EACH ROW EXECUTE FUNCTION shards_v2.restrict_security_marker_cleanup();
 
 -- Serialize per-tenant hash-chain append by locking audit_heads inside the
 -- SAME database transaction as task mutations/outbox issuance.

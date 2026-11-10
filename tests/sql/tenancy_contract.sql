@@ -69,6 +69,10 @@ BEGIN;
 SELECT set_config('shards.org_id','00000000-0000-4000-8000-000000000001',true);
 DO $$
 BEGIN
+ IF (SELECT resource_audience FROM shards_v2.organizations) <>
+    'https://mcp.shardsinc.co.uk/orgs/00000000-0000-4000-8000-000000000001/mcp' THEN
+   RAISE EXCEPTION 'FAIL: organisation audience not bound to UUID';
+ END IF;
  IF (SELECT count(*) FROM shards_v2.events) <> 1 OR
     (SELECT count(*) FROM shards_v2.principals) <> 4 THEN
    RAISE EXCEPTION 'FAIL: tenant-A read isolation';
@@ -145,7 +149,7 @@ BEGIN
  BEGIN
   UPDATE shards_v2.tasks SET state='queued' WHERE task_id='task_a';
   RAISE EXCEPTION 'FAIL: terminal task requeued';
- EXCEPTION WHEN check_violation THEN NULL;
+ EXCEPTION WHEN insufficient_privilege THEN NULL;
  END;
  BEGIN
   UPDATE shards_v2.verifications SET decision='rejected' WHERE task_id='task_a';
@@ -283,6 +287,21 @@ BEGIN
  EXCEPTION WHEN unique_violation THEN NULL;
  END;
 END $$;
+COMMIT;
+RESET ROLE;
+
+-- Maintenance is a separate role: it cannot delete a live nonce.
+SET ROLE shards_v2_maintenance;
+BEGIN;
+SELECT set_config('shards.org_id','00000000-0000-4000-8000-000000000001',true);
+DO $
+BEGIN
+ BEGIN
+  DELETE FROM shards_v2.edge_request_nonces;
+  RAISE EXCEPTION 'FAIL: live nonce could be purged';
+ EXCEPTION WHEN insufficient_privilege THEN NULL;
+ END;
+END $;
 COMMIT;
 RESET ROLE;
 

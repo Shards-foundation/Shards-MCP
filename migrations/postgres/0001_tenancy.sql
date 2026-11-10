@@ -6,6 +6,9 @@ CREATE SCHEMA shards_v2;
 
 CREATE TABLE shards_v2.organizations (
     org_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    resource_audience text GENERATED ALWAYS AS (
+        'https://mcp.shardsinc.co.uk/orgs/' || org_id::text || '/mcp'
+    ) STORED UNIQUE,
     slug text NOT NULL UNIQUE CHECK (slug ~ '^[a-z][a-z0-9-]{2,62}$'),
     lifecycle text NOT NULL DEFAULT 'quarantined'
         CHECK (lifecycle IN ('quarantined','active','suspended','closed')),
