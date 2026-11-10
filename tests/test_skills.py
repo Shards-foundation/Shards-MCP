@@ -36,11 +36,13 @@ class SkillsContractTests(unittest.TestCase):
             root = Path(directory)
             (root / "skills").mkdir()
             sample = {"schema_version": 1, "skills": [
-                {"id": "missing", "category": "intake", "risk": "low", "triggers": ["first run"], "scripts": []},
+                {"id": "missing", "category": [], "risk": {}, "triggers": ["first run"], "scripts": []},
                 {"id": "missing", "category": "intake", "risk": "low", "triggers": ["first run"], "scripts": []},
             ]}
             (root / "skills" / "catalog.json").write_text(json.dumps(sample), encoding="utf-8")
             problems = skillctl.validate(root)
+            self.assertTrue(any("invalid category" in p for p in problems))
+            self.assertTrue(any("invalid risk" in p for p in problems))
             self.assertTrue(any("duplicate" in p for p in problems))
             self.assertTrue(any("missing skill" in p for p in problems))
 
@@ -90,6 +92,18 @@ class SkillsContractTests(unittest.TestCase):
                     module.validate_endpoint(bad)
         self.assertEqual(module.validate_endpoint("http://127.0.0.1:8787/mcp", allow_loopback=True),
                          "http://127.0.0.1:8787/mcp")
+
+    def test_malformed_gate_status_fails_closed_without_typeerror(self):
+        data = {"revision": "b" * 40, "envelope": "package", "gates": {
+            gate: {"status": "PASS", "evidence": ["ci://nonproduction-test"]}
+            for gate in skill_evidence.PACKAGE
+        }}
+        for wrong_type in ([], {}, 12, None, True):
+            with self.subTest(status=wrong_type):
+                data["gates"]["unit_tests"]["status"] = wrong_type
+                outcome = skill_evidence.assess(data, "package")
+                self.assertEqual(outcome["verdict"], "NO_GO")
+                self.assertTrue(any("unit_tests: invalid" in x for x in outcome["reasons"]))
 
     def test_duplicate_json_receipt_keys_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "duplicate JSON field"):

@@ -79,9 +79,9 @@ def validate(root: Path = ROOT) -> list[str]:
             errors.append(f"{name}: duplicate catalog entry")
             continue
         seen.add(name)
-        if record.get("category") not in CATEGORIES:
+        if not isinstance(record.get("category"), str) or record["category"] not in CATEGORIES:
             errors.append(f"{name}: invalid category")
-        if record.get("risk") not in RISKS:
+        if not isinstance(record.get("risk"), str) or record["risk"] not in RISKS:
             errors.append(f"{name}: invalid risk class")
         triggers = record.get("triggers")
         if not isinstance(triggers, list) or not triggers or any(

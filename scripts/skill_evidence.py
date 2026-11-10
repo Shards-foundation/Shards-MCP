@@ -56,7 +56,7 @@ def assess(data: Any, envelope: str) -> dict[str, Any]:
             reasons.append(f"{key}: missing gate")
             continue
         status = item.get("status")
-        if status not in VALID:
+        if not isinstance(status, str) or status not in VALID:
             reasons.append(f"{key}: invalid/missing status")
         elif status != "PASS":
             reasons.append(f"{key}: {status}")
