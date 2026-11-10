@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
 import { authOptions } from "@/lib/auth";
@@ -6,26 +7,21 @@ import { SignInButtons } from "./signin-buttons";
 const errors: Record<string, string> = {
   OAuthSignin: "Could not start provider sign-in.",
   OAuthCallback: "The identity provider rejected the callback.",
-  OAuthAccountNotLinked: "This email is linked to a different sign-in method.",
-  AccessDenied: "Access was denied by the identity provider.",
-  Configuration: "Sign-in is not configured correctly.",
-  Default: "Sign-in failed. Try again or contact the operator.",
+  OAuthAccountNotLinked: "That email is associated with another sign-in method. Sign in using the original provider.",
+  AccessDenied: "The identity provider denied access.",
+  Configuration: "Sign-in is not configured on this deployment.",
+  Default: "Sign-in failed. Try again.",
 };
-
-export default async function SignInPage({
-  searchParams,
-}: { searchParams?: { error?: string } }) {
+export default async function SignInPage({ searchParams }: { searchParams?: { error?: string; callbackUrl?: string } }) {
   const session = await getServerSession(authOptions);
-  if (session?.user) redirect("/");
-  return <main className="shell"><div className="eyebrow">SHARDS / IDENTITY</div>
-    <h1>Sign in to the control plane</h1>
-    <p>Social sign-in authenticates you to the console. It does not grant gateway administrator or agent permissions.</p>
-    {searchParams?.error && <p role="alert">{errors[searchParams.error] ?? errors.Default}</p>}
-    <section className="panel">
-      {authOptions.providers.length === 0
-        ? <p>No identity providers configured. Set the OAuth client IDs and secrets on the server.</p>
-        : <SignInButtons providers={authOptions.providers.map(provider => ({ id: provider.id, name: provider.name }))} />}
-    </section>
-    <p className="muted">ChatGPT connects to the gateway as an AI client through MCP; it is not a social sign-in provider here.</p>
-  </main>;
+  const target = searchParams?.callbackUrl?.startsWith("/") && !searchParams.callbackUrl.startsWith("//")
+    ? searchParams.callbackUrl : "/account";
+  if (session?.user) redirect(target);
+  return <main className="public-shell"><header className="public-header"><Link className="public-brand" href="/"><span className="public-logo">S</span> SHARDS <span className="brand-sub">/ SIGN IN</span></Link><nav><Link href="/get-started">Get started</Link></nav></header>
+    <section className="account-card"><div className="eyebrow">IDENTITY / SECURE SESSION</div><h1>Access your workspace.</h1><p>Sign in through a configured identity provider. Your identity does not automatically grant gateway or agent permissions.</p>
+      {searchParams?.error && <p role="alert">{errors[searchParams.error] ?? errors.Default}</p>}
+      {authOptions.providers.length === 0 ? <p role="alert">No identity providers are configured on this deployment. An operator must register OAuth applications and configure server-side credentials.</p> :
+        <SignInButtons callbackUrl={target} providers={authOptions.providers.map(p => ({ id: p.id, name: p.name }))} />}
+      <p className="muted">Sign in with ChatGPT is available only to approved OpenAI partners with registered OAuth credentials. It appears here only when configured.</p>
+    </section></main>;
 }

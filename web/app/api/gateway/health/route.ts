@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const session = await getServerSession(authOptions);
-  if (!session?.user) {
+  if (!session?.user || !Boolean((session as typeof session & { shardsOperator?: boolean }).shardsOperator)) {
     return NextResponse.json({ error: "authentication_required" }, { status: 401 });
   }
   const configured = process.env.SHARDS_GATEWAY_INTERNAL_URL;

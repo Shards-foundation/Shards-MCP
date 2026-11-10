@@ -5,7 +5,7 @@ import { authOptions } from "@/lib/auth";
 import { SignOutButton } from "./signout-button";
 
 const navigation = [
-  { href: "/", title: "Overview", detail: "Gateway status and operational readiness" },
+  { href: "/console", title: "Overview", detail: "Gateway status and operational readiness" },
   { href: "/connections", title: "Connections", detail: "Configure MCP clients and IDEs" },
   { href: "/agents", title: "Agents", detail: "Agent identities and gateway diagnostics" },
   { href: "/tasks", title: "Tasks", detail: "Task execution and worker orchestration" },
@@ -14,10 +14,10 @@ const navigation = [
 
 export async function ConsoleLayout({ children, active }: { children: React.ReactNode; active: string }) {
   const session = await getServerSession(authOptions);
-  if (!session?.user) redirect("/signin");
+  if (!session?.user) redirect("/signin?callbackUrl=%2Fconsole");\n  if (!Boolean((session as typeof session & { shardsOperator?: boolean }).shardsOperator)) redirect("/account?restricted=1");
   return <main className="console-layout">
     <aside className="console-sidebar">
-      <Link href="/" className="console-brand"><span className="brand-mark">S</span><span><strong>SHARDS</strong><small>MCP CONTROL PLANE</small></span></Link>
+      <Link href="/console" className="console-brand"><span className="brand-mark">S</span><span><strong>SHARDS</strong><small>MCP CONTROL PLANE</small></span></Link>
       <div className="sidebar-label">WORKSPACE</div>
       <nav className="console-nav" aria-label="Primary navigation">
         {navigation.map(item => <Link key={item.href} href={item.href} className={active === item.href ? "nav-link active" : "nav-link"} aria-current={active === item.href ? "page" : undefined}>
