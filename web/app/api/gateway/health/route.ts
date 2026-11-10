@@ -1,12 +1,13 @@
 import { getServerSession } from "next-auth";
 import { NextResponse } from "next/server";
 import { authOptions } from "@/lib/auth";
+import { operatorSession } from "@/lib/operator-access";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   const session = await getServerSession(authOptions);
-  if (!session?.user) {
+  if (!operatorSession(session)) {
     return NextResponse.json({ error: "authentication_required" }, { status: 401 });
   }
   const configured = process.env.SHARDS_GATEWAY_INTERNAL_URL;

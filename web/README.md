@@ -78,3 +78,7 @@ ChatGPT is an **MCP client integration**, not a configured OAuth sign-in provide
 5. **Live integrations**: real external OAuth IdP, ChatGPT MCP client validation, and deployment acceptance with backups and alerting.
 
 This first slice is intentionally **not** a production multi-tenant control plane. OAuth credentials, live deployment and integration testing are required before claiming it works on the internet.
+
+### Operator session boundary
+
+All privileged console routes, including `/api/gateway/health` and `/api/gateway/agents`, require a server-issued `shardsOperator: true` session. The JWT stores the stable identity provider + subject, and server callbacks re-evaluate the current `SHARDS_CONSOLE_ALLOWED_IDENTITIES` setting each time; removing a principal from the allowlist denies existing sessions. Other social accounts have **no operator access**. Run `npm test` for the access-contract regressions.
