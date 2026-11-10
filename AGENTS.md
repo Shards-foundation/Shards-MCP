@@ -91,6 +91,10 @@ Hard-stop on a discovered privilege escalation, secret exposure, identity confus
 
 For every material task provide: **goal; branch/SHA/PR; primary and supporting skill; files changed; exact tests and results; negative tests; live-state verification; residual risks; rollback; external approvals still required**. Include links to actual logs where available. Never promise background execution without an explicit persistent automation.
 
+## Cloudflare edge scope
+
+The deployed edge service under `deployment/cloudflare/` is **separate** from the Python gateway. Read [the edge AGENTS.md](deployment/cloudflare/AGENTS.md), its [operations runbook](deployment/cloudflare/README.md) and [the universal client guide](docs/GET_STARTED_UNIVERSAL.md) before editing or deploying it. Client auth tokens and task stores are not federated with the Python gateway. Merging repository source does not deploy a Worker.
+
 ## Skill entry points
 
 - [Skills map](skills/MAP.md) — triggers, ordering, risk classes and script links.

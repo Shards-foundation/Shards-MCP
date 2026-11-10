@@ -158,3 +158,8 @@ python scripts/skill_install.py --client cursor --project-dir . --skill get-star
 Installations never overwrite existing skills, and no scripts inside the copied skills are executed. Other options support Codex, Claude Code and per-user directories.
 
 These read-only utilities **do not** install skills into remote AI products, issue gateway credentials or confirm hosted service readiness. See [release-readiness](skills/release-readiness/SKILL.md) for evidence gates and [the agent onboarding guide](docs/agent-onboarding.md) for separately controlled gateway identities.
+
+
+## Cloudflare MCP Edge — separate hosted service
+
+The [Cloudflare edge source](deployment/cloudflare/README.md) supplies an independent, experimental remote MCP tool subset at `https://mcp.shardsinc.co.uk/mcp`, with [client onboarding](docs/GET_STARTED_UNIVERSAL.md). Its Cloudflare Access operator interface, D1 agent identities, scoped bearer keys, task states and audit are **not federated** with the Python gateway. OAuth 2.1, remote self-service tenancy and parity with the Python gateway remain unverified/not implemented. The [marketplace readiness checklist](docs/MARKETPLACE_READINESS.md) is evidence-gated and does not claim approvals. Source merge does **not** deploy or update the live Cloudflare Worker. See [edge-specific AGENTS.md](deployment/cloudflare/AGENTS.md).

@@ -1,0 +1,92 @@
+name: Edge MCP live acceptance
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "deployment/cloudflare/**"
+      - ".github/workflows/edge-smoke.yml"
+      - "docs/GET_STARTED_UNIVERSAL.md"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  edge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse Worker and embedded client JavaScript
+        run: |
+          set -euo pipefail
+          node --check deployment/cloudflare/worker.js
+          node <<'NODE'
+          const fs=require('node:fs'),vm=require('node:vm');
+          const src=fs.readFileSync('deployment/cloudflare/worker.js','utf8');
+          const match=src.match(/^const CLIENT=("(?:\\.|[^"\\])*");/m);
+          if(!match)throw Error('embedded portal client source missing');
+          const client=JSON.parse(match[1]);
+          new vm.Script(client,{filename:'edge-app.js'});
+          for(const s of ['Claude Desktop','Claude Code','ChatGPT','Codex app','Codex CLI','Cursor app','Cursor CLI','Universal MCP']){
+            if(!client.includes(s))throw Error('Missing client '+s)
+          }
+          console.log('Worker and all 8 client setup modules parse correctly');
+          NODE
+      - name: Isolated edge protocol and quota regression tests
+        run: node --test deployment/cloudflare/worker.test.mjs
+      - name: Verify real website and database status
+        run: |
+          set -euo pipefail
+          curl -fsS --retry 4 --retry-delay 2 -D /tmp/headers https://mcp.shardsinc.co.uk/ -o /tmp/index.html
+          grep -q 'UNIVERSAL\|EVERY AGENT' /tmp/index.html
+          grep -Fi 'content-security-policy:' /tmp/headers
+          grep -Fi 'x-frame-options: DENY' /tmp/headers
+          curl -fsS https://mcp.shardsinc.co.uk/app.js -o /tmp/live-client.js
+          node --check /tmp/live-client.js
+          curl -fsS https://mcp.shardsinc.co.uk/api/status -o /tmp/status.json
+          node -e "const v=require('/tmp/status.json');if(v.db!=='connected'||v.tools.filter(t=>t.public).length!==3||v.tools.filter(t=>!t.public).length!==9||v.authentication.oauth!=='not yet available')process.exit(1)"
+      - name: Verify MCP initialize and tool discovery
+        run: |
+          set -euo pipefail
+          URL=https://mcp.shardsinc.co.uk/mcp
+          curl -fsS -X POST "$URL" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci","version":"1.0"}}}' -o /tmp/init.json
+          node -e "const v=require('/tmp/init.json');if(v.result.protocolVersion!=='2025-11-25'||v.result.serverInfo.name!=='shards-mcp-edge')process.exit(1)"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL" -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","method":"notifications/initialized"}')
+          test "$code" = 202
+          curl -fsS -X POST "$URL" -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' -o /tmp/tools.json
+          node -e "const t=require('/tmp/tools.json').result.tools;if(t.length!==3||!t.some(x=>x.name==='shards_gateway_status')||t.some(x=>x.name==='shards_message_send'))process.exit(1);console.log(t.length+' public MCP tools discovered; private tools correctly hidden')"
+      - name: Verify authenticated tools refuse anonymous access
+        run: |
+          set -euo pipefail
+          URL=https://mcp.shardsinc.co.uk/mcp
+          curl -fsS -X POST "$URL" -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"shards_agent_identity","arguments":{}}}' -o /tmp/anon.json
+          node -e "const j=require('/tmp/anon.json');if(j.result.isError!==true||!j.result.content[0].text.includes('AUTH_REQUIRED'))process.exit(1)"
+          curl -fsS -X POST "$URL" -H 'Content-Type: application/json' -H 'Authorization: Bearer smcp_invalid_unauthorized_token_123456789' \
+            --data '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"shards_task_create","arguments":{}}}' -o /tmp/badtoken.json
+          node -e "const j=require('/tmp/badtoken.json');if(j.result.isError!==true)process.exit(1)"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL" -H 'Content-Type: application/json' \
+            -H 'Origin: https://untrusted.example' --data '{"jsonrpc":"2.0","id":4,"method":"tools/list"}')
+          test "$code" = 403
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "$URL")
+          test "$code" = 405
+      - name: Verify real open tools and modern discovery
+        run: |
+          set -euo pipefail
+          URL=https://mcp.shardsinc.co.uk/mcp
+          curl -fsS -X POST "$URL" -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"shards_gateway_status","arguments":{}}}' -o /tmp/tool-status.json
+          node -e "const j=require('/tmp/tool-status.json');if(j.result.isError!==false||j.result.structuredContent.endpoint!=='https://mcp.shardsinc.co.uk/mcp')process.exit(1)"
+          curl -fsS -X POST "$URL" -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"shards_dns_lookup","arguments":{"domain":"example.com","type":"A"}}}' -o /tmp/dns.json
+          node -e "const j=require('/tmp/dns.json');if(j.result.isError||j.result.structuredContent.domain!=='example.com'||!j.result.structuredContent.records.length)process.exit(1)"
+          curl -fsS -X POST "$URL" -H 'Content-Type: application/json' -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: server/discover' \
+            --data '{"jsonrpc":"2.0","id":7,"method":"server/discover","params":{}}' -o /tmp/modern.json
+          node -e "const j=require('/tmp/modern.json');if(j.result.protocolVersion!=='2026-07-28')process.exit(1)"
+      - name: Verify operator route is not publicly accessible
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /dev/null -w '%{http_code}' https://mcp.shardsinc.co.uk/manage)
+          case "$code" in 301|302|303|307|308|401|403) echo "Management entrypoint protected: HTTP $code";; *) echo "Unexpected public management status HTTP $code"; exit 1;; esac
