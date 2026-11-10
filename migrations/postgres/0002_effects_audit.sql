@@ -258,7 +258,7 @@ REVOKE DELETE, TRUNCATE ON ALL TABLES IN SCHEMA shards_v2 FROM shards_v2_runtime
 GRANT SELECT,DELETE ON shards_v2.edge_request_nonces,
  shards_v2.token_revocations TO shards_v2_maintenance;
 
-DO $
+DO $$
 DECLARE table_name text;
 BEGIN
     FOREACH table_name IN ARRAY ARRAY[

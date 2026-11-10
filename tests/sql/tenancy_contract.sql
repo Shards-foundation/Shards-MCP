@@ -120,18 +120,26 @@ BEGIN
  END;
  BEGIN
    INSERT INTO shards_v2.verifications
-      (org_id,task_id,creator_id,worker_id,verifier_id,decision,evidence_sha256,evidence_json)
+      (org_id,task_id,creator_id,worker_id,verifier_id,decision,evidence_sha256,result_sha256,evidence_json)
    VALUES ('00000000-0000-4000-8000-000000000001','task_a','agt_a_creator','agt_a_worker',
-     'agt_a_same','approved',decode(repeat('11',32),'hex'),'{"verified":false}');
+     'agt_a_same','approved',decode(repeat('11',32),'hex'),sha256(convert_to('{"status": "checked"}'::jsonb::text,'UTF8')),'{"verified":false}');
    RAISE EXCEPTION 'FAIL: same-controller verifier approved';
  EXCEPTION WHEN insufficient_privilege THEN NULL;
  END;
 END $$;
 INSERT INTO shards_v2.verifications
- (org_id,task_id,creator_id,worker_id,verifier_id,decision,evidence_sha256,evidence_json)
+ (org_id,task_id,creator_id,worker_id,verifier_id,decision,evidence_sha256,result_sha256,evidence_json)
  VALUES ('00000000-0000-4000-8000-000000000001','task_a','agt_a_creator','agt_a_worker',
-  'agt_a_verifier','approved',decode(repeat('11',32),'hex'),'{"ci":"independent fixture"}');
+  'agt_a_verifier','approved',decode(repeat('11',32),'hex'),sha256(convert_to('{"status": "checked"}'::jsonb::text,'UTF8')),'{"ci":"independent fixture"}');
 UPDATE shards_v2.tasks SET state='succeeded' WHERE task_id='task_a';
+DO $$
+BEGIN
+ BEGIN
+  UPDATE shards_v2.tasks SET result_json='{"status":"tampered"}' WHERE task_id='task_a';
+  RAISE EXCEPTION 'FAIL: worker changed result after approval';
+ EXCEPTION WHEN insufficient_privilege THEN NULL;
+ END;
+END $$;
 DO $$
 BEGIN
  BEGIN

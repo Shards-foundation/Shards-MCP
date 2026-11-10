@@ -131,6 +131,7 @@ CREATE TABLE shards_v2.verifications (
     verifier_id text NOT NULL,
     decision text NOT NULL CHECK (decision IN ('approved','rejected','self_attested')),
     evidence_sha256 bytea NOT NULL CHECK (octet_length(evidence_sha256) = 32),
+    result_sha256 bytea NOT NULL CHECK (octet_length(result_sha256) = 32),
     evidence_json jsonb NOT NULL,
     verified_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (org_id, task_id),
@@ -147,15 +148,19 @@ DECLARE worker_controller text;
 DECLARE creator_controller text;
 DECLARE verifier_controller text;
 DECLARE task_state text;
+DECLARE verified_result jsonb;
 BEGIN
- SELECT t.state,w.controller_id,c.controller_id,v.controller_id
- INTO task_state,worker_controller,creator_controller,verifier_controller
+ SELECT t.state,t.result_json,w.controller_id,c.controller_id,v.controller_id
+ INTO task_state,verified_result,worker_controller,creator_controller,verifier_controller
  FROM shards_v2.tasks t
  JOIN shards_v2.principals w ON w.org_id=t.org_id AND w.principal_id=t.worker_id
  JOIN shards_v2.principals c ON c.org_id=t.org_id AND c.principal_id=t.creator_id
  JOIN shards_v2.principals v ON v.org_id=t.org_id AND v.principal_id=NEW.verifier_id AND v.state='active'
  WHERE t.org_id=NEW.org_id AND t.task_id=NEW.task_id
    AND t.creator_id=NEW.creator_id AND t.worker_id=NEW.worker_id;
+ IF NEW.result_sha256 IS DISTINCT FROM sha256(convert_to(verified_result::text,'UTF8')) THEN
+   RAISE EXCEPTION 'verifier result hash does not match immutable worker report' USING ERRCODE='23514';
+ END IF;
  IF task_state IS DISTINCT FROM 'reported' THEN
    RAISE EXCEPTION 'only reported tasks may be verified' USING ERRCODE='23514';
  END IF;
@@ -199,6 +204,13 @@ BEGIN
       OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
       OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
      RAISE EXCEPTION 'immutable task intent' USING ERRCODE='42501';
+   END IF;
+   IF OLD.state NOT IN ('queued','running') AND
+      NEW.result_json IS DISTINCT FROM OLD.result_json THEN
+     RAISE EXCEPTION 'reported result is immutable' USING ERRCODE='42501';
+   END IF;
+   IF OLD.state IN ('succeeded','failed','canceled') AND NEW IS DISTINCT FROM OLD THEN
+     RAISE EXCEPTION 'terminal task is immutable' USING ERRCODE='42501';
    END IF;
    IF NEW.state <> OLD.state AND NOT (
        (OLD.state='queued' AND NEW.state IN ('running','canceled')) OR
