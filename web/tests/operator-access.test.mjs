@@ -14,7 +14,9 @@ test("exact provider-scoped identity authorisation and immediate allowlist remov
 test("operator session must contain server-generated exact boolean true", () => {
   assert.equal(operatorSession({ user: { name: "operator" }, shardsOperator: true }), true);
   for (const session of [null, {}, { user: {} }, { user: {}, shardsOperator: "true" },
-    { user: {}, shardsOperator: false }, { user: null, shardsOperator: true }, { shardsOperator: true }]) {
+    { user: {}, shardsOperator: false }, { user: null, shardsOperator: true }, { user: {}, shardsOperator: true },
+    { user: [], shardsOperator: true }, { user: { name: "  " }, shardsOperator: true },
+    { shardsOperator: true }]) {
     assert.equal(operatorSession(session), false);
   }
 });

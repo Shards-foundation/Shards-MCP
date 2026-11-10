@@ -5,8 +5,11 @@ export function approvedOperator(identity: unknown, configured: string | undefin
 }
 
 export function operatorSession(session: unknown): boolean {
-  return typeof session === "object" && session !== null &&
-    !Array.isArray(session) && (session as { shardsOperator?: unknown }).shardsOperator === true &&
-    (session as { user?: unknown }).user !== null &&
-    typeof (session as { user?: unknown }).user === "object";
+  if (typeof session !== "object" || session === null || Array.isArray(session)) return false;
+  const value = session as { shardsOperator?: unknown; user?: unknown };
+  if (value.shardsOperator !== true || typeof value.user !== "object" ||
+      value.user === null || Array.isArray(value.user)) return false;
+  const user = value.user as { email?: unknown; name?: unknown };
+  return (typeof user.email === "string" && user.email.trim().length > 0) ||
+    (typeof user.name === "string" && user.name.trim().length > 0);
 }
