@@ -4,6 +4,12 @@ on:
     paths:
       - "migrations/postgres/**"
       - "tests/sql/**"
+      - "src/shards_mcp/tenancy_v2.py"
+      - "tests/test_tenancy_v2.py"
+      - "pyproject.toml"
+      - "src/shards_mcp/tenancy_v2.py"
+      - "tests/test_tenancy_v2.py"
+      - "pyproject.toml"
       - "docs/adr/0002-python-authoritative-tenancy.md"
       - "docs/tenancy-migration-plan.md"
       - ".github/workflows/tenancy-schema.yml"
@@ -49,3 +55,11 @@ jobs:
           psql -X -v ON_ERROR_STOP=1 -f migrations/postgres/0002_effects_audit.sql
       - name: Verify non-owner RLS, FK, audit and outbox denial contracts
         run: psql -X -v ON_ERROR_STOP=1 -f tests/sql/tenancy_contract.sql
+      - name: Provision isolated runtime membership fixture
+        run: psql -X -v ON_ERROR_STOP=1 -f tests/sql/tenant_runtime_fixture.sql
+      - name: Install Python Postgres client
+        run: python -m pip install "psycopg[binary]>=3.2,<4"
+      - name: Verify tenant-authority transaction against real PostgreSQL
+        env:
+          SHARDS_V2_PG_DSN: postgresql://shards_ci_v2_runtime:synthetic-v2-runtime-password@127.0.0.1:5432/shards_contract_ci
+        run: PYTHONPATH=src python -m unittest discover -s tests -p 'test_tenancy_v2.py' -v
