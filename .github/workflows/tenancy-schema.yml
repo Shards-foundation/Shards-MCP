@@ -1,0 +1,51 @@
+name: Authority v2 tenancy schema contract
+on:
+  pull_request:
+    paths:
+      - "migrations/postgres/**"
+      - "tests/sql/**"
+      - "docs/adr/0002-python-authoritative-tenancy.md"
+      - "docs/tenancy-migration-plan.md"
+      - ".github/workflows/tenancy-schema.yml"
+  push:
+    branches: [main]
+    paths:
+      - "migrations/postgres/**"
+      - "tests/sql/**"
+      - ".github/workflows/tenancy-schema.yml"
+permissions:
+  contents: read
+jobs:
+  tenant-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: shards_contract_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: synthetic-contract-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d shards_contract_ci"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      PGUSER: postgres
+      PGDATABASE: shards_contract_ci
+      PGPASSWORD: synthetic-contract-test-password
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: PostgreSQL client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+      - name: Apply isolated authority v2 migrations
+        run: |
+          psql -X -v ON_ERROR_STOP=1 -f migrations/postgres/0001_tenancy.sql
+          psql -X -v ON_ERROR_STOP=1 -f migrations/postgres/0002_effects_audit.sql
+      - name: Verify non-owner RLS, FK, audit and outbox denial contracts
+        run: psql -X -v ON_ERROR_STOP=1 -f tests/sql/tenancy_contract.sql
