@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CLIENTS, MCP_ENDPOINT, clientPayload, clientSteps } from "../lib/connectors.ts";
+import { CLIENTS, MCP_ENDPOINT, clientPayload, clientSteps, cursorInstallUrl } from "../lib/connectors.ts";
 
 test("all seven client integrations have actionable instructions", () => {
   assert.equal(CLIENTS.length, 7);
@@ -20,4 +20,17 @@ test("supported CLI syntax and endpoint", () => {
   assert.match(clientPayload("codex-cli"), /^codex mcp add shards --url/);
   assert.equal(clientPayload("chatgpt"), MCP_ENDPOINT);
   assert.equal(clientPayload("claude-desktop"), MCP_ENDPOINT);
+});
+
+test("Cursor native install link encodes only a bare server entry", () => {
+  const link = new URL(cursorInstallUrl());
+  assert.equal(link.protocol, "cursor:");
+  assert.equal(link.searchParams.get("name"), "shards");
+  const config = JSON.parse(Buffer.from(link.searchParams.get("config") ?? "", "base64").toString("utf8"));
+  assert.deepEqual(config, { url: MCP_ENDPOINT });
+});
+
+test("Codex onboarding never advertises an unavailable edge OAuth login command", () => {
+  assert.equal(clientPayload("codex-cli").includes("codex mcp login"), false);
+  assert.match(clientSteps("codex-app").join(" "), /Private tools remain unavailable/);
 });

@@ -74,3 +74,8 @@ This first slice is intentionally **not** a production multi-tenant control plan
 Provider production callback URLs on the **web origin** are `https://<web-origin>/api/auth/callback/google`, `/github`, `/discord`, `/apple` and (only with approved credentials) `/chatgpt`. Set `NEXTAUTH_URL` to the exact front-end origin, `NEXTAUTH_SECRET` to a strong random secret, and register each callback with the provider.
 
 See [connectivity launch gates](../docs/connectivity-launch-gates.md).
+
+
+### Authentication compatibility note
+
+The deployed Cloudflare Edge at `mcp.shardsinc.co.uk` currently supports three unauthenticated read-only discovery tools, plus operator-provisioned bearer keys for its private tools. It does **not** yet implement an MCP OAuth authorization server. Codex, Cursor, ChatGPT and Claude client setup instructions therefore intentionally do **not** issue `codex mcp login` or other OAuth login instructions as a mandatory step. An imported connector URL alone does not prove that private tools are usable.
