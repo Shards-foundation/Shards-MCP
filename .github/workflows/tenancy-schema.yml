@@ -12,6 +12,7 @@ on:
     branches: [main]
     paths:
       - "migrations/postgres/**"
+      - "infra/postgres/bootstrap_roles.sql"
       - "tests/sql/**"
       - ".github/workflows/tenancy-schema.yml"
 permissions:
@@ -59,6 +60,13 @@ jobs:
           psql -X -v ON_ERROR_STOP=1 -f migrations/postgres/0002_effects_audit.sql
           createdb shards_contract_ci_second
           PGDATABASE=shards_contract_ci_second psql -X -v ON_ERROR_STOP=1 -f migrations/postgres/0001_tenancy.sql
+          # Attack: existing LOGIN runtime role MUST fail closed before grants.
+          psql -X -v ON_ERROR_STOP=1 -c "ALTER ROLE shards_v2_runtime LOGIN"
+          if PGDATABASE=shards_contract_ci_second psql -X -v ON_ERROR_STOP=1 \
+             -f migrations/postgres/0002_effects_audit.sql; then
+            echo 'FAIL: insecure pre-existing role was accepted'; exit 1
+          fi
+          psql -X -v ON_ERROR_STOP=1 -c "ALTER ROLE shards_v2_runtime NOLOGIN"
           PGDATABASE=shards_contract_ci_second psql -X -v ON_ERROR_STOP=1 -f migrations/postgres/0002_effects_audit.sql
       - name: Verify non-owner RLS, FK, audit and outbox denial contracts
         run: psql -X -v ON_ERROR_STOP=1 -f tests/sql/tenancy_contract.sql

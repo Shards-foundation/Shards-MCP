@@ -377,10 +377,19 @@ FOR EACH STATEMENT EXECUTE FUNCTION shards_v2.reject_audit_mutation();
 -- Cluster-global roles must be provisioned outside database migrations.
 DO $roles$
 BEGIN
- IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shards_v2_runtime')
-    OR NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shards_v2_maintenance')
-    OR NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shards_v2_verifier') THEN
-    RAISE EXCEPTION 'missing v2 roles; provision with infra/postgres/bootstrap_roles.sql';
+ -- Fail closed if an existing account has LOGIN, BYPASSRLS, escalation
+ -- attributes, inherited powers or outgoing role memberships. Role existence
+ -- alone is insufficient; managed PostgreSQL must supply equivalent roles.
+ IF (SELECT count(*) FROM pg_roles
+      WHERE rolname IN ('shards_v2_runtime','shards_v2_maintenance','shards_v2_verifier')
+       AND NOT (rolsuper OR rolbypassrls OR rolcanlogin OR rolcreaterole
+                OR rolcreatedb OR rolreplication OR rolinherit)) <> 3
+    OR EXISTS(
+       SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member
+        WHERE r.rolname IN ('shards_v2_runtime','shards_v2_maintenance','shards_v2_verifier')
+    ) THEN
+    RAISE EXCEPTION 'missing or insecure v2 roles; verify operator bootstrap'
+      USING ERRCODE='42501';
  END IF;
 END
 $roles$;
