@@ -244,14 +244,26 @@ BEGIN
    IF NEW.state <> OLD.state AND NOT (
        (OLD.state='queued' AND NEW.state IN ('running','canceled')) OR
        (OLD.state='running' AND NEW.state IN ('reported','failed','needs_reconciliation')) OR
-       (OLD.state='reported' AND NEW.state IN ('succeeded','failed','needs_reconciliation')) OR
-       (OLD.state='needs_reconciliation' AND NEW.state='failed')
+       (OLD.state='reported' AND NEW.state IN ('succeeded','failed','needs_reconciliation'))
    ) THEN
      RAISE EXCEPTION 'illegal task state transition' USING ERRCODE='23514';
    END IF;
    IF NEW.state='reported' AND NEW.result_json IS NULL THEN
      RAISE EXCEPTION 'worker report requires a result' USING ERRCODE='23514';
    END IF;
+   -- Close only after every provider effect is confirmed, canceled or reconciled.
+   -- Task row lock serialises close with outbox initiation/dispatch.
+   IF NEW.state<>OLD.state AND NEW.state IN ('succeeded','failed','canceled')
+      AND EXISTS (
+       SELECT 1 FROM shards_v2.effect_outbox o
+        WHERE o.org_id=NEW.org_id AND o.task_id=NEW.task_id
+          AND o.state IN ('pending','dispatching','needs_reconciliation')
+      ) THEN
+       RAISE EXCEPTION 'task cannot close over unresolved external effects'
+          USING ERRCODE='23514';
+   END IF;
+   -- No direct resolution of needs_reconciliation: it is quarantined until a
+   -- separately audited provider-evidence reconciliation API is implemented.
    IF NEW.state='succeeded' AND NOT EXISTS (
       SELECT 1 FROM shards_v2.verifications v
       WHERE v.org_id=NEW.org_id AND v.task_id=NEW.task_id AND v.decision='approved'

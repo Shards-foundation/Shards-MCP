@@ -27,8 +27,22 @@ CREATE TABLE shards_v2.effect_outbox (
     CHECK (state <> 'confirmed' OR provider_receipt IS NOT NULL),
     CHECK (state <> 'reconciled' OR reconciliation_evidence IS NOT NULL)
 );
+CREATE INDEX effect_outbox_task_open ON shards_v2.effect_outbox(org_id,task_id,state);
 CREATE INDEX effect_outbox_claim ON shards_v2.effect_outbox(org_id, state, created_at)
     WHERE state IN ('pending','dispatching','needs_reconciliation');
+
+-- Serialize effect insertion/first dispatch with task-state writes.
+CREATE FUNCTION shards_v2.lock_dispatchable_task(p_org uuid,p_task text)
+RETURNS void LANGUAGE plpgsql AS $body$
+DECLARE current_state text;
+BEGIN
+ SELECT t.state INTO current_state FROM shards_v2.tasks t
+  WHERE t.org_id=p_org AND t.task_id=p_task FOR UPDATE;
+ IF current_state IS DISTINCT FROM 'running' THEN
+  RAISE EXCEPTION 'effect initiation requires running parent task' USING ERRCODE='23514';
+ END IF;
+END
+$body$;
 
 -- No direct reset of uncertain effects; terminal records are immutable.
 -- The provider outcome must be reconciled independently before creating a
@@ -45,6 +59,9 @@ BEGIN
        NEW.payload_sha256 IS DISTINCT FROM OLD.payload_sha256 OR
        NEW.payload_vault_ref IS DISTINCT FROM OLD.payload_vault_ref THEN
         RAISE EXCEPTION 'outbox intent is immutable' USING ERRCODE = '42501';
+    END IF;
+    IF NEW.state='dispatching' AND OLD.state='pending' THEN
+        PERFORM shards_v2.lock_dispatchable_task(NEW.org_id,NEW.task_id);
     END IF;
     IF OLD.state IN ('confirmed','reconciled','canceled') THEN
         RAISE EXCEPTION 'terminal outbox record cannot be updated'
@@ -74,6 +91,7 @@ FOR EACH ROW EXECUTE FUNCTION shards_v2.enforce_outbox_transition();
 CREATE FUNCTION shards_v2.enforce_outbox_insert() RETURNS trigger
 LANGUAGE plpgsql AS $body$
 BEGIN
+    PERFORM shards_v2.lock_dispatchable_task(NEW.org_id,NEW.task_id);
     IF NEW.state <> 'pending' OR NEW.provider_receipt IS NOT NULL OR
        NEW.reconciliation_evidence IS NOT NULL OR NEW.dispatch_attempts <> 0 THEN
         RAISE EXCEPTION 'new outbox intent must begin pending and unexecuted'
@@ -242,9 +260,16 @@ FOR EACH STATEMENT EXECUTE FUNCTION shards_v2.reject_audit_mutation();
 -- Only trusted gateway processes may be granted the NOLOGIN runtime role.
 -- No browser, agent, tool, or arbitrary SQL account gets membership in it.
 -- Separate enrolment and retention privileges from the runtime role.
-CREATE ROLE shards_v2_runtime NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
-CREATE ROLE shards_v2_maintenance NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
-CREATE ROLE shards_v2_verifier NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS;
+-- Cluster-global roles must be provisioned outside database migrations.
+DO $roles$
+BEGIN
+ IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shards_v2_runtime')
+    OR NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shards_v2_maintenance')
+    OR NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='shards_v2_verifier') THEN
+    RAISE EXCEPTION 'missing v2 roles; provision with infra/postgres/bootstrap_roles.sql';
+ END IF;
+END
+$roles$;
 REVOKE ALL ON SCHEMA shards_v2 FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA shards_v2 FROM PUBLIC;
 GRANT USAGE ON SCHEMA shards_v2 TO shards_v2_runtime, shards_v2_maintenance, shards_v2_verifier;
