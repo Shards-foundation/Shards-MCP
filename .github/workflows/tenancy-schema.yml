@@ -70,3 +70,5 @@ jobs:
           PGDATABASE=shards_contract_ci_second psql -X -v ON_ERROR_STOP=1 -f migrations/postgres/0002_effects_audit.sql
       - name: Verify non-owner RLS, FK, audit and outbox denial contracts
         run: psql -X -v ON_ERROR_STOP=1 -f tests/sql/tenancy_contract.sql
+      - name: Deterministic two-session task/effect row-lock race
+        run: python tests/sql/race_contract.py
