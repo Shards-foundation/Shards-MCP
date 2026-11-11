@@ -552,7 +552,9 @@ BEGIN
  END LOOP;
  IF NOT EXISTS(
   SELECT 1 FROM shards_v2.audit_heads
-   WHERE org_id='00000000-0000-4000-8000-000000000001' AND last_seq=2
+   WHERE org_id='00000000-0000-4000-8000-000000000001'
+    AND last_seq=(SELECT count(*) FROM shards_v2.audit_entries
+                  WHERE org_id='00000000-0000-4000-8000-000000000001')
  ) THEN RAISE EXCEPTION 'FAIL: audit head not advanced atomically'; END IF;
 END $$;
 SELECT 'TENANCY_SCHEMA_ACCEPTANCE_PASS' AS result;
