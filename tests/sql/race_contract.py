@@ -50,14 +50,21 @@ def held_session(statement: str, marker: str) -> subprocess.Popen[str]:
     assert process.stdin and process.stdout
     process.stdin.write(statement.strip() + "\n\\echo " + marker + "\n")
     process.stdin.flush()
+    # Do not mix select() on the OS fd with buffered TextIOWrapper.readline():
+    # readline may prefetch the marker while select reports no more fd bytes.
+    fd = process.stdout.fileno()
+    received = b""
     deadline = time.monotonic() + TIMEOUT
     while time.monotonic() < deadline:
-        ready, _, _ = select.select([process.stdout], [], [], 0.2)
+        ready, _, _ = select.select([fd], [], [], 0.2)
         if ready:
-            line = process.stdout.readline().strip()
-            if line == marker:
+            chunk = os.read(fd, 4096)
+            received += chunk
+            if marker.encode("ascii") in received.splitlines():
                 return process
-        if process.poll() is not None:
+            if not chunk and process.poll() is not None:
+                raise AssertionError(f"session exited before lock marker {marker}")
+        elif process.poll() is not None:
             raise AssertionError(f"session exited before lock marker {marker}")
     process.kill()
     raise AssertionError(f"session did not acquire lock for {marker}")
