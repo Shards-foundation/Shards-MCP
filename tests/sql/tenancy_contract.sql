@@ -198,13 +198,45 @@ BEGIN
  END;
 END $$;
 
+-- A task with no effects must not leave reconciliation without evidence.
+DO $unverified_resolution$
+BEGIN
+ BEGIN
+  UPDATE shards_v2.tasks SET state='failed' WHERE task_id='task_uncertain';
+  RAISE EXCEPTION 'FAIL: task resolved without provider reconciliation';
+ EXCEPTION WHEN check_violation THEN NULL;
+ END;
+END $unverified_resolution$;
+
+-- Use a separate live task for effect lifecycle. A terminal task can never
+-- gain a new effect (prevents post-closure dispatch from racing a task close).
+DO $late_effect$
+BEGIN
+ BEGIN
+  INSERT INTO shards_v2.effect_outbox
+   (org_id,task_id,actor_id,connector,idempotency_key,payload_sha256,payload_vault_ref)
+  VALUES ('00000000-0000-4000-8000-000000000001',
+   'task_a','agt_a_worker','github-pr','post-success',
+   decode(repeat('aa',32),'hex'),'vault://ci/no-secret');
+  RAISE EXCEPTION 'FAIL: external effect appended after task success';
+ EXCEPTION WHEN check_violation THEN NULL;
+ END;
+END $late_effect$;
+
+INSERT INTO shards_v2.tasks
+ (org_id,task_id,creator_id,worker_id,input_json,payload_sha256)
+VALUES ('00000000-0000-4000-8000-000000000001','task_effect',
+ 'agt_a_creator','agt_a_worker','{"action":"provider-effect"}',
+ sha256(convert_to('{"action":"provider-effect"}','UTF8')));
+UPDATE shards_v2.tasks SET state='running' WHERE task_id='task_effect';
+
 -- Outbox default is pending. Forged directly dispatched rows fail.
 DO $$
 BEGIN
  BEGIN
    INSERT INTO shards_v2.effect_outbox
       (org_id,task_id,actor_id,connector,idempotency_key,payload_sha256,payload_vault_ref,state)
-    VALUES ('00000000-0000-4000-8000-000000000001','task_a','agt_a_worker',
+    VALUES ('00000000-0000-4000-8000-000000000001','task_effect','agt_a_worker',
     'github-pr','bad',decode(repeat('aa',32),'hex'),'vault://ci/no-secret','dispatching');
    RAISE EXCEPTION 'FAIL: directly dispatched outbox insert accepted';
  EXCEPTION WHEN check_violation THEN NULL;
@@ -213,12 +245,37 @@ END $$;
 INSERT INTO shards_v2.effect_outbox
  (org_id,effect_id,task_id,actor_id,connector,idempotency_key,payload_sha256,payload_vault_ref)
  VALUES ('00000000-0000-4000-8000-000000000001',
- '00000000-0000-4000-8000-000000001111','task_a','agt_a_worker',
+ '00000000-0000-4000-8000-000000001111','task_effect','agt_a_worker',
  'github-pr','stable-effect-idem',decode(repeat('aa',32),'hex'),'vault://ci/no-secret');
+DO $pending_effect_close$
+BEGIN
+ BEGIN
+  UPDATE shards_v2.tasks SET state='failed' WHERE task_id='task_effect';
+  RAISE EXCEPTION 'FAIL: task closed over pending effect';
+ EXCEPTION WHEN check_violation THEN NULL;
+ END;
+END $pending_effect_close$;
 UPDATE shards_v2.effect_outbox SET state='dispatching'
  WHERE effect_id='00000000-0000-4000-8000-000000001111';
+DO $dispatching_effect_close$
+BEGIN
+ BEGIN
+  UPDATE shards_v2.tasks SET state='failed' WHERE task_id='task_effect';
+  RAISE EXCEPTION 'FAIL: task closed over dispatching effect';
+ EXCEPTION WHEN check_violation THEN NULL;
+ END;
+END $dispatching_effect_close$;
 UPDATE shards_v2.effect_outbox SET state='needs_reconciliation'
  WHERE effect_id='00000000-0000-4000-8000-000000001111';
+DO $uncertain_effect_close$
+BEGIN
+ BEGIN
+  UPDATE shards_v2.tasks SET state='failed' WHERE task_id='task_effect';
+  RAISE EXCEPTION 'FAIL: task closed over uncertain effect';
+ EXCEPTION WHEN check_violation THEN NULL;
+ END;
+END $uncertain_effect_close$;
+
 DO $$
 BEGIN
  BEGIN
@@ -237,6 +294,8 @@ END $$;
 UPDATE shards_v2.effect_outbox
   SET state='reconciled',reconciliation_evidence='{"provider":"checked","status":"unexecuted"}'
   WHERE effect_id='00000000-0000-4000-8000-000000001111';
+-- After independent provider-evidence reconciliation, a live task may fail.
+UPDATE shards_v2.tasks SET state='failed' WHERE task_id='task_effect';
 
 -- A delivered message cannot be rewritten, and an acknowledgment is one-way.
 INSERT INTO shards_v2.messages
@@ -291,84 +350,84 @@ BEGIN
  END;
 END $request_replay$;
 
--- Audit chain test: construct canonical bytes independently and append #1.
-WITH c AS (
- SELECT convert_to(jsonb_build_object('version',2,'org_id','00000000-0000-4000-8000-000000000001',
-   'seq',1,'actor_id','agt_a_creator','action','fixture.a','subject_id','task_a',
-   'details','{"test":true}'::jsonb)::text,'UTF8') AS canonical
-), p AS (
- SELECT canonical,decode(repeat('00',32),'hex') AS prev FROM c
-)
-INSERT INTO shards_v2.audit_entries
- (org_id,seq,actor_id,action,subject_id,details_json,canonical_record,previous_sha256,entry_sha256)
-SELECT '00000000-0000-4000-8000-000000000001',1,'agt_a_creator','fixture.a','task_a',
- '{"test":true}',canonical,prev,sha256(prev || canonical) FROM p;
-
-DO $$
+-- Audit completeness and truth: only schema-owned business triggers append.
+-- The runtime account cannot create even a cryptographically well-formed
+-- arbitrary verification.approved event.
+DO $audit_integrity$
+DECLARE n bigint; h record;
 BEGIN
- BEGIN
-  UPDATE shards_v2.audit_heads SET last_seq=99
-   WHERE org_id='00000000-0000-4000-8000-000000000001';
-  RAISE EXCEPTION 'FAIL: forged audit head accepted';
- EXCEPTION WHEN insufficient_privilege THEN NULL;
- END;
+ SELECT count(*) INTO n FROM shards_v2.audit_entries
+  WHERE org_id='00000000-0000-4000-8000-000000000001';
+ IF n < 13 THEN
+   RAISE EXCEPTION 'FAIL: missing automatic business-event audit entries (% found)',n;
+ END IF;
+ IF (SELECT count(*) FROM shards_v2.audit_entries
+      WHERE action='task.created' AND subject_id IN
+       ('task_a','task_uncertain','task_effect')) <> 3 THEN
+   RAISE EXCEPTION 'FAIL: missing task-created audit events';
+ END IF;
+ IF (SELECT count(*) FROM shards_v2.audit_entries
+      WHERE action='task.updated' AND subject_id='task_a') < 3 THEN
+   RAISE EXCEPTION 'FAIL: missing task transition audit events';
+ END IF;
+ IF (SELECT count(*) FROM shards_v2.audit_entries
+      WHERE action='effect.created' AND subject_id='task_effect') <> 1 OR
+    (SELECT count(*) FROM shards_v2.audit_entries
+      WHERE action='effect.updated' AND subject_id='task_effect') <> 3 THEN
+   RAISE EXCEPTION 'FAIL: effect lifecycle audit incomplete';
+ END IF;
+ IF (SELECT count(*) FROM shards_v2.audit_entries
+      WHERE action='verification.approved' AND subject_id='task_a'
+        AND actor_id='agt_a_verifier') <> 1 THEN
+   RAISE EXCEPTION 'FAIL: independent approval not audited';
+ END IF;
+ SELECT last_seq,head_sha256 INTO STRICT h FROM shards_v2.audit_heads
+  WHERE org_id='00000000-0000-4000-8000-000000000001';
+ IF h.last_seq<>n OR h.head_sha256 IS DISTINCT FROM
+    (SELECT entry_sha256 FROM shards_v2.audit_entries
+      WHERE org_id='00000000-0000-4000-8000-000000000001'
+      ORDER BY seq DESC LIMIT 1) THEN
+   RAISE EXCEPTION 'FAIL: tenant head does not match actual entries';
+ END IF;
+ IF EXISTS (
+   SELECT 1 FROM (
+     SELECT a.*,row_number() OVER (ORDER BY a.seq) AS expected_seq,
+      coalesce(lag(a.entry_sha256) OVER (ORDER BY a.seq),
+        decode(repeat('00',32),'hex')) AS expected_previous
+     FROM shards_v2.audit_entries a
+     WHERE a.org_id='00000000-0000-4000-8000-000000000001'
+   ) links
+   WHERE links.seq<>links.expected_seq
+    OR links.previous_sha256<>links.expected_previous
+    OR links.entry_sha256<>sha256(links.previous_sha256 || links.canonical_record)
+    OR links.canonical_record<>convert_to(jsonb_build_object(
+       'version',links.canonical_version,'org_id',links.org_id::text,
+       'seq',links.seq,'actor_id',links.actor_id,'action',links.action,
+       'subject_id',links.subject_id,'details',links.details_json)::text,'UTF8')
+ ) THEN
+   RAISE EXCEPTION 'FAIL: auto-generated audit chain invalid';
+ END IF;
+END $audit_integrity$;
+
+DO $audit_forgery$
+BEGIN
  BEGIN
   INSERT INTO shards_v2.audit_entries
-   (org_id,seq,actor_id,action,subject_id,details_json,canonical_record,previous_sha256,entry_sha256)
-   VALUES ('00000000-0000-4000-8000-000000000001',99,'agt_a_creator','forged','task_a',
-    '{}',convert_to('forged','UTF8'),decode(repeat('00',32),'hex'),decode(repeat('ee',32),'hex'));
-  RAISE EXCEPTION 'FAIL: invalid sequence/hash accepted';
- EXCEPTION WHEN check_violation THEN NULL;
- END;
- BEGIN
-  DELETE FROM shards_v2.audit_entries WHERE seq=1;
-  RAISE EXCEPTION 'FAIL: audit delete accepted';
+   (org_id,seq,actor_id,action,subject_id,details_json,
+    canonical_record,previous_sha256,entry_sha256)
+  SELECT a.org_id,a.last_seq+1,'agt_a_worker','verification.approved',
+    'task_uncertain','{"invented":true}'::jsonb,convert_to('{}','UTF8'),
+    a.head_sha256,sha256(a.head_sha256 || convert_to('{}','UTF8'))
+   FROM shards_v2.audit_heads a;
+  RAISE EXCEPTION 'FAIL: runtime forged approval event';
  EXCEPTION WHEN insufficient_privilege THEN NULL;
  END;
-END $$;
-
-
--- Audit chain: reject the three independent ways a purported second link can lie.
-DO $prev_mismatch$
-BEGIN
  BEGIN
-  INSERT INTO shards_v2.audit_entries (org_id,seq,actor_id,action,subject_id,details_json,canonical_record,previous_sha256,entry_sha256)
-SELECT '00000000-0000-4000-8000-000000000001',2,'agt_a_creator','fixture.b','task_a','{"test":"two"}',convert_to(jsonb_build_object('version',2,'org_id','00000000-0000-4000-8000-000000000001','seq',2,'actor_id','agt_a_creator','action','fixture.b','subject_id','task_a','details','{"test":"two"}'::jsonb)::text,'UTF8'),decode(repeat('00',32),'hex'),sha256(decode(repeat('00',32),'hex') || convert_to(jsonb_build_object('version',2,'org_id','00000000-0000-4000-8000-000000000001','seq',2,'actor_id','agt_a_creator','action','fixture.b','subject_id','task_a','details','{"test":"two"}'::jsonb)::text,'UTF8'))
-FROM shards_v2.audit_entries e WHERE e.org_id='00000000-0000-4000-8000-000000000001' AND e.seq=1;
-  RAISE EXCEPTION 'FAIL: wrong previous chain hash was accepted';
- EXCEPTION WHEN check_violation THEN NULL;
+  UPDATE shards_v2.audit_heads SET last_seq=999;
+  RAISE EXCEPTION 'FAIL: runtime rewrote tenant audit head';
+ EXCEPTION WHEN insufficient_privilege THEN NULL;
  END;
-END $prev_mismatch$;
-DO $digest_mismatch$
-BEGIN
- BEGIN
-  INSERT INTO shards_v2.audit_entries (org_id,seq,actor_id,action,subject_id,details_json,canonical_record,previous_sha256,entry_sha256)
-SELECT '00000000-0000-4000-8000-000000000001',2,'agt_a_creator','fixture.b','task_a','{"test":"two"}',convert_to(jsonb_build_object('version',2,'org_id','00000000-0000-4000-8000-000000000001','seq',2,'actor_id','agt_a_creator','action','fixture.b','subject_id','task_a','details','{"test":"two"}'::jsonb)::text,'UTF8'),e.entry_sha256,decode(repeat('ef',32),'hex')
-FROM shards_v2.audit_entries e WHERE e.org_id='00000000-0000-4000-8000-000000000001' AND e.seq=1;
-  RAISE EXCEPTION 'FAIL: forged digest was accepted';
- EXCEPTION WHEN check_violation THEN NULL;
- END;
-END $digest_mismatch$;
-DO $canon_mismatch$
-BEGIN
- BEGIN
-  INSERT INTO shards_v2.audit_entries (org_id,seq,actor_id,action,subject_id,details_json,canonical_record,previous_sha256,entry_sha256)
-SELECT '00000000-0000-4000-8000-000000000001',2,'agt_a_creator','fixture.b','task_a','{"test":"two"}',convert_to('forged','UTF8'),e.entry_sha256,sha256(e.entry_sha256 || convert_to('forged','UTF8'))
-FROM shards_v2.audit_entries e WHERE e.org_id='00000000-0000-4000-8000-000000000001' AND e.seq=1;
-  RAISE EXCEPTION 'FAIL: forged canonical bytes was accepted';
- EXCEPTION WHEN check_violation THEN NULL;
- END;
-END $canon_mismatch$;
-
--- A correctly linked second entry advances the tenant head atomically.
-WITH predecessor AS (
- SELECT entry_sha256 AS prev FROM shards_v2.audit_entries
- WHERE org_id='00000000-0000-4000-8000-000000000001' AND seq=1
-), content AS (
- SELECT prev,convert_to(jsonb_build_object('version',2,'org_id','00000000-0000-4000-8000-000000000001','seq',2,'actor_id','agt_a_creator','action','fixture.b','subject_id','task_a','details','{"test":"two"}'::jsonb)::text,'UTF8') AS body FROM predecessor
-)
-INSERT INTO shards_v2.audit_entries (org_id,seq,actor_id,action,subject_id,details_json,canonical_record,previous_sha256,entry_sha256)
-SELECT '00000000-0000-4000-8000-000000000001',2,'agt_a_creator','fixture.b','task_a','{"test":"two"}',body,prev,sha256(prev || body) FROM content;
+END $audit_forgery$;
 
 -- Replay assertion JTI is unique across organisations, even when scoped.
 INSERT INTO shards_v2.edge_request_nonces
@@ -424,6 +483,33 @@ BEGIN
 END $maintenance$;
 COMMIT;
 RESET ROLE;
+
+-- The signer role (not the runtime) may only build a structurally valid
+-- receipt against this task's *actual* approval by this verifier with this
+-- evidence digest. Signature bytes here are fake test fixtures.
+DO $receipt_link$
+DECLARE seq_task bigint; seq_approval bigint;
+BEGIN
+ SELECT seq INTO STRICT seq_task FROM shards_v2.audit_entries
+  WHERE action='task.created' AND subject_id='task_a';
+ SELECT seq INTO STRICT seq_approval FROM shards_v2.audit_entries
+  WHERE action='verification.approved' AND subject_id='task_a'
+    AND actor_id='agt_a_verifier';
+ BEGIN
+  INSERT INTO shards_v2.governance_receipts
+   (org_id,task_id,verifier_id,audit_seq,evidence_sha256,signer_key_ref,signature)
+  VALUES ('00000000-0000-4000-8000-000000000001',
+    'task_a','agt_a_verifier',seq_task,decode(repeat('11',32),'hex'),
+    'vault://ci/fixture-signer',decode('deadbeef','hex'));
+  RAISE EXCEPTION 'FAIL: unrelated audit entry accepted as approval receipt';
+ EXCEPTION WHEN foreign_key_violation THEN NULL;
+ END;
+ INSERT INTO shards_v2.governance_receipts
+  (org_id,task_id,verifier_id,audit_seq,evidence_sha256,signer_key_ref,signature)
+ VALUES ('00000000-0000-4000-8000-000000000001',
+    'task_a','agt_a_verifier',seq_approval,decode(repeat('11',32),'hex'),
+    'vault://ci/fixture-signer',decode('deadbeef','hex'));
+END $receipt_link$;
 
 -- DDL owner is still blocked by statement-level TRUNCATE protections.
 DO $$
