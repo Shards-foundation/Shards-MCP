@@ -354,7 +354,7 @@ END $request_replay$;
 -- The runtime account cannot create even a cryptographically well-formed
 -- arbitrary verification.approved event.
 DO $audit_integrity$
-DECLARE n bigint; h record;
+DECLARE n bigint;
 BEGIN
  SELECT count(*) INTO n FROM shards_v2.audit_entries
   WHERE org_id='00000000-0000-4000-8000-000000000001';
@@ -381,14 +381,7 @@ BEGIN
         AND actor_id='agt_a_verifier') <> 1 THEN
    RAISE EXCEPTION 'FAIL: independent approval not audited';
  END IF;
- SELECT last_seq,head_sha256 INTO STRICT h FROM shards_v2.audit_heads
-  WHERE org_id='00000000-0000-4000-8000-000000000001';
- IF h.last_seq<>n OR h.head_sha256 IS DISTINCT FROM
-    (SELECT entry_sha256 FROM shards_v2.audit_entries
-      WHERE org_id='00000000-0000-4000-8000-000000000001'
-      ORDER BY seq DESC LIMIT 1) THEN
-   RAISE EXCEPTION 'FAIL: tenant head does not match actual entries';
- END IF;
+
  IF EXISTS (
    SELECT 1 FROM (
      SELECT a.*,row_number() OVER (ORDER BY a.seq) AS expected_seq,
@@ -415,10 +408,10 @@ BEGIN
   INSERT INTO shards_v2.audit_entries
    (org_id,seq,actor_id,action,subject_id,details_json,
     canonical_record,previous_sha256,entry_sha256)
-  SELECT a.org_id,a.last_seq+1,'agt_a_worker','verification.approved',
+  SELECT a.org_id,a.seq+1,'agt_a_worker','verification.approved',
     'task_uncertain','{"invented":true}'::jsonb,convert_to('{}','UTF8'),
-    a.head_sha256,sha256(a.head_sha256 || convert_to('{}','UTF8'))
-   FROM shards_v2.audit_heads a;
+    a.entry_sha256,sha256(a.entry_sha256 || convert_to('{}','UTF8'))
+   FROM shards_v2.audit_entries a ORDER BY a.seq DESC LIMIT 1;
   RAISE EXCEPTION 'FAIL: runtime forged approval event';
  EXCEPTION WHEN insufficient_privilege THEN NULL;
  END;
@@ -483,6 +476,23 @@ BEGIN
 END $maintenance$;
 COMMIT;
 RESET ROLE;
+
+-- Privileged test-only check: the true head equals the generated chain.
+DO $head_check$
+DECLARE row_count bigint; h record;
+BEGIN
+ SELECT count(*) INTO row_count FROM shards_v2.audit_entries
+  WHERE org_id='00000000-0000-4000-8000-000000000001';
+ SELECT last_seq,head_sha256 INTO STRICT h FROM shards_v2.audit_heads
+  WHERE org_id='00000000-0000-4000-8000-000000000001';
+ IF h.last_seq<>row_count OR h.head_sha256 IS DISTINCT FROM
+    (SELECT entry_sha256 FROM shards_v2.audit_entries
+     WHERE org_id='00000000-0000-4000-8000-000000000001'
+     ORDER BY seq DESC LIMIT 1) THEN
+  RAISE EXCEPTION 'FAIL: canonical head does not match generated events';
+ END IF;
+END
+$head_check$;
 
 -- The signer role (not the runtime) may only build a structurally valid
 -- receipt against this task's *actual* approval by this verifier with this
