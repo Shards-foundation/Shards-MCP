@@ -44,6 +44,18 @@ Idempotency is based on a canonical `idempotency_requests` ledger (org, actor, o
 
 Connection pooling requires `set_config('shards.org_id', verified_org, true)` **inside a single transaction**, with no session-scoped tenancy GUC. The PostgreSQL contract tests assert that context vanishes after COMMIT **on the same connection**. Privileged maintenance must separately expire edge nonces and revoked-token markers after their validity and skew windows, with audit evidence; that expiry job is not yet operational.
 
+## v2 SQL enforcement additions (draft; not operational authority)
+
+**Live external-effect barrier:** the outbox may be registered or initially dispatched only on a running parent task. The outbox trigger takes `FOR UPDATE` on that parent. Task close (`succeeded`, `failed`, `canceled`) checks for **any** `pending`, `dispatching` or `needs_reconciliation` effect and refuses to close if one exists. The shared task row lock serialises these two transactions. PostgreSQL deadlock detection still requires a fail-closed transaction retry strategy in Python, not a blind provider replay. Direct `needs_reconciliation → failed` is **prohibited** in this draft because no independently signed reconciliation authority exists; the state remains quarantined until a later approved reconciliation path.
+
+**Audit truth and completeness at the database boundary:** `AFTER INSERT/UPDATE` triggers for tasks and outbox records and `AFTER INSERT` for independent verifications emit their own events into the tenant-bound audit chain. The event kind and state transition come from row mutations, not a caller-controlled audit action string. The same database transaction must commit both the business change and its audit entry. Runtime and verifier roles have **no INSERT** privilege on `audit_entries`, and `emit_audit_event` is not executable by PUBLIC. This prevents the reproduced fabricated `verification.approved` event through the non-owner runtime role. The event `actor_id` remains **row-party attribution**, not cryptographically proven caller identity; the Python authenticated tenancy middleware is still required. Database owner/superuser compromise also remains out of scope until separately anchored evidence exists.
+
+**Receipts:** a composite foreign key only permits `governance_receipts.audit_seq` to reference a `verification.approved` audit event for that **same tenant, task, verifier and evidence hash**. This establishes structural referential integrity, not proof that a signer key is genuine or external CI results are trustworthy.
+
+**Role lifecycle:** `infra/postgres/bootstrap_roles.sql` is a separate, repeatable **cluster-level** operator provisioner. Neither `0001` nor `0002` creates roles. The migration checks **all three** required roles for NOLOGIN, NOBYPASSRLS, NOINHERIT, no escalation attributes and no outgoing role memberships **before** granting privileges. A managed Postgres DBA may provision equivalent roles without running the bootstrap. The PostgreSQL 16/17 CI matrix tests two databases in one cluster, repeated bootstrap and denial of an insecure preexisting role.
+
+**Unresolved by schema alone:** controller attestation cannot safely be self-declared by a tenant, `shards.org_id` can be spoofed by a raw SQL-capable role, provider receipt JSON is not independent provider proof, the result hash uses PostgreSQL-specific `jsonb::text` serialisation, and one verification record per task prevents correction without a new reviewed evidence workflow. None of these are certified by passing schema CI.
+
 ## Dependency chain and engineering gates
 
 | Gate | Artifact | Acceptance |
