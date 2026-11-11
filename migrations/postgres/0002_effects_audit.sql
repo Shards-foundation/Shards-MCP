@@ -224,6 +224,106 @@ $body$;
 CREATE TRIGGER audit_append_guard BEFORE INSERT ON shards_v2.audit_entries
 FOR EACH ROW EXECUTE FUNCTION shards_v2.guard_audit_append();
 
+-- The only audit writer used by business triggers. Runtime and verifier roles
+-- may not EXECUTE this function or directly INSERT arbitrary audit entries.
+-- Internal event generation and the state change share the same transaction.
+CREATE FUNCTION shards_v2.emit_audit_event(
+    p_org uuid, p_actor text, p_action text, p_subject text, p_details jsonb
+) RETURNS bigint
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shards_v2 AS $body$
+DECLARE h record;
+DECLARE next_seq bigint;
+DECLARE canonical bytea;
+BEGIN
+ IF NULLIF(current_setting('shards.org_id',true),'')::uuid IS DISTINCT FROM p_org THEN
+    RAISE EXCEPTION 'audit event tenant context missing or mismatched' USING ERRCODE='42501';
+ END IF;
+ INSERT INTO shards_v2.audit_heads(org_id) VALUES(p_org) ON CONFLICT(org_id) DO NOTHING;
+ SELECT last_seq,head_sha256 INTO STRICT h
+  FROM shards_v2.audit_heads WHERE org_id=p_org FOR UPDATE;
+ next_seq:=h.last_seq+1;
+ canonical:=convert_to(jsonb_build_object(
+    'version',2,'org_id',p_org::text,'seq',next_seq,
+    'actor_id',p_actor,'action',p_action,'subject_id',p_subject,
+    'details',p_details)::text,'UTF8');
+ INSERT INTO shards_v2.audit_entries
+  (org_id,seq,actor_id,action,subject_id,details_json,canonical_record,previous_sha256,entry_sha256)
+ VALUES(p_org,next_seq,p_actor,p_action,p_subject,p_details,canonical,h.head_sha256,
+        sha256(h.head_sha256 || canonical));
+ RETURN next_seq;
+END
+$body$;
+REVOKE ALL ON FUNCTION shards_v2.emit_audit_event(uuid,text,text,text,jsonb) FROM PUBLIC;
+
+-- The source row, not a tool argument, defines the kind of audit event.
+-- Actor IDs below are row-party attribution, not a replacement for verifying
+-- the authenticated caller in the eventual Python tenancy middleware.
+CREATE FUNCTION shards_v2.audit_task_change() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shards_v2 AS $body$
+DECLARE event_action text;
+DECLARE actor text;
+DECLARE details jsonb;
+BEGIN
+ IF TG_OP='INSERT' THEN
+    event_action:='task.created';
+    actor:=NEW.creator_id;
+    details:=jsonb_build_object('state',NEW.state,'worker',NEW.worker_id,
+      'payload_sha256',encode(NEW.payload_sha256,'hex'));
+ ELSE
+    event_action:='task.updated';
+    actor:=NEW.worker_id;
+    details:=jsonb_build_object('from',OLD.state,'to',NEW.state,
+      'result_sha256',CASE WHEN NEW.result_json IS NULL THEN NULL
+        ELSE encode(sha256(convert_to(NEW.result_json::text,'UTF8')),'hex') END,
+      'attempts',NEW.attempts);
+ END IF;
+ PERFORM shards_v2.emit_audit_event(NEW.org_id,actor,event_action,NEW.task_id,details);
+ RETURN NULL;
+END
+$body$;
+CREATE TRIGGER audit_task_insert AFTER INSERT ON shards_v2.tasks
+FOR EACH ROW EXECUTE FUNCTION shards_v2.audit_task_change();
+CREATE TRIGGER audit_task_update AFTER UPDATE ON shards_v2.tasks
+FOR EACH ROW EXECUTE FUNCTION shards_v2.audit_task_change();
+
+CREATE FUNCTION shards_v2.audit_effect_change() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shards_v2 AS $body$
+DECLARE event_action text;
+DECLARE details jsonb;
+BEGIN
+ event_action:=CASE WHEN TG_OP='INSERT' THEN 'effect.created' ELSE 'effect.updated' END;
+ details:=jsonb_build_object('effect_id',NEW.effect_id::text,'connector',NEW.connector,
+   'task_id',NEW.task_id,
+   'from',CASE WHEN TG_OP='INSERT' THEN NULL ELSE OLD.state END,
+   'to',NEW.state,'payload_sha256',encode(NEW.payload_sha256,'hex'),
+   'provider_receipt_sha256',CASE WHEN NEW.provider_receipt IS NULL THEN NULL
+    ELSE encode(sha256(convert_to(NEW.provider_receipt::text,'UTF8')),'hex') END,
+   'reconciliation_sha256',CASE WHEN NEW.reconciliation_evidence IS NULL THEN NULL
+    ELSE encode(sha256(convert_to(NEW.reconciliation_evidence::text,'UTF8')),'hex') END);
+ PERFORM shards_v2.emit_audit_event(NEW.org_id,NEW.actor_id,event_action,NEW.task_id,details);
+ RETURN NULL;
+END
+$body$;
+CREATE TRIGGER audit_effect_insert AFTER INSERT ON shards_v2.effect_outbox
+FOR EACH ROW EXECUTE FUNCTION shards_v2.audit_effect_change();
+CREATE TRIGGER audit_effect_update AFTER UPDATE ON shards_v2.effect_outbox
+FOR EACH ROW EXECUTE FUNCTION shards_v2.audit_effect_change();
+
+CREATE FUNCTION shards_v2.audit_verification_change() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,shards_v2 AS $body$
+BEGIN
+ PERFORM shards_v2.emit_audit_event(NEW.org_id,NEW.verifier_id,
+   'verification.'||NEW.decision,NEW.task_id,
+   jsonb_build_object('evidence_sha256',encode(NEW.evidence_sha256,'hex'),
+    'result_sha256',encode(NEW.result_sha256,'hex'),
+    'decision',NEW.decision));
+ RETURN NULL;
+END
+$body$;
+CREATE TRIGGER audit_verification_insert AFTER INSERT ON shards_v2.verifications
+FOR EACH ROW EXECUTE FUNCTION shards_v2.audit_verification_change();
+
+
 CREATE FUNCTION shards_v2.reject_audit_mutation() RETURNS trigger
 LANGUAGE plpgsql AS $body$
 BEGIN
@@ -235,12 +335,23 @@ FOR EACH ROW EXECUTE FUNCTION shards_v2.reject_audit_mutation();
 CREATE TRIGGER audit_no_truncate BEFORE TRUNCATE ON shards_v2.audit_entries
 FOR EACH STATEMENT EXECUTE FUNCTION shards_v2.reject_audit_mutation();
 
+-- Composite references prohibit receipts from linking to a merely chain-valid,
+-- unrelated audit entry, wrong task, wrong reviewer or different evidence.
+ALTER TABLE shards_v2.audit_entries
+ ADD CONSTRAINT audit_receipt_event_identity
+ UNIQUE(org_id,seq,action,subject_id,actor_id);
+ALTER TABLE shards_v2.verifications
+ ADD CONSTRAINT verifier_receipt_identity
+ UNIQUE(org_id,task_id,verifier_id,evidence_sha256);
+
 CREATE TABLE shards_v2.governance_receipts (
     org_id uuid NOT NULL,
     receipt_id uuid NOT NULL DEFAULT gen_random_uuid(),
     task_id text NOT NULL,
     verifier_id text NOT NULL,
     audit_seq bigint NOT NULL,
+    approval_action text NOT NULL DEFAULT 'verification.approved'
+      CHECK (approval_action='verification.approved'),
     evidence_sha256 bytea NOT NULL CHECK (octet_length(evidence_sha256) = 32),
     signer_key_ref text NOT NULL,
     signature bytea NOT NULL CHECK (octet_length(signature) > 0),
@@ -248,7 +359,10 @@ CREATE TABLE shards_v2.governance_receipts (
     PRIMARY KEY (org_id, receipt_id),
     FOREIGN KEY (org_id, task_id) REFERENCES shards_v2.tasks(org_id, task_id),
     FOREIGN KEY (org_id, verifier_id) REFERENCES shards_v2.principals(org_id, principal_id),
-    FOREIGN KEY (org_id, audit_seq) REFERENCES shards_v2.audit_entries(org_id, seq)
+    FOREIGN KEY (org_id,audit_seq,approval_action,task_id,verifier_id)
+      REFERENCES shards_v2.audit_entries(org_id,seq,action,subject_id,actor_id),
+    FOREIGN KEY (org_id,task_id,verifier_id,evidence_sha256)
+      REFERENCES shards_v2.verifications(org_id,task_id,verifier_id,evidence_sha256)
 );
 
 -- Signed receipts are evidence, not mutable customer notes.
@@ -287,8 +401,10 @@ GRANT INSERT ON
  shards_v2.tasks,shards_v2.messages,shards_v2.verifications,
  shards_v2.checkpoints,shards_v2.events,
  shards_v2.idempotency_requests,shards_v2.effect_outbox,
- shards_v2.edge_request_nonces,shards_v2.audit_entries
+ shards_v2.edge_request_nonces
  TO shards_v2_runtime;
+-- Neither runtime nor verifier can forge audit entries; only the privileged
+-- AFTER business triggers can call emit_audit_event.
 GRANT UPDATE ON shards_v2.tasks,shards_v2.effect_outbox TO shards_v2_runtime;
 GRANT UPDATE (acknowledged_at) ON shards_v2.messages TO shards_v2_runtime;
 GRANT UPDATE (state,receipt_json) ON shards_v2.idempotency_requests TO shards_v2_runtime;
