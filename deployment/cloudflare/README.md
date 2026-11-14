@@ -162,6 +162,8 @@ The Worker now serves:
 
 The issuer is built only from the restricted Worker `ACCESS_TEAM` binding, never from query parameters or user input. These routes return 503 if the separate audience is missing, equal to the operator audience, or the team hostname configuration is invalid. They do **not** issue OAuth tokens, advertise unsupported providers, or bypass the Cloudflare Access policies.
 
+These metadata endpoints permit anonymous cross-origin **GET** reads (`Access-Control-Allow-Origin: *`) because their contents are public. This CORS allowance applies **only to discovery metadata and redirects**; the authenticated `/connect` endpoint still rejects untrusted browser origins and does not expose bearer identities or privileged tools.
+
 An origin-bypass fallback `401` on `/connect` includes the RFC 9728 `resource_metadata` challenge URL. The actual browser/agent challenge for a Cloudflare-protected request is managed by Cloudflare Access, which may replace that header.
 
 **Live verification required after deploying this change:** fetch all three discovery routes, follow the authorization-server redirect and confirm the real issuer and S256 support; confirm `/signin` and `/lab` still load, the original public `/mcp` remains available, and unauthenticated `/connect` is blocked by Access. A successful real user OAuth authorization-code exchange and token refresh remain **BLOCKED until observed in a supported client**; discovery and JWT mock tests alone are not proof.
