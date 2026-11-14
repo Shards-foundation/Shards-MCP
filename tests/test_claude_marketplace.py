@@ -54,8 +54,12 @@ class ClaudeMarketplaceTests(unittest.TestCase):
             self.assertNotIn(key, manifest)
         server = next(iter(read_json(PLUGIN / ".mcp.json")["mcpServers"].values()))
         self.assertEqual(set(server), {"type", "url"})
-        self.assertFalse((PLUGIN / "hooks").exists())
-        self.assertFalse((PLUGIN / "scripts").exists())
+        for directory in ("hooks", "scripts", "commands", "agents", "skills"):
+            self.assertFalse((PLUGIN / directory).exists(), directory)
+        self.assertEqual(
+            sorted(p.relative_to(PLUGIN).as_posix() for p in PLUGIN.rglob("*") if p.is_file()),
+            [".claude-plugin/plugin.json", ".mcp.json", "README.md"],
+        )
 
 
 if __name__ == "__main__":
