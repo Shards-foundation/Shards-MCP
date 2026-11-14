@@ -75,6 +75,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
        if(sql.includes("SELECT id,scopes FROM agents WHERE id=?"))return agents.find(a=>a.id===args[0]&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client!=="operator-ui")||null;
        if(sql.includes("SELECT id,body,recipient_id FROM agent_messages"))return messages.find(m=>m.tenant_id==="shards-internal"&&m.sender_id===args[0]&&m.request_key===args[1])||null;
        if(sql.includes("SELECT disabled_at,client FROM agents"))return agents.find(a=>a.id===args[0]&&a.tenant_id==="shards-internal")||null;
+       if(sql.includes("SELECT deleted_at FROM operator_accounts"))return null;
        throw Error("Unexpected first SQL: "+sql);
      },
      async run(){
