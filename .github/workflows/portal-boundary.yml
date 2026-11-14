@@ -1,0 +1,25 @@
+name: Cloudflare MCP portal boundary (read-only)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/portal_boundary_check.mjs"
+      - "scripts/portal_boundary_check.test.mjs"
+      - ".github/workflows/portal-boundary.yml"
+      - "docs/portal-boundary-acceptance.md"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Deterministic negative and positive fixture tests
+        run: node --test scripts/portal_boundary_check.test.mjs
+      - name: Check live portal fail-closed behaviour (no OAuth credentials)
+        run: node scripts/portal_boundary_check.mjs
