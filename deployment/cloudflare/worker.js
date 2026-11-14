@@ -117,15 +117,18 @@ async function operatorSendMessage(env,sub,b){
   if(!target)return pub({error:'Recipient is not an enrolled active agent'},404);
   const createdAt=new Date().toISOString(),name='Operator_'+hash.slice(0,12);
   await env.EDGE_DB.prepare("INSERT OR IGNORE INTO agents(id,tenant_id,name,client,scopes,created_by,created_at) VALUES(?,'shards-internal',?,'operator-ui','[]',?,?)").bind(operatorId,name,hash,createdAt).run();
+  const principal=await env.EDGE_DB.prepare("SELECT disabled_at,client FROM agents WHERE id=? AND tenant_id='shards-internal'").bind(operatorId).first();
+  if(!principal||principal.disabled_at||principal.client!=='operator-ui')return pub({error:'Operator principal is disabled or invalid'},403);
   const row=await env.EDGE_DB.prepare("SELECT id,body,recipient_id FROM agent_messages WHERE tenant_id='shards-internal' AND sender_id=? AND request_key=?").bind(operatorId,b.request_id).first();
   if(row){
     if(row.recipient_id!==recipient||row.body!==body)return pub({error:'Idempotency key reused for a different message'},409);
     return pub({id:row.id,stored:true,idempotent:true},200);
   }
   const id=crypto.randomUUID();
-  await env.EDGE_DB.prepare("INSERT OR IGNORE INTO agent_messages(id,tenant_id,sender_id,recipient_id,body,created_at,request_key) VALUES(?,'shards-internal',?,?,?,?,?)").bind(id,operatorId,recipient,body,createdAt,b.request_id).run();
+  await env.EDGE_DB.prepare("INSERT OR IGNORE INTO agent_messages(id,tenant_id,sender_id,recipient_id,body,created_at,request_key) SELECT ?,'shards-internal',s.id,r.id,?,?,? FROM agents s JOIN agents r ON r.id=? AND r.tenant_id='shards-internal' AND r.disabled_at IS NULL AND r.client!='operator-ui' WHERE s.id=? AND s.tenant_id='shards-internal' AND s.disabled_at IS NULL AND s.client='operator-ui'").bind(id,body,createdAt,b.request_id,recipient,operatorId).run();
   const saved=await env.EDGE_DB.prepare("SELECT id,body,recipient_id FROM agent_messages WHERE tenant_id='shards-internal' AND sender_id=? AND request_key=?").bind(operatorId,b.request_id).first();
-  if(!saved||saved.recipient_id!==recipient||saved.body!==body)return pub({error:'Concurrent idempotency conflict'},409);
+  if(!saved)return pub({error:'Sender or recipient unavailable; message not stored'},403);
+  if(saved.recipient_id!==recipient||saved.body!==body)return pub({error:'Concurrent idempotency conflict'},409);
   if(saved.id===id)await audit(env,{id:operatorId,tenant_id:'shards-internal'},'operator_message_send',id,'stored');
   return pub({id:saved.id,stored:true,idempotent:saved.id!==id},saved.id===id?201:200);
 }
