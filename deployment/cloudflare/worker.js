@@ -228,7 +228,7 @@ async function settingsClaim(req,env){
   const claims=await accessClaims(req,env,env.ACCESS_AUD);
   return {id:await ownerIdentity(claims),email:typeof claims.email==='string'&&claims.email.length<=254?claims.email:null,claims};
 }
-const accountRow=async(env,id)=>env.EDGE_DB.prepare('SELECT id,email,full_name,avatar_data,theme,created_at,updated_at,deleted_at FROM operator_accounts WHERE id=?').bind(id).first();
+const accountRow=async(env,id)=>env.EDGE_DB.prepare('SELECT id,email,full_name,avatar_data,theme,created_at,updated_at,revision,deleted_at FROM operator_accounts WHERE id=?').bind(id).first();
 const accountCreate=(env,id,email,now)=>env.EDGE_DB.prepare("INSERT OR IGNORE INTO operator_accounts(id,email,created_at,updated_at) VALUES(?,?,?,?)").bind(id,email,now,now);
 const accountAudit=(env,id,event,objectId,now,onlyIfChanged=false)=>env.EDGE_DB.prepare(onlyIfChanged?
   "INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) SELECT ?,'shards-internal',?, ?, ?, 'accepted', ? WHERE changes()=1":
@@ -248,7 +248,7 @@ async function settingsAPI(request,env,url){
         env.EDGE_DB.prepare("SELECT a.id,a.name,a.client,a.created_at,a.disabled_at,COUNT(t.id) AS active_credentials FROM agents a LEFT JOIN access_tokens t ON t.agent_id=a.id AND t.revoked_at IS NULL AND t.expires_at>? WHERE a.created_by=? GROUP BY a.id ORDER BY a.created_at DESC LIMIT 80").bind(acctNow(),id).all()
       ]);
       return pub({
-        profile:{full_name:account?.full_name||'',email:email||account?.email||null,avatar_data:account?.avatar_data||null,theme:account?.theme||'system',created_at:account?.created_at||null},
+        profile:{full_name:account?.full_name||'',email:email||account?.email||null,avatar_data:account?.avatar_data||null,theme:account?.theme||'system',created_at:account?.created_at||null,revision:account?.revision??0},
         security:{identity:'Cloudflare Access',email_change:'identity_provider',password:'identity_provider',two_factor:'identity_provider',linked_methods:'not_self_service',session:'provider_managed'},
         api_keys:keys.results||[],ssh_keys:ssh.results||[],connections:{agents:agents.results||[],online_state:'not_tracked'},
         limits:{api_keys:100,ssh_keys:100,avatar_bytes:24000,api_scope:'account:read',ssh_authorises_access:false}
@@ -265,16 +265,16 @@ async function settingsAPI(request,env,url){
   }catch(e){return pub({error:'Invalid or oversized JSON payload'},400)}
   const now=acctNow();
   if(method==='PUT'&&path==='/manage/api/account/profile'){
-    if(Object.keys(b).some(k=>!['full_name','theme','avatar_data'].includes(k))||!profileName(b.full_name)||!SETTINGS_THEMES.has(b.theme)||!Object.prototype.hasOwnProperty.call(b,'avatar_data'))return pub({error:'Invalid profile settings'},400);
+    if(Object.keys(b).some(k=>!['full_name','theme','avatar_data','revision'].includes(k))||!profileName(b.full_name)||!SETTINGS_THEMES.has(b.theme)||!Object.prototype.hasOwnProperty.call(b,'avatar_data')||!Number.isInteger(b.revision)||b.revision<0)return pub({error:'Invalid profile settings'},400);
     let avatar;try{avatar=accountAvatar(b.avatar_data)}catch(e){return pub({error:e.message},400)}
     try{
       const rows=await env.EDGE_DB.batch([
         accountCreate(env,id,email,now),
-        env.EDGE_DB.prepare('UPDATE operator_accounts SET full_name=?,email=?,avatar_data=?,theme=?,updated_at=? WHERE id=? AND deleted_at IS NULL').bind(b.full_name.trim(),email||account?.email||null,avatar,b.theme,now,id),
+        env.EDGE_DB.prepare('UPDATE operator_accounts SET full_name=?,email=?,avatar_data=?,theme=?,updated_at=?,revision=revision+1 WHERE id=? AND revision=? AND deleted_at IS NULL').bind(b.full_name.trim(),email||account?.email||null,avatar,b.theme,now,id,b.revision),
         accountAudit(env,id,'profile_updated',id,now,true)
       ]);
-      if(rows?.[1]?.meta?.changes!==1)return pub({error:'Shards-local account was deleted'},410);
-      return pub({saved:true,theme:b.theme,full_name:b.full_name.trim(),avatar_data:avatar,email:email||account?.email||null});
+      if(rows?.[1]?.meta?.changes!==1)return pub({error:'Profile changed in another session or account deleted; reload before saving'},409);
+      return pub({saved:true,theme:b.theme,full_name:b.full_name.trim(),avatar_data:avatar,email:email||account?.email||null,revision:b.revision+1});
     }catch(e){return pub({error:'Profile update could not be persisted'},503)}
   }
   if(method==='POST'&&path==='/manage/api/account/keys'){
