@@ -48,6 +48,7 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
      const ctx=(args=[])=>({
        async first(){
          if(sql.includes("FROM operator_accounts WHERE id=?"))return records.accounts.find(x=>x.id===args[0])||null;
+         if(sql.includes("SELECT id FROM operator_api_keys WHERE owner_id=? AND request_key=?"))return records.keys.find(k=>k.owner_id===args[0]&&k.request_key===args[1])||null;
          if(sql.includes("COUNT(*) AS n FROM operator_api_keys"))return {n:records.keys.filter(x=>x.owner_id===args[0]&&!x.revoked_at&&x.expires_at>args[1]).length};
          if(sql.includes("COUNT(*) AS n FROM operator_ssh_keys"))return {n:records.ssh.filter(x=>x.owner_id===args[0]).length};
          if(sql.includes("FROM operator_api_keys k JOIN operator_accounts a")){
@@ -66,12 +67,12 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
        async run(){
          if(sql.startsWith("INSERT OR IGNORE INTO operator_accounts")){
            const [id,email,created_at,updated_at]=args;
-           if(!records.accounts.some(x=>x.id===id))records.accounts.push({id,email,full_name:"",avatar_data:null,theme:"system",created_at,updated_at,deleted_at:null});
+           if(!records.accounts.some(x=>x.id===id))records.accounts.push({id,email,full_name:"",avatar_data:null,theme:"system",revision:0,created_at,updated_at,deleted_at:null});
            return {meta:{changes:1}};
          }
          if(sql.startsWith("UPDATE operator_accounts SET full_name")){
-           const row=records.accounts.find(x=>x.id===args[5]&&!x.deleted_at);
-           if(row)Object.assign(row,{full_name:args[0],email:args[1],avatar_data:args[2],theme:args[3],updated_at:args[4]});
+           const row=records.accounts.find(x=>x.id===args[5]&&!x.deleted_at&&x.revision===args[6]);
+           if(row)Object.assign(row,{full_name:args[0],email:args[1],avatar_data:args[2],theme:args[3],updated_at:args[4],revision:row.revision+1});
            return {meta:{changes:row?1:0}};
          }
          if(sql.startsWith("INSERT INTO audit_events")){
@@ -79,10 +80,12 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
            if(sql.includes("WHERE changes()=1")&&lastChanges!==1)return {meta:{changes:0}};
            records.audits.push(args);return {meta:{changes:1}};
          }
-         if(sql.startsWith("INSERT INTO operator_api_keys")){
-           const [id,owner_id,kind,label,token_sha256,prefix,scopes,created_at,expires_at]=args;
-           if(records.keys.some(k=>k.token_sha256===token_sha256))throw Error("Duplicate key");
-           records.keys.push({id,owner_id,kind,label,token_sha256,prefix,scopes,created_at,expires_at,last_used_at:null,revoked_at:null});
+         if(sql.startsWith("INSERT OR IGNORE INTO operator_api_keys")){
+           assert.match(sql,/UNIQUE|INSERT OR IGNORE/);
+           const [id,owner_id,kind,label,token_sha256,request_key,prefix,scopes,created_at,expires_at]=args;
+           const owner=records.accounts.find(a=>a.id===owner_id&&!a.deleted_at);
+           if(!owner||records.keys.some(k=>k.owner_id===owner_id&&k.request_key===request_key))return {meta:{changes:0}};
+           records.keys.push({id,owner_id,kind,label,token_sha256,request_key,prefix,scopes,created_at,expires_at,last_used_at:null,revoked_at:null});
            return {meta:{changes:1}};
          }
          if(sql.startsWith("INSERT INTO operator_ssh_keys")){
@@ -149,15 +152,21 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
    const invalidName=await worker.fetch(make(url+"/profile","PUT",good,{...profile,full_name:"<script>"}),env);assert.equal(invalidName.status,400);
    const badKey=await worker.fetch(make(url+"/keys","POST",good,{kind:"api",label:"Valid Name",expires_days:365}),env);assert.equal(badKey.status,400);
    failAudit=true;
-   const failed=await worker.fetch(make(url+"/keys","POST",good,{kind:"cli",label:"Android Termux",expires_days:30}),env);
+   const keyPayload={kind:"cli",label:"Android Termux",expires_days:30,request_id:"request-test-00001"};
+   const failed=await worker.fetch(make(url+"/keys","POST",good,keyPayload),env);
    assert.equal(failed.status,503);
    assert.equal(records.keys.length,0,"Audit failure rolls back credential creation");
    failAudit=false;
-   res=await worker.fetch(make(url+"/keys","POST",good,{kind:"cli",label:"Android Termux",expires_days:30}),env);
+   res=await worker.fetch(make(url+"/keys","POST",good,keyPayload),env);
    assert.equal(res.status,201);const issued=await res.json();
    assert.match(issued.token,/^smcp_cli_[0-9a-f]{64}$/);assert.deepEqual(Array.from(issued.scopes),["account:read"]);
    assert.equal(records.keys.length,1);
    assert.equal(records.keys[0].token_sha256.length,64);
+   const replay=await worker.fetch(make(url+"/keys","POST",good,keyPayload),env);
+   assert.equal(replay.status,409,"Repeating a credential issuance request must never mint another key");
+   assert.equal(records.keys.length,1);
+   assert.equal(records.keys[0].request_key,keyPayload.request_id);
+
    const createdAudit=records.audits.at(-1);
    assert.match(createdAudit[1],/^operator_[0-9a-f]{32}$/,"Audit actor must be the signed operator subject fingerprint");
    assert.equal(createdAudit[3],issued.id,"Credential audit must retain target id");
@@ -194,6 +203,9 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
    assert.equal((await res.json()).identity_provider_deleted,false);
    assert.equal(records.accounts[0].email,null);
    assert.ok(records.accounts[0].deleted_at);
+   const again=await worker.fetch(make(url,"DELETE",good,{confirm:"DELETE MY SHARDS ACCOUNT"}),env);
+   assert.equal(again.status,200);
+   assert.equal((await again.json()).idempotent,true);
    res=await worker.fetch(make(url,"GET",good),env);
    assert.equal(res.status,410,"Deleted Shards-local account cannot be silently recreated");
  }finally{sandbox.fetch=original}
