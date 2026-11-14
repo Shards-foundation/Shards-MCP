@@ -122,6 +122,10 @@ class CancellationTests(unittest.TestCase):
         reviewer = self.gateway.register(
             self.root, "reviewer", "test", [], ["task:verify"]
         )
+        self.gateway.controller_set(self.root, self.creator.agent_id, "origin-team")
+        self.gateway.controller_set(self.root, self.worker.agent_id, "worker-team")
+        self.gateway.controller_set(self.root, reviewer["agent_id"], "review-team")
+        self.gateway.verifier_assign(self.root, running, reviewer["agent_id"])
         self.gateway.task_verify(
             self.gateway.authenticate(reviewer["token"]), running, True,
             {"case": "independent validation passed"},

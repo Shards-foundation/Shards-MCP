@@ -38,6 +38,9 @@ def main() -> int:
         creator, worker, verifier = (actors[k] for k in ("creator", "worker", "verifier"))
         require(len({creator.agent_id, worker.agent_id, verifier.agent_id}) == 3, "roles not distinct")
         gateway.delegation_grant(admin, creator.agent_id, worker.agent_id)
+        gateway.controller_set(admin, creator.agent_id, "creator-demo")
+        gateway.controller_set(admin, worker.agent_id, "worker-demo")
+        gateway.controller_set(admin, verifier.agent_id, "reviewer-demo")
         input_data = {"action": "echo", "data": "shards-mcp-safe-demo"}
         created = gateway.task_create(creator, worker.agent_id, input_data, "demo-echo-001")
         repeated = gateway.task_create(creator, worker.agent_id, input_data, "demo-echo-001")
@@ -53,6 +56,7 @@ def main() -> int:
         persisted = gateway.task_get(creator, task_id)
         require(persisted["state"] == "reported", "creator saw incorrect reported state")
         require(persisted["result"] == {"echo": "shards-mcp-safe-demo"}, "persisted result differs from expected output")
+        gateway.verifier_assign(admin, task_id, verifier.agent_id)
         verified = gateway.task_verify(
             verifier, task_id, approved=True,
             evidence={"assertion": "persisted-echo-output-matched-expected-value", "expected": persisted["result"]},

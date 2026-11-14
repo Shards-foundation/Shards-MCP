@@ -28,6 +28,9 @@ class A2ATests(unittest.TestCase):
         self.outsider = self.gateway.register(self.root, "outsider", "test", [],
                                               ["agent:read", "task:read"])
         self.gateway.delegation_grant(self.root, self.sender["agent_id"], self.worker["agent_id"])
+        self.gateway.controller_set(self.root, self.sender["agent_id"], "sender-team")
+        self.gateway.controller_set(self.root, self.worker["agent_id"], "worker-team")
+        self.gateway.controller_set(self.root, self.reviewer["agent_id"], "review-team")
         self.a2a = A2AAdapter(self.gateway, "http://127.0.0.1:8787")
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0),
                                        make_handler(self.gateway, set(), a2a=self.a2a))
@@ -106,6 +109,7 @@ class A2ATests(unittest.TestCase):
         self.assertNotIn("artifacts", pending["result"])
 
         reviewer = self.gateway.authenticate(self.reviewer["token"])
+        self.gateway.verifier_assign(self.root, task_id, reviewer.agent_id)
         self.gateway.task_verify(reviewer, task_id, True, {"summary": "validated deterministic task result"})
         done = self.request("POST", self.path, self.sender["token"],
                             self.rpc("GetTask", {"id": task_id}, 3))[1]["result"]
@@ -142,6 +146,8 @@ class A2ATests(unittest.TestCase):
         self.assertNotIn("artifacts", reported)
 
         reviewer = self.gateway.authenticate(self.reviewer["token"])
+        self.gateway.controller_set(self.root, worker["agent_id"], "other-worker-team")
+        self.gateway.verifier_assign(self.root, task_id, reviewer.agent_id)
         self.gateway.task_verify(reviewer, task_id, True,
                                  {"summary": "A2A deterministic echo output matched input"})
         complete = self.request("POST", endpoint, self.sender["token"],

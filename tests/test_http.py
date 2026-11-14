@@ -116,6 +116,10 @@ class HttpTests(unittest.TestCase):
         self.assertIn("sha256", result["result"]["result"])
         reviewer = self.gateway.register(self.gateway.authenticate(self.token), "independent-reviewer",
                                          "local", ["review"], ["task:verify", "task:read"])
+        root = self.gateway.authenticate(self.token)
+        self.gateway.controller_set(root, worker["agent_id"], "worker-team")
+        self.gateway.controller_set(root, reviewer["agent_id"], "review-team")
+        self.gateway.verifier_assign(root, task["result"]["task_id"], reviewer["agent_id"])
         status, verified = self.req("POST", "/v1/tools/task_verify",
                                     {"task_id": task["result"]["task_id"], "approved": True,
                                      "evidence": {"sha256": result["result"]["result"]["sha256"]}}, reviewer["token"])
