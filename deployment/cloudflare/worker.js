@@ -131,7 +131,7 @@ async function readWorkspaceJSON(request){
 async function operatorSendMessage(env,sub,b){
   if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).some(k=>!['recipient_agent_id','body','request_id'].includes(k)))return pub({error:'Invalid message request'},400);
   const recipient=b.recipient_agent_id,body=typeof b.body==='string'?b.body.trim():null;
-  if(typeof recipient!=='string'||!idPattern.test(recipient)||!body||body.length>2000||encoder.encode(body).byteLength>8000||!reqId(b.request_id))return pub({error:'Invalid recipient, message or idempotency key'},400);
+  if(typeof recipient!=='string'||!idPattern.test(recipient)||!body||body.length>2000||!reqId(b.request_id))return pub({error:'Invalid recipient, message or idempotency key'},400);
   const hash=await digest(sub),operatorId=operatorPrincipalId(hash);
   if(recipient===operatorId)return pub({error:'Select a separate enrolled agent'},400);
   // A committed retry is reportable even if the recipient was later revoked.
