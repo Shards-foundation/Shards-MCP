@@ -169,6 +169,13 @@ async function operatorSendMessage(env,sub,b){
   if(saved.recipient_id!==recipient||saved.body!==body)return pub({error:'Concurrent idempotency conflict'},409);
   return pub({id:saved.id,stored:true,idempotent:saved.id!==id},saved.id===id?201:200);
 }
+// Account Settings: an operator's Shards-local profile and separately scoped API credentials.
+// The signed Access subject, not an editable email address, owns every record.
+const SETTINGS_THEMES=new Set(['system','dark','light','contrast']);
+const accountLabel=x=>typeof x==='string'&&x.length>=2&&x.length<=60&&/^[\p{L}\p{N}][\p{L}\p{N} ._'-]*$/u.test(x);
+const profileName=x=>typeof x==='string'&&x.length<=100&&!/[\u0000-\u001f\u007f<>]/.test(x);
+const ownerIdentity=async claims=>await digest(claims.sub);
+const acctNow=()=>new Date().toISOString();
 async function settingsBody(req,maxBytes=50000){
   if(!req.body)throw Error('Body required');
   const stated=Number(req.headers.get('content-length'));
