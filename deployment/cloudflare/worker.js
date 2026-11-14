@@ -230,7 +230,9 @@ async function settingsClaim(req,env){
 }
 const accountRow=async(env,id)=>env.EDGE_DB.prepare('SELECT id,email,full_name,avatar_data,theme,created_at,updated_at,deleted_at FROM operator_accounts WHERE id=?').bind(id).first();
 const accountCreate=(env,id,email,now)=>env.EDGE_DB.prepare("INSERT OR IGNORE INTO operator_accounts(id,email,created_at,updated_at) VALUES(?,?,?,?)").bind(id,email,now,now);
-const accountAudit=(env,id,event,objectId,now)=>env.EDGE_DB.prepare("INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) VALUES(?,'shards-internal',NULL,?,?,'accepted',?)").bind(crypto.randomUUID(),'account_'+event,objectId||id,now);
+const accountAudit=(env,id,event,objectId,now,onlyIfChanged=false)=>env.EDGE_DB.prepare(onlyIfChanged?
+  "INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) SELECT ?,'shards-internal',?, ?, ?, 'accepted', ? WHERE changes()=1":
+  "INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) VALUES(?,'shards-internal',?,?,?,'accepted',?)").bind(crypto.randomUUID(),'operator_'+id.slice(0,32),'account_'+event,objectId||id,now);
 async function settingsAPI(request,env,url){
   let actor;
   try{actor=await settingsClaim(request,env)}catch(e){return pub({error:'Signed operator Cloudflare Access login required'},401)}
@@ -241,7 +243,7 @@ async function settingsAPI(request,env,url){
   if(method==='GET'&&path==='/manage/api/account'){
     try{
       const [keys,ssh,agents]=await Promise.all([
-        env.EDGE_DB.prepare("SELECT id,kind,label,prefix,scopes,created_at,expires_at,last_used_at,revoked_at FROM operator_api_keys WHERE owner_id=? ORDER BY created_at DESC LIMIT 100").bind(id).all(),
+        env.EDGE_DB.prepare("SELECT id,kind,label,prefix,scopes,created_at,expires_at,last_used_at,revoked_at FROM operator_api_keys WHERE owner_id=? ORDER BY CASE WHEN revoked_at IS NULL AND expires_at>? THEN 0 ELSE 1 END,created_at DESC LIMIT 100").bind(id,acctNow()).all(),
         env.EDGE_DB.prepare("SELECT id,label,algorithm,public_key,fingerprint,created_at FROM operator_ssh_keys WHERE owner_id=? ORDER BY created_at DESC LIMIT 100").bind(id).all(),
         env.EDGE_DB.prepare("SELECT a.id,a.name,a.client,a.created_at,a.disabled_at,COUNT(t.id) AS active_credentials FROM agents a LEFT JOIN access_tokens t ON t.agent_id=a.id AND t.revoked_at IS NULL AND t.expires_at>? WHERE a.created_by=? GROUP BY a.id ORDER BY a.created_at DESC LIMIT 80").bind(acctNow(),id).all()
       ]);
@@ -315,7 +317,7 @@ async function settingsAPI(request,env,url){
         keyMatch?
           env.EDGE_DB.prepare('UPDATE operator_api_keys SET revoked_at=? WHERE id=? AND owner_id=? AND revoked_at IS NULL').bind(now,target,id):
           env.EDGE_DB.prepare('DELETE FROM operator_ssh_keys WHERE id=? AND owner_id=?').bind(target,id),
-        accountAudit(env,id,keyMatch?'key_revoked':'ssh_removed',target,now)
+        accountAudit(env,id,keyMatch?'key_revoked':'ssh_removed',target,now,true)
       ]);
       return pub({deleted:rows?.[0]?.meta?.changes===1,kind:keyMatch?'api_key':'ssh_key'});
     }catch(e){return pub({error:'Credential removal failed'},503)}
