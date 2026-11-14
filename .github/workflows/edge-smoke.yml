@@ -39,6 +39,8 @@ jobs:
         run: |
           set -euo pipefail
           node --test deployment/cloudflare/settings.test.mjs
+      - name: Signed skills registry, GitHub catalog and upload regressions
+        run: node --test deployment/cloudflare/skills.test.mjs
       - name: Official MCP SDK v1 signed-endpoint protocol interoperability
         run: |
           set -euo pipefail
