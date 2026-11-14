@@ -84,3 +84,206 @@ test("operator issued-token rendering uses newline escapes, not literal backslas
   assert.ok(fragment.includes("\\n\\n"), "embedded JS must contain proper newline escape sequences");
   assert.equal(fragment.includes("\\\\n"), false, "embedded JS must not contain literal \\n");
 });
+
+
+test("Live Lab is a real same-origin route with a strict script policy", async () => {
+  const response = await worker.fetch(new Request("https://mcp.shardsinc.co.uk/lab"), {});
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /text\/html/);
+  const csp = response.headers.get("content-security-policy");
+  const directives = csp.split(";").map(p => p.trim().split(/\s+/)).filter(a => a[0]);
+  const policies = Object.fromEntries(directives.map(([key,...values]) => [key, values]));
+  assert.deepEqual(policies["script-src"], ["'self'"], "No inline, remote, eval or data scripts");
+  assert.deepEqual(policies["connect-src"], ["'self'"]);
+  assert.deepEqual(policies["form-action"], ["'none'"]);
+  assert.equal(directives.filter(([key]) => key === "script-src").length, 1);
+  const html = await response.text();
+  assert.match(html, /RUN PROTOCOL CHECK/);
+  assert.match(html, /QUERY LIVE CATALOGUE/);
+  assert.match(html, /id="dnsForm"/);
+  assert.match(html, /src="\/lab\.js"/);
+  assert.doesNotMatch(html, /<script(?![^>]*src=)/);
+});
+
+test("Live Lab client is executable JS restricted to the public MCP operations", async () => {
+  const response = await worker.fetch(new Request("https://mcp.shardsinc.co.uk/lab.js"), {});
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /text\/javascript/);
+  const js = await response.text();
+  assert.doesNotThrow(() => new vm.Script(js));
+  assert.match(js, /shards_gateway_status/);
+  assert.match(js, /shards_systems_catalog/);
+  assert.match(js, /shards_dns_lookup/);
+  assert.match(js, /credentials: 'omit'/);
+  assert.match(js, /response\.ok/);
+  assert.match(js, /\.isError/);
+  assert.doesNotMatch(js, /\/manage\/api\//);
+  assert.doesNotMatch(js, /localStorage|sessionStorage|Bearer\s/);
+  assert.match(js, /\$\('copyEvidence'\)\.textContent = 'COPY JSON'/);
+  assert.match(js, /setTimeout\(\(\) => \{ \$\('copyEvidence'\)\.textContent = 'COPY JSON'; \}, 1600\)/);
+});
+
+test("Live Lab appears on the landing page, but never exposes cross-host routes", async () => {
+  const main = await worker.fetch(new Request("https://mcp.shardsinc.co.uk/"), {});
+  assert.equal(main.status, 200);
+  assert.match(await main.text(), /href="\/lab">LIVE LAB/);
+  const denied = await worker.fetch(new Request("https://example.com/lab"), {});
+  assert.equal(denied.status, 404);
+  const missing = await worker.fetch(new Request("https://mcp.shardsinc.co.uk/lab-other"), {});
+  assert.equal(missing.status, 404);
+});
+
+test("Lab diagnostics do not require credentials; protected MCP tools still fail closed", async () => {
+  const discovery = await worker.fetch(post("tools/list"), {});
+  const listed = (await discovery.json()).result.tools.map(x => x.name);
+  assert.deepEqual(Array.from(listed), [
+    "shards_gateway_status", "shards_systems_catalog", "shards_dns_lookup"
+  ]);
+  const forbidden = await worker.fetch(post("tools/call", {name:"shards_task_create", arguments:{}}), {});
+  const body = await forbidden.json();
+  assert.equal(body.result.isError, true);
+  assert.match(body.result.content[0].text, /AUTH_REQUIRED/);
+});
+
+
+
+function liveLabBrowser({ onFetch, shortTimeout = false } = {}) {
+  const match = src.match(/^const LAB_CLIENT=("(?:\\.|[^"\\])*");/m);
+  assert.ok(match, "The Live Lab must have a separate browser client");
+  let client = JSON.parse(match[1]);
+  if (shortTimeout) {
+    assert.ok(client.includes("AbortSignal.timeout(10000)"), "The gateway request has an abortable timeout");
+    client = client.replace("AbortSignal.timeout(10000)", "AbortSignal.timeout(20)");
+  }
+  const handlers = new Map();
+  const nodes = new Map();
+  const requests = [];
+  function element(id) {
+    if (!nodes.has(id)) nodes.set(id, {
+      textContent: "", disabled: false,
+      value: id === "domain" ? "example.com" : id === "dnsType" ? "A" : "",
+      classList: { add() {} },
+      addEventListener(event, cb) { handlers.set(id + ":" + event, cb); },
+    });
+    return nodes.get(id);
+  }
+  const document = {
+    getElementById: element,
+    querySelector(selector) {
+      assert.equal(selector, "#dnsForm button");
+      return element("dnsRun");
+    },
+  };
+  const handle = async (url, init) => {
+    requests.push({url, init});
+    if (onFetch) return onFetch(url, init);
+    if (url === "/api/status") return {ok:true, status:200, json:async() => ({
+      db:"connected", service:"Shards MCP Edge", version:"0.2.0", tools:[{name:"shards_gateway_status"}]
+    })};
+    assert.equal(url, "/mcp");
+    assert.equal(init.credentials, "omit");
+    assert.equal(init.redirect, "error");
+    assert.ok(init.signal, "MCP browser requests must be abortable");
+    const payload = JSON.parse(init.body);
+    const {method, params} = payload;
+    let result;
+    if (method === "initialize") result = {protocolVersion:"2025-11-25",serverInfo:{name:"shards-mcp-edge"}};
+    else if (method === "tools/list") result = {tools:[{name:"shards_gateway_status"},{name:"shards_dns_lookup"}]};
+    else if (method === "tools/call") {
+      assert.ok(["shards_gateway_status","shards_systems_catalog","shards_dns_lookup"].includes(params.name));
+      result = {isError:false, structuredContent:
+        params.name === "shards_dns_lookup"
+          ? {domain:params.arguments.domain, type:params.arguments.type,records:[{value:"93.184.215.14"}]}
+          : params.name === "shards_systems_catalog"
+            ? {projects:[{name:"Shards-MCP"}]} : {status:"online"}
+      };
+    }
+    else assert.fail("Unexpected MCP method " + method);
+    return {ok:true,status:200,json:async()=>({jsonrpc:"2.0",id:payload.id,result})};
+  };
+  let clipboard = "";
+  const sandbox = {
+    document, AbortSignal, Date, JSON, Set, performance:{now:() => 100},
+    navigator:{clipboard:{writeText:async x => {clipboard=x;}}},
+    setTimeout: () => 0, // suppress the cosmetic delayed copy-label reset
+    fetch: handle,
+  };
+  assert.doesNotThrow(() => new vm.Script(client));
+  vm.runInNewContext(client, sandbox, {filename:"lab.js"});
+  return {
+    element, requests, handlers,
+    copied:() => clipboard,
+    click:async id => {
+      assert.ok(handlers.has(id+":click"), id+" click listener missing");
+      await handlers.get(id+":click")();
+      await new Promise(resolve => setImmediate(resolve));
+    },
+    submit:async id => {
+      assert.ok(handlers.has(id+":submit"), id+" submit listener missing");
+      let prevented = false;
+      handlers.get(id+":submit")({preventDefault(){prevented=true;}});
+      assert.equal(prevented,true);
+      await new Promise(resolve => setImmediate(resolve));
+    },
+  };
+}
+
+test("Browser actions execute actual MCP workflows and show the returned evidence", async () => {
+  const page = liveLabBrowser();
+  await page.click("protocolRun");
+  const first = page.requests.filter(x=>x.url==="/mcp").map(x=>JSON.parse(x.init.body));
+  assert.deepEqual(first.map(x=>x.method), ["initialize","tools/list","tools/call"]);
+  assert.equal(first[2].params.name,"shards_gateway_status");
+  assert.match(page.element("outcome").textContent,/^PASS/);
+  assert.equal(JSON.parse(page.element("response").textContent).result.status.status, "online");
+  assert.equal(page.element("protocolRun").disabled, false);
+
+  await page.click("catalogRun");
+  const second = JSON.parse(page.requests.filter(x=>x.url==="/mcp").at(-1).init.body);
+  assert.equal(second.params.name,"shards_systems_catalog");
+  assert.equal(JSON.parse(page.element("response").textContent).result.projects[0].name,"Shards-MCP");
+
+  page.element("domain").value = "EXAMPLE.COM";
+  page.element("dnsType").value = "MX";
+  await page.submit("dnsForm");
+  const third = JSON.parse(page.requests.filter(x=>x.url==="/mcp").at(-1).init.body);
+  assert.equal(third.params.name, "shards_dns_lookup");
+  assert.equal(third.params.arguments.domain, "example.com");
+  assert.equal(third.params.arguments.type, "MX");
+  assert.equal(JSON.parse(page.element("response").textContent).result.records.length,1);
+  await page.click("copyEvidence");
+  assert.match(page.copied(), /"domain": "example.com"/);
+  assert.equal(page.element("copyEvidence").textContent, "COPIED");
+  await page.click("catalogRun");
+  assert.equal(page.element("copyEvidence").textContent,"COPY JSON", "New evidence cannot be marked copied");
+  assert.ok(page.requests.every(x=>["/api/status","/mcp"].includes(x.url)));
+});
+
+test("Invalid DNS input fails locally before any MCP call", async () => {
+  const page = liveLabBrowser();
+  page.element("domain").value = "invalid";
+  const before = page.requests.filter(x=>x.url==="/mcp").length;
+  await page.submit("dnsForm");
+  assert.equal(page.requests.filter(x=>x.url==="/mcp").length,before);
+  assert.match(page.element("outcome").textContent,/^FAIL/);
+});
+
+test("A stalled MCP call is actually aborted on timeout rather than left pending", async () => {
+  let observedSignal = null;
+  const page = liveLabBrowser({
+    shortTimeout:true,
+    onFetch: (url,init) => {
+      if (url === "/api/status") return Promise.resolve({ok:true,status:200,json:async()=>({db:"connected",tools:[]})});
+      observedSignal = init.signal;
+      return new Promise((_resolve,reject)=>{
+        init.signal.addEventListener("abort",()=>reject(Object.assign(new Error("MCP request aborted"),{name:"AbortError"})),{once:true});
+      });
+    },
+  });
+  await page.click("protocolRun");
+  assert.ok(observedSignal, "Expected an in-flight MCP fetch");
+  assert.equal(observedSignal.aborted,true, "MCP fetch signal must be aborted by the timeout");
+  assert.match(page.element("outcome").textContent,/^FAIL/);
+  assert.match(page.element("response").textContent,/MCP request aborted/);
+  assert.equal(page.element("protocolRun").disabled,false);
+});

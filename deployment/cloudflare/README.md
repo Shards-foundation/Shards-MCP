@@ -104,3 +104,17 @@ Commercial deployment status: **experimental**, no public OAuth sign-in, no reta
 ## Edge rate limits and verification
 
 Public tools are constrained by a global daily D1 budget and a lower daily budget per caller. Caller keys are SHA-256 digests of the UTC day and Cloudflare-provided client IP, never raw IPs. DNS input is validated **before** budget charging; invalid input cannot exhaust the shared DNS quota. The caller budget is a best-effort availability control, not a substitute for account quotas, edge WAF enforcement, abuse monitoring or periodic D1 budget cleanup. `node --test deployment/cloudflare/worker.test.mjs` checks protocol negotiation, early DNS validation, per-caller budget partitioning and token-display formatting using isolated local mocks. These tests do not prove private agent/token E2E or a new Worker deployment.
+
+## Public browser Live Lab
+
+The optional read-only portal at `https://mcp.shardsinc.co.uk/lab` is served directly by the **same edge Worker** and uses same-origin `POST /mcp` requests. It offers three executable browser workflows:
+
+1. MCP protocol check: `initialize`, `tools/list` and `shards_gateway_status`.
+2. Systems discovery: `shards_systems_catalog`.
+3. Passive DNS resolution: `shards_dns_lookup` for A, AAAA, MX, TXT and CAA records.
+
+The browser client has **no credential field**, no arbitrary MCP method selection and no privileged tool calls. It reports actual latency, results and errors, including budget exhaustion. No outcome is fabricated when the API, D1 storage or the upstream resolver is unavailable. A strict same-origin Content Security Policy applies.
+
+The lab does not enrol agents, run private tasks, prove host-separated agent messaging or make the separate Python runtime available. It is a limited diagnostic utility, not a production certification dashboard.
+
+Validate source before a deployment with `node --check deployment/cloudflare/worker.js` and `node --test deployment/cloudflare/worker.test.mjs`, then test the hosted page and MCP endpoint after a separately approved Worker rollout. Merging a pull request does **not** deploy the Cloudflare Worker.
