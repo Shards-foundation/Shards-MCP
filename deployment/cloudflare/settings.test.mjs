@@ -118,6 +118,7 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
          if(sql.startsWith("DELETE FROM operator_ssh_keys WHERE owner_id=?")){
            const before=records.ssh.length;records.ssh=records.ssh.filter(k=>k.owner_id!==args[0]);return {meta:{changes:before-records.ssh.length}};
          }
+         if(sql.startsWith("DELETE FROM operator_skills WHERE owner_id=?"))return {meta:{changes:0}};
          if(sql.startsWith("UPDATE operator_accounts SET email=NULL")){
            const row=records.accounts.find(x=>x.id===args[2]);if(row)Object.assign(row,{email:null,full_name:"",avatar_data:null,theme:"system",deleted_at:args[0],updated_at:args[1]});return {meta:{changes:row?1:0}};
          }
