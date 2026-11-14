@@ -9,6 +9,14 @@ const sandbox={Request,Response,Headers,URL,TextEncoder,TextDecoder,atob,btoa,cr
 vm.runInNewContext(src.replace("export default {","globalThis.__edge = {"),sandbox,{filename:"worker.js"});
 const worker=sandbox.__edge,base="https://mcp.shardsinc.co.uk";
 
+test("D1 migration and fresh schema operator DDL remain identical and reject NULL primary keys",()=>{
+ const migration=fs.readFileSync(new URL("./migrations/0002_operator_settings.sql",import.meta.url),"utf8");
+ const baseline=fs.readFileSync(new URL("./schema.sql",import.meta.url),"utf8");
+ const start="CREATE TABLE IF NOT EXISTS operator_accounts";
+ assert.equal(baseline.slice(baseline.indexOf(start)).trim(),migration.slice(migration.indexOf(start)).trim());
+ for(const table of ["operator_accounts","operator_api_keys","operator_ssh_keys"])assert.match(migration,new RegExp("CREATE TABLE IF NOT EXISTS "+table+" \\\\(\\\\s*id TEXT NOT NULL PRIMARY KEY"));
+});
+
 test("account settings UI exposes real labelled controls, secure CSP and script",async()=>{
  const r=await worker.fetch(new Request(base+"/manage/settings"),{});
  assert.equal(r.status,200);

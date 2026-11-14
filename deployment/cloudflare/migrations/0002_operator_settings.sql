@@ -1,7 +1,7 @@
 -- Shards MCP Edge operator settings, created only after PR review and predeploy D1 backup.
 -- Independent of the Python gateway and tenant-wide agent authorisation.
 CREATE TABLE IF NOT EXISTS operator_accounts (
-  id TEXT PRIMARY KEY CHECK(length(id)=64),
+  id TEXT NOT NULL PRIMARY KEY CHECK(length(id)=64),
   email TEXT,
   full_name TEXT NOT NULL DEFAULT '',
   avatar_data TEXT CHECK(avatar_data IS NULL OR length(avatar_data)<=33000),
@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS operator_accounts (
   deleted_at TEXT
 );
 CREATE TABLE IF NOT EXISTS operator_api_keys (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL PRIMARY KEY,
   owner_id TEXT NOT NULL REFERENCES operator_accounts(id),
   kind TEXT NOT NULL CHECK(kind IN ('api','cli')),
   label TEXT NOT NULL,
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS operator_api_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_operator_api_keys_owner ON operator_api_keys(owner_id,created_at DESC);
 CREATE TABLE IF NOT EXISTS operator_ssh_keys (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL PRIMARY KEY,
   owner_id TEXT NOT NULL REFERENCES operator_accounts(id),
   label TEXT NOT NULL,
   algorithm TEXT NOT NULL CHECK(algorithm='ssh-ed25519'),

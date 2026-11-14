@@ -87,6 +87,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
        }
        if(sql.startsWith("INSERT OR IGNORE INTO agent_messages")){
          assert.match(sql,/JOIN agents r ON/,"Writes must atomically check active operator and recipient identities");
+          assert.match(sql,/NOT EXISTS\(SELECT 1 FROM operator_accounts WHERE id=\? AND deleted_at IS NOT NULL\)/,"Message persistence must be guarded by account deletion tombstone");
          assert.match(sql,/EXISTS\(SELECT 1 FROM json_each\(r\.scopes\) WHERE value='message:read'\)/,"Atomic insert requires recipient inbox capability in SQL");
          const [id,body,created,key,recipient,sender]=args;
          const from=agents.find(a=>a.id===sender&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client==="operator-ui");

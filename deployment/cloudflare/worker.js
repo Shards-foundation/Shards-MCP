@@ -150,7 +150,7 @@ async function operatorSendMessage(env,sub,b){
   let scopes;try{scopes=JSON.parse(target.scopes)}catch(e){scopes=[]}
   if(!Array.isArray(scopes)||!scopes.includes('message:read'))return pub({error:'Recipient lacks message:read scope; re-enrol with inbox permission'},409);
   const createdAt=new Date().toISOString(),name='Operator_'+hash.slice(0,40);
-  await env.EDGE_DB.prepare("INSERT OR IGNORE INTO agents(id,tenant_id,name,client,scopes,created_by,created_at) VALUES(?,'shards-internal',?,'operator-ui','[]',?,?)").bind(operatorId,name,hash,createdAt).run();
+  await env.EDGE_DB.prepare("INSERT OR IGNORE INTO agents(id,tenant_id,name,client,scopes,created_by,created_at) SELECT ?,'shards-internal',?,'operator-ui','[]',?,? WHERE NOT EXISTS(SELECT 1 FROM operator_accounts WHERE id=? AND deleted_at IS NOT NULL)").bind(operatorId,name,hash,createdAt,hash).run();
   const principal=await env.EDGE_DB.prepare("SELECT disabled_at,client FROM agents WHERE id=? AND tenant_id='shards-internal'").bind(operatorId).first();
   if(!principal||principal.disabled_at||principal.client!=='operator-ui')return pub({error:'Operator principal is disabled or invalid'},403);
   const row=await env.EDGE_DB.prepare("SELECT id,body,recipient_id FROM agent_messages WHERE tenant_id='shards-internal' AND sender_id=? AND request_key=?").bind(operatorId,b.request_id).first();
@@ -161,7 +161,7 @@ async function operatorSendMessage(env,sub,b){
   const id=crypto.randomUUID();
   // D1 batch is transactional: the new message and its audit receipt commit or roll back together.
   await env.EDGE_DB.batch([
-    env.EDGE_DB.prepare("INSERT OR IGNORE INTO agent_messages(id,tenant_id,sender_id,recipient_id,body,created_at,request_key) SELECT ?,'shards-internal',s.id,r.id,?,?,? FROM agents s JOIN agents r ON r.id=? AND r.tenant_id='shards-internal' AND r.disabled_at IS NULL AND r.client!='operator-ui' AND EXISTS(SELECT 1 FROM json_each(r.scopes) WHERE value='message:read') WHERE s.id=? AND s.tenant_id='shards-internal' AND s.disabled_at IS NULL AND s.client='operator-ui'").bind(id,body,createdAt,b.request_id,recipient,operatorId),
+    env.EDGE_DB.prepare("INSERT OR IGNORE INTO agent_messages(id,tenant_id,sender_id,recipient_id,body,created_at,request_key) SELECT ?,'shards-internal',s.id,r.id,?,?,? FROM agents s JOIN agents r ON r.id=? AND r.tenant_id='shards-internal' AND r.disabled_at IS NULL AND r.client!='operator-ui' AND EXISTS(SELECT 1 FROM json_each(r.scopes) WHERE value='message:read') WHERE s.id=? AND s.tenant_id='shards-internal' AND s.disabled_at IS NULL AND s.client='operator-ui' AND s.created_by=? AND NOT EXISTS(SELECT 1 FROM operator_accounts WHERE id=? AND deleted_at IS NOT NULL)").bind(id,body,createdAt,b.request_id,recipient,operatorId,hash,hash),
     env.EDGE_DB.prepare("INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) SELECT ?,'shards-internal',?,'operator_message_send',?,'stored',? FROM agent_messages WHERE id=? AND tenant_id='shards-internal'").bind(crypto.randomUUID(),operatorId,id,createdAt,id)
   ]);
   const saved=await env.EDGE_DB.prepare("SELECT id,body,recipient_id FROM agent_messages WHERE tenant_id='shards-internal' AND sender_id=? AND request_key=?").bind(operatorId,b.request_id).first();
@@ -362,10 +362,11 @@ async function accountTokenWhoAmI(request,env){
     const row=await env.EDGE_DB.prepare("SELECT k.id,k.owner_id,k.kind,k.label,k.scopes,k.expires_at,a.full_name FROM operator_api_keys k JOIN operator_accounts a ON a.id=k.owner_id WHERE k.token_sha256=? AND k.revoked_at IS NULL AND k.expires_at>? AND a.deleted_at IS NULL").bind(hash,now).first();
     if(!row)return pub({error:'Expired or revoked credential'},401);
     if(row.scopes!=='["account:read"]')return pub({error:'Credential scope denied'},403);
-    await env.EDGE_DB.batch([
-      env.EDGE_DB.prepare('UPDATE operator_api_keys SET last_used_at=? WHERE id=? AND revoked_at IS NULL AND expires_at>?').bind(now,row.id,now),
+    const receipt=await env.EDGE_DB.batch([
+      env.EDGE_DB.prepare('UPDATE operator_api_keys SET last_used_at=? WHERE id=? AND revoked_at IS NULL AND expires_at>? AND owner_id IN (SELECT id FROM operator_accounts WHERE deleted_at IS NULL)').bind(now,row.id,now),
       accountAudit(env,row.owner_id,'key_used',row.id,now,true)
     ]);
+    if(receipt?.[0]?.meta?.changes!==1)return pub({error:'Expired or revoked credential'},401);
     return pub({account_id:row.owner_id,kind:row.kind,label:row.label,scopes:['account:read'],credential_active:true,can_call_agent_tools:false});
   }catch(e){return pub({error:'Account token verification unavailable'},503)}
 }
