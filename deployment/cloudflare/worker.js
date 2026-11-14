@@ -112,21 +112,27 @@ if(request.method==='GET'&&u.pathname==='/lab.js')return plain(LAB_CLIENT,200,'t
 if(request.method==='GET'&&u.pathname==='/signin')return new Response(SIGNIN_HTML,{headers:{...HEADERS,'content-type':'text/html; charset=utf-8','content-security-policy':"default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; script-src 'none'; img-src 'none'; style-src 'unsafe-inline'; font-src 'self'"}});
 if(u.pathname==='/connect'||u.pathname==='/connect/profile'){
 if(!env.CONNECT_ACCESS_AUD||env.CONNECT_ACCESS_AUD===env.ACCESS_AUD)return pub({error:'Separate authenticated MCP identity is not configured'},503);
-let claims;try{claims=await accessClaims(request,env,env.CONNECT_ACCESS_AUD)}catch(e){if(String(e?.message||'').startsWith('Cloudflare Access keys')||e?.name==='TimeoutError')return pub({error:'Cloudflare Access signing keys temporarily unavailable'},503);return pub({error:'Cloudflare Access authentication required'},401,{'www-authenticate':'Bearer realm="shards-mcp-connect", resource_metadata="'+ORIGIN+'/.well-known/oauth-protected-resource/connect"'})}
+let claims;try{claims=await accessClaims(request,env,env.CONNECT_ACCESS_AUD)}catch(e){if(String(e?.message||'').startsWith('Cloudflare Access keys')||e?.name==='TimeoutError')return pub({error:'Cloudflare Access signing keys temporarily unavailable'},503);return pub({error:'Cloudflare Access authentication required'},401,{'www-authenticate':'Bearer realm="shards-mcp-connect", resource_metadata="'+ORIGIN+'/.well-known/cloudflare-access-protected-resource/connect"'})}
 if(u.pathname==='/connect'&&request.method==='POST')return mcp(request,env,claims);
 if(u.pathname==='/connect/profile'&&request.method==='GET'){const identity=escapeHTML(typeof claims.email==='string'&&claims.email?claims.email:'Cloudflare account ('+(await digest(claims.sub)).slice(0,12)+')');return new Response(SIGNED_HTML.replace('__IDENTITY__',()=>identity),{headers:{...HEADERS,'content-type':'text/html; charset=utf-8','content-security-policy':"default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; script-src 'none'; img-src 'none'; style-src 'unsafe-inline'; font-src 'self'"}})}
 if(u.pathname==='/connect/profile')return plain('Profile supports GET only',405,'text/plain; charset=utf-8',{allow:'GET'});
 return plain('MCP supports POST JSON-RPC; streaming GET unavailable',405,'text/plain; charset=utf-8',{allow:'POST'});
 }
 if(request.method==='GET'&&(
+  u.pathname==='/.well-known/cloudflare-access-protected-resource/connect'||
   u.pathname==='/.well-known/oauth-protected-resource/connect'||
   u.pathname==='/.well-known/oauth-protected-resource'||
   u.pathname==='/.well-known/oauth-authorization-server'
 )){
   const issuer=oauthIssuer(env);
   if(!issuer)return pub({error:'OAuth discovery unavailable'},503,{'cache-control':'no-store'});
-  if(u.pathname==='/.well-known/oauth-protected-resource/connect'){
-    return pub({resource:ORIGIN+'/connect',authorization_servers:[issuer],bearer_methods_supported:['header']},200,{'cache-control':'public, max-age=120','access-control-allow-origin':'*'});
+  if(u.pathname==='/.well-known/oauth-protected-resource/connect'||u.pathname==='/.well-known/cloudflare-access-protected-resource/connect'){
+    const metadata={resource:ORIGIN+'/connect',authorization_servers:[issuer],bearer_methods_supported:['header']};
+    if(u.pathname.startsWith('/.well-known/cloudflare-access-protected-resource/')){
+      metadata.protected=true;
+      metadata.team_domain=env.ACCESS_TEAM+'.cloudflareaccess.com';
+    }
+    return pub(metadata,200,{'cache-control':'public, max-age=120','access-control-allow-origin':'*'});
   }
   if(u.pathname==='/.well-known/oauth-protected-resource'){
     return new Response(null,{status:302,headers:{...HEADERS,location:ORIGIN+'/.well-known/oauth-protected-resource/connect','cache-control':'no-store','access-control-allow-origin':'*'}});
