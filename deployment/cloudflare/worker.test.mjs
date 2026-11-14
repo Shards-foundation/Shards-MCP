@@ -448,6 +448,16 @@ test("RFC 9728 OAuth discovery publishes the actual path-bound resource and trus
   assert.equal(missing.status,503);
   const wrongAudience=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),{...env,CONNECT_ACCESS_AUD:"operator-aud"});
   assert.equal(wrongAudience.status,503);
+  const missingOperator=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),{ACCESS_TEAM:env.ACCESS_TEAM,CONNECT_ACCESS_AUD:env.CONNECT_ACCESS_AUD});
+  assert.equal(missingOperator.status,503);
+  for(const bad of ["", " ", "  broken "]) {
+    const invalidAudience=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),{...env,CONNECT_ACCESS_AUD:bad});
+    assert.equal(invalidAudience.status,503);
+  }
+  for(const badTeam of ["-bad","bad-","evil.test/path"]) {
+    const invalidTeam=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),{...env,ACCESS_TEAM:badTeam});
+    assert.equal(invalidTeam.status,503);
+  }
   const badTeam=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),{...env,ACCESS_TEAM:"evil.test/path"});
   assert.equal(badTeam.status,503);
   const otherHost=await worker.fetch(new Request("https://untrusted.example/.well-known/oauth-protected-resource/connect"),env);
@@ -463,5 +473,5 @@ test("Unauthenticated connect origin exposes discoverable metadata without grant
   assert.equal(r.headers.get("access-control-allow-origin"),null,"Authenticated MCP responses never get wildcard CORS");
   assert.match(r.headers.get("www-authenticate"),/realm="shards-mcp-connect"/);
   assert.match(r.headers.get("www-authenticate"),/resource_metadata="https:\/\/mcp\.shardsinc\.co\.uk\/\.well-known\/oauth-protected-resource\/connect"/);
-  assert.doesNotMatch(await r.text(),/Cloudflare.*email|smcp_/);
+  assert.deepEqual(await r.json(),{error:"Cloudflare Access authentication required"},"The 401 response is a generic challenge, not a user-profile disclosure");
 });
