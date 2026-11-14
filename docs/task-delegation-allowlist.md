@@ -36,16 +36,18 @@ database location configured, find current agent IDs:
 ```bash
 shards-mcp-admin list
 shards-mcp-admin delegation-list
-shards-mcp-admin delegation-grant --creator agt_<creator-id> --assignee agt_<worker-id>
+CREATOR_AGENT_ID="agt_REPLACE_WITH_CREATOR_ID"
+WORKER_AGENT_ID="agt_REPLACE_WITH_WORKER_ID"
+shards-mcp-admin delegation-grant --creator "$CREATOR_AGENT_ID" --assignee "$WORKER_AGENT_ID"
 shards-mcp-admin delegation-list
 ```
 
-Use the **real IDs** printed by `list`, not the angle-bracket placeholders.
+Replace both example variable values with the **real IDs** printed by `list` before running a grant. Do not paste the example placeholder IDs unchanged.
 Then resume task submission and verify one allowed and one denied assignment.
 To block future cross-agent assignment:
 
 ```bash
-shards-mcp-admin delegation-revoke --creator agt_<creator-id> --assignee agt_<worker-id>
+shards-mcp-admin delegation-revoke --creator "$CREATOR_AGENT_ID" --assignee "$WORKER_AGENT_ID"
 ```
 
 Both changes are hash-chain audited in the same transaction as the policy
