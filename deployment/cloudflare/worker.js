@@ -129,11 +129,14 @@ async function operatorSendMessage(env,sub,b){
     return pub({id:row.id,stored:true,idempotent:true},200);
   }
   const id=crypto.randomUUID();
-  await env.EDGE_DB.prepare("INSERT OR IGNORE INTO agent_messages(id,tenant_id,sender_id,recipient_id,body,created_at,request_key) SELECT ?,'shards-internal',s.id,r.id,?,?,? FROM agents s JOIN agents r ON r.id=? AND r.tenant_id='shards-internal' AND r.disabled_at IS NULL AND r.client!='operator-ui' WHERE s.id=? AND s.tenant_id='shards-internal' AND s.disabled_at IS NULL AND s.client='operator-ui'").bind(id,body,createdAt,b.request_id,recipient,operatorId).run();
+  // D1 batch is transactional: the new message and its audit receipt commit or roll back together.
+  await env.EDGE_DB.batch([
+    env.EDGE_DB.prepare("INSERT OR IGNORE INTO agent_messages(id,tenant_id,sender_id,recipient_id,body,created_at,request_key) SELECT ?,'shards-internal',s.id,r.id,?,?,? FROM agents s JOIN agents r ON r.id=? AND r.tenant_id='shards-internal' AND r.disabled_at IS NULL AND r.client!='operator-ui' WHERE s.id=? AND s.tenant_id='shards-internal' AND s.disabled_at IS NULL AND s.client='operator-ui'").bind(id,body,createdAt,b.request_id,recipient,operatorId),
+    env.EDGE_DB.prepare("INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) SELECT ?,'shards-internal',?,'operator_message_send',?,'stored',? FROM agent_messages WHERE id=? AND tenant_id='shards-internal'").bind(crypto.randomUUID(),operatorId,id,createdAt,id)
+  ]);
   const saved=await env.EDGE_DB.prepare("SELECT id,body,recipient_id FROM agent_messages WHERE tenant_id='shards-internal' AND sender_id=? AND request_key=?").bind(operatorId,b.request_id).first();
   if(!saved)return pub({error:'Sender or recipient unavailable; message not stored'},403);
   if(saved.recipient_id!==recipient||saved.body!==body)return pub({error:'Concurrent idempotency conflict'},409);
-  if(saved.id===id)await audit(env,{id:operatorId,tenant_id:'shards-internal'},'operator_message_send',id,'stored');
   return pub({id:saved.id,stored:true,idempotent:saved.id!==id},saved.id===id?201:200);
 }
 async function manage(request,env,url){if(!env.ACCESS_TEAM||!env.ACCESS_AUD)return pub({error:'Operator Access configuration is missing'},503);let sub;try{sub=await accessActor(request,env)}catch(e){return pub({error:'Signed Cloudflare Access login required'},401)}
