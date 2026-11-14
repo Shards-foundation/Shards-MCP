@@ -35,6 +35,10 @@ jobs:
         run: node --test deployment/cloudflare/worker.test.mjs
       - name: Signed operator workspace and real messaging regression
         run: node --test deployment/cloudflare/workspace.test.mjs
+      - name: Signed account settings and credential lifecycle regressions
+        run: |
+          set -euo pipefail
+          node --test deployment/cloudflare/settings.test.mjs
       - name: Official MCP SDK v1 signed-endpoint protocol interoperability
         run: |
           set -euo pipefail
