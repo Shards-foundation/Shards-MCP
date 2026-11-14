@@ -121,6 +121,8 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    assert.equal(noLogin.status,401);
    const nonAdmin=await worker.fetch(req("GET",api,await jwt({aud:["connect-audience"]})),env);
    assert.equal(nonAdmin.status,401);
+   const sharedAudience=await worker.fetch(req("GET",api,await jwt()),{...env,CONNECT_ACCESS_AUD:"operator-audience"});
+   assert.equal(sharedAudience.status,503,"Shared operator and Connect audience is a fatal configuration error");
    const user=await jwt();
    const initial=await worker.fetch(req("GET",api,user),env);
    assert.equal(initial.status,200);
@@ -147,6 +149,12 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    assert.equal(off.status,400);
    const unknown=await worker.fetch(req("POST",endpoint,user,{...payload,evil:true}),env);
    assert.equal(unknown.status,400);
+   const recipientMissingScope=agents.find(a=>a.id===agentId);
+   const originalScopes=recipientMissingScope.scopes;
+   recipientMissingScope.scopes=JSON.stringify(["agent:identity"]);
+   const noInbox=await worker.fetch(req("POST",endpoint,user,payload),env);
+   assert.equal(noInbox.status,409,"Recipient without message:read must not be sent an unreadable inbox record");
+   recipientMissingScope.scopes=originalScopes;
    assert.equal(messages.length,0);
    const first=await worker.fetch(req("POST",endpoint,user,payload),env);
    assert.equal(first.status,201);
@@ -175,7 +183,10 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    const recipientAccount=agents.find(a=>a.id===agentId);
    recipientAccount.disabled_at=new Date().toISOString();
    const revokedTarget=await worker.fetch(req("POST",endpoint,user,{...payload,request_id:"third-request-123456"}),env);
-   assert.equal(revokedTarget.status,404,"Revoked recipient must not receive messages");
+   assert.equal(revokedTarget.status,404,"Revoked recipient must not receive new messages");
+   const replayAfterRevoke=await worker.fetch(req("POST",endpoint,user,payload),env);
+   assert.equal(replayAfterRevoke.status,200,"A committed request can be confirmed after recipient revocation");
+   assert.equal((await replayAfterRevoke.json()).idempotent,true);
    recipientAccount.disabled_at=null;
    const after=await worker.fetch(req("GET",api,user),env);
    const feed=await after.json();
