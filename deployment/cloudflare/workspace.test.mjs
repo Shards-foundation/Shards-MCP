@@ -89,8 +89,14 @@ test("operator-only workspace uses a real signed admin identity and stores scope
      },
      async all(){
        if(sql.startsWith("SELECT id,name,client,created_at FROM agents"))return {results:agents.map(({id,name,client,created_at})=>({id,name,client,created_at}))};
-       if(sql.startsWith("SELECT m.id,m.sender_id"))return {results:messages.map(m=>({...m,sender_name:agents.find(a=>a.id===m.sender_id)?.name,recipient_name:agents.find(a=>a.id===m.recipient_id)?.name}))};
-       if(sql.startsWith("SELECT t.id,t.creator_id"))return {results:tasks};
+       if(sql.startsWith("SELECT m.id,m.sender_id")){
+         assert.match(sql,/m\.sender_id=\? OR m\.recipient_id=\?/,"D1 must page the selected agent only");
+         return {results:messages.filter(m=>m.sender_id===args[0]||m.recipient_id===args[1]).slice(-200).reverse().map(m=>({...m,sender_name:agents.find(a=>a.id===m.sender_id)?.name,recipient_name:agents.find(a=>a.id===m.recipient_id)?.name}))};
+       }
+       if(sql.startsWith("SELECT t.id,t.creator_id")){
+         assert.match(sql,/t\.creator_id=\? OR t\.assignee_id=\?/);
+         return {results:tasks.filter(t=>t.creator_id===args[0]||t.assignee_id===args[1]).slice(-80).reverse()};
+       }
        throw Error("Unexpected all SQL: "+sql);
      },
    });
@@ -113,6 +119,11 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    assert.equal(snapshot.tasks.length,0);
    assert.equal(typeof snapshot.operator_id,"string");
    assert.equal(agents.length,1,"GET cannot mutate tenant");
+   assert.equal(snapshot.focus_id,agentId);
+   const wrongTenantAgent=await worker.fetch(req("GET",api+"?agent_id=agent-not-enrolled-12345",user),env);
+   assert.equal(wrongTenantAgent.status,404);
+   const invalidFilter=await worker.fetch(req("GET",api+"?agent_id=%3Cscript%3E",user),env);
+   assert.equal(invalidFilter.status,400);
    assert.doesNotMatch(JSON.stringify(snapshot),/cf-access|access_tokens|token_sha256|smcp_/);
    const recipient=agentId,requestId="request-1234567890";
    const payload={recipient_agent_id:recipient,body:"Please report your status from your own runtime.",request_id:requestId};
@@ -160,5 +171,18 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    assert.equal(feed.messages.length,1);
    assert.equal(feed.messages[0].body,payload.body);
    assert.equal(feed.messages[0].sender_name,agents.find(a=>a.id===snapshot.operator_id).name);
+   const otherId="second-agent-123456";
+   agents.push({id:otherId,tenant_id:"shards-internal",name:"AnotherWorker",client:"codex",created_at:"2026-11-13T13:00:00Z",disabled_at:null});
+   messages.push({id:"old-message-for-other",tenant_id:"shards-internal",sender_id:otherId,recipient_id:otherId,body:"Only for second agent",created_at:"2026-11-13T13:00:00Z",request_key:"outside",read_at:null});
+   const focused=await worker.fetch(req("GET",api+"?agent_id="+agentId,user),env);
+   const direct=await focused.json();
+   assert.equal(direct.messages.length,1,"Only chosen agent messages returned");
+   assert.equal(direct.messages[0].body,payload.body);
+   const second=await worker.fetch(req("GET",api+"?agent_id="+otherId,user),env);
+   assert.equal((await second.json()).messages[0].body,"Only for second agent");
+   const escapedBody=String.fromCharCode(34).repeat(2000);
+   const escaped=await worker.fetch(req("POST",endpoint,user,{...payload,body:escapedBody,request_id:"escaped-2000-char-unique"}),env);
+   assert.equal(escaped.status,201,"Valid 2000-character JSON-escaped message must not be rejected by transport size cap");
+   assert.equal(messages.find(m=>m.request_key==="escaped-2000-char-unique").body.length,2000);
  }finally{sandbox.fetch=originalFetch}
 });
