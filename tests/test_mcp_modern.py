@@ -30,6 +30,7 @@ class StatelessMcpTests(unittest.TestCase):
         self.agent_id = registered["agent_id"]
         worker = self.gateway.register(admin, "worker", "http", [], ["task:claim", "task:read"])
         self.worker_id = worker["agent_id"]
+        self.gateway.delegation_grant(admin, self.agent_id, self.worker_id)
         self.http = ThreadingHTTPServer(
             ("127.0.0.1", 0), make_handler(self.gateway, set())
         )

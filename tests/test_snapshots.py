@@ -29,6 +29,7 @@ class SnapshotTests(unittest.TestCase):
         b = self.gateway.register(self.root, "snapshot-worker", "test", [], ["task:read"])
         self.actor = self.gateway.authenticate(a["token"])
         self.dest = b["agent_id"]
+        self.gateway.delegation_grant(self.root, a["agent_id"], self.dest)
 
     def tearDown(self):
         self.temp.cleanup()

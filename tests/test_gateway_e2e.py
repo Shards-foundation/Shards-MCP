@@ -45,6 +45,7 @@ class GatewayInteropE2ETests(unittest.TestCase):
             admin, "observer", "read-only-client", [],
             ["agent:heartbeat"],
         )
+        self.gateway.delegation_grant(admin, self.creator["agent_id"], self.worker["agent_id"])
         self.start_server()
 
     def start_server(self):

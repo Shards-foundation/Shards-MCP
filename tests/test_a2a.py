@@ -27,6 +27,7 @@ class A2ATests(unittest.TestCase):
                                               ["task:verify"])
         self.outsider = self.gateway.register(self.root, "outsider", "test", [],
                                               ["agent:read", "task:read"])
+        self.gateway.delegation_grant(self.root, self.sender["agent_id"], self.worker["agent_id"])
         self.a2a = A2AAdapter(self.gateway, "http://127.0.0.1:8787")
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0),
                                        make_handler(self.gateway, set(), a2a=self.a2a))
@@ -121,6 +122,7 @@ class A2ATests(unittest.TestCase):
         worker = self.gateway.register(self.root, "a2a-reference-process", "test",
                                        ["a2a/1.0"], ["agent:heartbeat", "task:read",
                                        "task:claim", "task:update", "checkpoint:write"])
+        self.gateway.delegation_grant(self.root, self.sender["agent_id"], worker["agent_id"])
         endpoint = "/a2a/agents/" + worker["agent_id"]
         message = self.rpc("SendMessage", self.message("process-1", "Hello from A2A"))
         status, created = self.request("POST", endpoint, self.sender["token"], message)
