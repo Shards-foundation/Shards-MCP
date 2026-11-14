@@ -33,6 +33,11 @@ jobs:
           NODE
       - name: Isolated edge protocol and quota regression tests
         run: node --test deployment/cloudflare/worker.test.mjs
+      - name: Official MCP SDK v1 signed-endpoint protocol interoperability
+        run: |
+          set -euo pipefail
+          npm install --prefix deployment/cloudflare --no-save --no-package-lock --ignore-scripts --audit=false --fund=false @modelcontextprotocol/sdk@1 zod@4
+          node --test deployment/cloudflare/sdk.test.mjs
       - name: Verify real website and database status
         run: |
           set -euo pipefail
