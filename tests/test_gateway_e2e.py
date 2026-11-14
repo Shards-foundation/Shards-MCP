@@ -46,6 +46,9 @@ class GatewayInteropE2ETests(unittest.TestCase):
             ["agent:heartbeat"],
         )
         self.gateway.delegation_grant(admin, self.creator["agent_id"], self.worker["agent_id"])
+        self.gateway.controller_set(admin, self.creator["agent_id"], "origin-team")
+        self.gateway.controller_set(admin, self.worker["agent_id"], "worker-team")
+        self.gateway.controller_set(admin, self.verifier["agent_id"], "review-team")
         self.start_server()
 
     def start_server(self):
@@ -204,6 +207,8 @@ class GatewayInteropE2ETests(unittest.TestCase):
         self.assertTrue(self.tool(worker, "task_complete", {
             "task_id": task["task_id"], "success": True, "result": "again",
         })["isError"])
+        self.gateway.verifier_assign(self.gateway.authenticate(self.secret),
+                                     task["task_id"], self.verifier["agent_id"])
         approved = self.assert_ok(verifier, "task_verify", {
             "task_id": task["task_id"], "approved": True,
             "evidence": {"review": "output matched task input", "tests": 1},

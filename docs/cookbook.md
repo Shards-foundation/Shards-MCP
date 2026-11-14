@@ -45,7 +45,18 @@ shards-worker --once
 ```
 
 5. **Only task creator or assignee** (or the host operator) can inspect this task via `task_get`. A verifier with `task:read` alone cannot call `task_get` on another principal's task; the gateway returns `NOT_FOUND`. The worker's successful report remains `reported`.
-6. Arrange a separately authorised result/evidence handoff to the independent verifier, for example a scoped `message_send` to a verifier identity with `message:read`, or a trusted out-of-band review channel. The reference worker does **not** automatically deliver that handoff. The verifier must establish expected vs actual behaviour independently, not simply trust the worker's claim, then call `task_verify` with the task ID, approval decision and meaningful evidence. Until then do not claim `succeeded`. This limitation is an integration step, **not** built-in verifier access to arbitrary tasks.
+6. The operator must explicitly classify the **real** creator, worker and verifier identities by independently established control relationship, and assign the reported task to the verifier **before** it can be approved. Obtain the actual task ID from the creation response and set the following variables in the protected operator shell (these examples are deliberately not real IDs):
+
+```bash
+SHARDS_TASK_ID="tsk_REPLACE_WITH_REAL_TASK_ID"
+SHARDS_VERIFIER_AGENT_ID="agt_REPLACE_WITH_VERIFIER_ID"
+shards-mcp-admin controller-set --agent-id "$SHARDS_CREATOR_AGENT_ID" --domain creator-control-a
+shards-mcp-admin controller-set --agent-id "$SHARDS_WORKER_AGENT_ID" --domain worker-control-b
+shards-mcp-admin controller-set --agent-id "$SHARDS_VERIFIER_AGENT_ID" --domain reviewer-control-c
+shards-mcp-admin verifier-assign --task-id "$SHARDS_TASK_ID" --verifier "$SHARDS_VERIFIER_AGENT_ID"
+```
+
+7. Arrange a separately authorised result/evidence handoff to that operator-assigned reviewer, for example a scoped `message_send` to a verifier identity with `message:read`, or a trusted out-of-band review channel. The reference worker does **not** automatically deliver that handoff. The reviewer must establish expected versus actual behaviour independently, not simply trust the worker's claim, then call `task_verify` with the exact task ID, approval decision and meaningful evidence. Until then the task remains `reported`. Control-domain labels are operator assertions, not proof of independent humans; see [the verifier policy](verifier-control-domains.md).
 
 ## Recipe C — diagnose without mutation
 

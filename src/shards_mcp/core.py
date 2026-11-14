@@ -97,6 +97,17 @@ class Gateway:
                   granted_by TEXT NOT NULL, created TEXT NOT NULL,
                   PRIMARY KEY (creator, assignee)
                 );
+                -- Operator-classified trust domains are administrative claims,
+                -- not independently authenticated people or organisations.
+                CREATE TABLE IF NOT EXISTS agent_control_domains (
+                  agent_id TEXT PRIMARY KEY, control_domain TEXT NOT NULL,
+                  set_by TEXT NOT NULL, updated TEXT NOT NULL
+                );
+                -- Per-task verifier assignment is not exposed as a remote tool.
+                CREATE TABLE IF NOT EXISTS verifier_assignments (
+                  task_id TEXT PRIMARY KEY, verifier TEXT NOT NULL,
+                  assigned_by TEXT NOT NULL, created TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS verifications (
                   task_id TEXT PRIMARY KEY, verifier TEXT NOT NULL,
                   approved INTEGER NOT NULL, evidence TEXT NOT NULL, created TEXT NOT NULL
@@ -320,6 +331,100 @@ class Gateway:
         with self.read_tx() as db:
             rows = db.execute("""SELECT creator,assignee,granted_by,created
                                  FROM delegation_grants ORDER BY creator,assignee""").fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def control_domain(db: sqlite3.Connection, agent_id: str) -> str | None:
+        if agent_id in ("operator", "scheduler"):
+            return "__operator_control__"
+        row = db.execute("SELECT control_domain FROM agent_control_domains WHERE agent_id=?",
+                         (agent_id,)).fetchone()
+        return row["control_domain"] if row else None
+
+    def controller_set(self, actor: Principal, agent_id: str, domain: str) -> dict[str, Any]:
+        """Operator-provided grouping, never a proof of human/controller identity."""
+        actor.require("*")
+        self.required(agent_id, "agent_id")
+        if not isinstance(domain, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{2,63}", domain):
+            raise GatewayError("control domain must be 3..64 lowercase ASCII characters")
+        if domain in ("operator", "scheduler", "__operator_control__"):
+            raise GatewayError("reserved control domain")
+        with self.tx() as db:
+            self.agent_exists(db, agent_id)
+            old = self.control_domain(db, agent_id)
+            if old == domain:
+                return {"agent_id": agent_id, "control_domain": domain, "unchanged": True}
+            db.execute("""INSERT INTO agent_control_domains(agent_id,control_domain,set_by,updated)
+                          VALUES (?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET
+                          control_domain=excluded.control_domain,
+                          set_by=excluded.set_by,updated=excluded.updated""",
+                       (agent_id, domain, actor.agent_id, now()))
+            self.audit(db, actor.agent_id, "controller.set", agent_id,
+                       {"control_domain": domain, "previous_domain": old})
+        return {"agent_id": agent_id, "control_domain": domain, "unchanged": False}
+
+    def controllers(self, actor: Principal) -> list[dict[str, Any]]:
+        actor.require("*")
+        with self.read_tx() as db:
+            rows = db.execute("""SELECT agent_id,control_domain,set_by,updated
+                                 FROM agent_control_domains ORDER BY agent_id""").fetchall()
+        return [dict(row) for row in rows]
+
+    def verifier_assign(self, actor: Principal, task_id: str, verifier: str) -> dict[str, Any]:
+        """Pin one eligible verifier to a task, subject to operator-classified control groups."""
+        actor.require("*")
+        self.required(task_id, "task_id")
+        self.required(verifier, "verifier")
+        with self.tx() as db:
+            task = db.execute("SELECT state, creator, assignee FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not task:
+                raise GatewayError("task not found", "NOT_FOUND")
+            if task["state"] not in ("queued", "running", "reported"):
+                raise GatewayError("task is not eligible for verifier assignment", "CONFLICT")
+            self.agent_exists(db, verifier)
+            scopes = db.execute("SELECT scopes FROM agents WHERE id=?", (verifier,)).fetchone()
+            if "task:verify" not in json.loads(scopes["scopes"]):
+                raise GatewayError("verifier lacks task:verify scope", "FORBIDDEN")
+            if verifier in (task["creator"], task["assignee"]):
+                raise GatewayError("creator/worker cannot verify their own task", "FORBIDDEN")
+            verifier_domain = self.control_domain(db, verifier)
+            creator_domain = self.control_domain(db, task["creator"])
+            worker_domain = self.control_domain(db, task["assignee"])
+            if (not verifier_domain or not creator_domain or not worker_domain or
+                    verifier_domain in (creator_domain, worker_domain)):
+                raise GatewayError("reviewer independence not established by configured control domains", "FORBIDDEN")
+            old = db.execute("SELECT verifier FROM verifier_assignments WHERE task_id=?", (task_id,)).fetchone()
+            if old:
+                if old["verifier"] != verifier:
+                    raise GatewayError("task already assigned to another verifier; unassign first", "CONFLICT")
+                return {"task_id": task_id, "verifier": verifier, "unchanged": True}
+            db.execute("""INSERT INTO verifier_assignments(task_id,verifier,assigned_by,created)
+                          VALUES (?,?,?,?)""", (task_id, verifier, actor.agent_id, now()))
+            self.audit(db, actor.agent_id, "verifier.assign", task_id,
+                       {"verifier": verifier, "domain": verifier_domain})
+        return {"task_id": task_id, "verifier": verifier, "unchanged": False}
+
+    def verifier_unassign(self, actor: Principal, task_id: str) -> dict[str, Any]:
+        actor.require("*")
+        self.required(task_id, "task_id")
+        with self.tx() as db:
+            task = db.execute("SELECT state FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not task:
+                raise GatewayError("task not found", "NOT_FOUND")
+            if task["state"] not in ("queued", "running", "reported"):
+                raise GatewayError("completed task reviewer cannot be changed", "CONFLICT")
+            existing = db.execute("SELECT verifier FROM verifier_assignments WHERE task_id=?", (task_id,)).fetchone()
+            if existing:
+                db.execute("DELETE FROM verifier_assignments WHERE task_id=?", (task_id,))
+                self.audit(db, actor.agent_id, "verifier.unassign", task_id,
+                           {"verifier": existing["verifier"]})
+        return {"task_id": task_id, "changed": bool(existing)}
+
+    def verifier_assignments(self, actor: Principal) -> list[dict[str, Any]]:
+        actor.require("*")
+        with self.read_tx() as db:
+            rows = db.execute("""SELECT task_id,verifier,assigned_by,created
+                                 FROM verifier_assignments ORDER BY task_id""").fetchall()
         return [dict(row) for row in rows]
 
     def agents(self, actor: Principal) -> list[dict[str, Any]]:
@@ -639,6 +744,16 @@ class Gateway:
                 raise GatewayError("task is not awaiting verification", "CONFLICT")
             if actor.agent_id in (row["assignee"], row["creator"]):
                 raise GatewayError("creator or worker cannot verify their own task", "FORBIDDEN")
+            self.agent_exists(db, actor.agent_id)  # bootstrap operator is not a reviewer
+            assigned = db.execute("SELECT verifier FROM verifier_assignments WHERE task_id=?", (task_id,)).fetchone()
+            if not assigned or assigned["verifier"] != actor.agent_id:
+                raise GatewayError("task has no matching operator-assigned verifier", "FORBIDDEN")
+            verifier_domain = self.control_domain(db, actor.agent_id)
+            creator_domain = self.control_domain(db, row["creator"])
+            worker_domain = self.control_domain(db, row["assignee"])
+            if (not verifier_domain or not creator_domain or not worker_domain or
+                    verifier_domain in (creator_domain, worker_domain)):
+                raise GatewayError("configured control domains do not establish reviewer separation", "FORBIDDEN")
             state = "succeeded" if approved else "failed"
             db.execute("INSERT INTO verifications(task_id,verifier,approved,evidence,created) VALUES (?,?,?,?,?)",
                        (task_id, actor.agent_id, int(approved), serialized, now()))

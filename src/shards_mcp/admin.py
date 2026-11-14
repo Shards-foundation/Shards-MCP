@@ -39,6 +39,16 @@ def main() -> None:
     deny.add_argument("--creator", required=True)
     deny.add_argument("--assignee", required=True)
     sub.add_parser("delegation-list", help="List operator-authorized task delegation pairs")
+    controller = sub.add_parser("controller-set", help="Classify one agent into an operator-attested control domain")
+    controller.add_argument("--agent-id", required=True)
+    controller.add_argument("--domain", required=True)
+    sub.add_parser("controller-list", help="List operator-attested agent control domains")
+    assign = sub.add_parser("verifier-assign", help="Assign an eligible distinct-domain verifier to one task")
+    assign.add_argument("--task-id", required=True)
+    assign.add_argument("--verifier", required=True)
+    unassign = sub.add_parser("verifier-unassign", help="Remove task verifier before final attestation")
+    unassign.add_argument("--task-id", required=True)
+    sub.add_parser("verifier-list", help="List explicit task verification assignments")
     backup = sub.add_parser("backup", help="Create an exclusive consistent online SQLite snapshot")
     backup.add_argument("--output", required=True, help="New file in an owner-only backup directory")
     check = sub.add_parser("verify-snapshot", help="Verify an offline snapshot without starting a gateway")
@@ -98,6 +108,16 @@ def main() -> None:
             print(json.dumps(gateway.delegation_revoke(root, args.creator, args.assignee), sort_keys=True))
         elif args.action == "delegation-list":
             print(json.dumps(gateway.delegations(root), sort_keys=True))
+        elif args.action == "controller-set":
+            print(json.dumps(gateway.controller_set(root, args.agent_id, args.domain), sort_keys=True))
+        elif args.action == "controller-list":
+            print(json.dumps(gateway.controllers(root), sort_keys=True))
+        elif args.action == "verifier-assign":
+            print(json.dumps(gateway.verifier_assign(root, args.task_id, args.verifier), sort_keys=True))
+        elif args.action == "verifier-unassign":
+            print(json.dumps(gateway.verifier_unassign(root, args.task_id), sort_keys=True))
+        elif args.action == "verifier-list":
+            print(json.dumps(gateway.verifier_assignments(root), sort_keys=True))
         elif args.action == "backup":
             print(json.dumps(create_snapshot(gateway, root, args.output), sort_keys=True))
         else:

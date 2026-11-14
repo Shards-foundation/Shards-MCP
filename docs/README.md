@@ -17,6 +17,7 @@ Shards-MCP is a self-hosted, single-organisation gateway. The Python package, op
 
 - [Portable skill installation](skills-distribution.md) — supported clients, explicit dry run, file integrity and safe recovery
 - [Cross-agent task delegation upgrade](task-delegation-allowlist.md) — **operator action required** before new agent-to-agent task assignments on upgraded Python gateways
+- [Verifier control domains](verifier-control-domains.md) — **operator action required** to classify agents and assign reviewers before task approval
 
 ## Reference library
 
