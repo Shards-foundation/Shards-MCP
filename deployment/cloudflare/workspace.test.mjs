@@ -60,6 +60,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    return head+"."+Buffer.from(signature).toString("base64url");
  }
  const agents=[{id:agentId,tenant_id:"shards-internal",name:"ExternalWorker",client:"claude",scopes:JSON.stringify(["agent:identity","message:read","message:send"]),created_at:"2026-11-13T12:00:00Z",disabled_at:null}];
+ agents.push({id:"foreign-agent-123456",tenant_id:"another-tenant",name:"ForeignWorker",client:"claude",scopes:JSON.stringify(["message:read"]),created_at:"2026-11-13T12:00:00Z",disabled_at:null});
  const messages=[],tasks=[],audits=[];
  let auditFailure=false;
  const env={ACCESS_TEAM:"workspace-integration",ACCESS_AUD:"operator-audience",CONNECT_ACCESS_AUD:"connect-audience",EDGE_DB:{
@@ -99,7 +100,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
        throw Error("Unexpected run SQL: "+sql);
      },
      async all(){
-       if(sql.startsWith("SELECT id,name,client,created_at FROM agents"))return {results:agents.map(({id,name,client,created_at})=>({id,name,client,created_at}))};
+       if(sql.startsWith("SELECT id,name,client,created_at FROM agents"))return {results:agents.filter(a=>a.tenant_id==="shards-internal"&&!a.disabled_at).map(({id,name,client,created_at})=>({id,name,client,created_at}))};
        if(sql.startsWith("SELECT m.id,m.sender_id")){
          assert.match(sql,/m\.sender_id=\? OR m\.recipient_id=\?/,"D1 must page the selected agent only");
          return {results:messages.filter(m=>m.sender_id===args[0]||m.recipient_id===args[1]).slice(-200).reverse().map(m=>({...m,sender_name:agents.find(a=>a.id===m.sender_id)?.name,recipient_name:agents.find(a=>a.id===m.recipient_id)?.name}))};
@@ -131,7 +132,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    assert.equal(snapshot.messages.length,0);
    assert.equal(snapshot.tasks.length,0);
    assert.equal(typeof snapshot.operator_id,"string");
-   assert.equal(agents.length,1,"GET cannot mutate tenant");
+   assert.equal(agents.length,2,"GET cannot mutate tenant or provision an operator");
    assert.equal(snapshot.focus_id,agentId);
    const wrongTenantAgent=await worker.fetch(req("GET",api+"?agent_id=agent-not-enrolled-12345",user),env);
    assert.equal(wrongTenantAgent.status,404);
@@ -143,8 +144,8 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    const endpoint=api+"/messages";
    const badOrigin=await worker.fetch(req("POST",endpoint,user,payload,"https://untrusted.example"),env);
    assert.equal(badOrigin.status,403);
-   const invalid=await worker.fetch(req("POST",endpoint,user,{...payload,recipient_agent_id:"another-tenant-agent-id"}),env);
-   assert.equal(invalid.status,404);
+   const invalid=await worker.fetch(req("POST",endpoint,user,{...payload,recipient_agent_id:"foreign-agent-123456"}),env);
+   assert.equal(invalid.status,404,"Real other-tenant recipient must be denied");
    const off=await worker.fetch(req("POST",endpoint,user,{...payload,body:""}),env);
    assert.equal(off.status,400);
    const unknown=await worker.fetch(req("POST",endpoint,user,{...payload,evil:true}),env);
@@ -162,7 +163,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    assert.equal(firstData.stored,true);
    assert.equal(firstData.idempotent,false);
    assert.equal(messages.length,1);
-   assert.equal(agents.length,2,"operator principal is created on first authenticated send only");
+   assert.equal(agents.length,3,"operator principal is created on first authenticated send only");
    assert.equal(messages[0].sender_id,snapshot.operator_id);
    assert.equal(messages[0].recipient_id,recipient);
    assert.equal(agents.find(a=>a.id===snapshot.operator_id).client,"operator-ui");
