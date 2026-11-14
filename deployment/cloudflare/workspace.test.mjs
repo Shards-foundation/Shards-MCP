@@ -61,7 +61,13 @@ test("operator-only workspace uses a real signed admin identity and stores scope
  }
  const agents=[{id:agentId,tenant_id:"shards-internal",name:"ExternalWorker",client:"claude",created_at:"2026-11-13T12:00:00Z",disabled_at:null}];
  const messages=[],tasks=[],audits=[];
+ let auditFailure=false;
  const env={ACCESS_TEAM:"workspace-integration",ACCESS_AUD:"operator-audience",CONNECT_ACCESS_AUD:"connect-audience",EDGE_DB:{
+  async batch(statements){
+    const savedMessages=messages.slice(),savedAudits=audits.slice();
+    try{const output=[];for(const stmt of statements)output.push(await stmt.run());return output}
+    catch(e){messages.splice(0,messages.length,...savedMessages);audits.splice(0,audits.length,...savedAudits);throw e}
+  },
   prepare(sql){
    const make=(args=[])=>({
      async first(){
@@ -84,7 +90,12 @@ test("operator-only workspace uses a real signed admin identity and stores scope
          if(from&&to&&!messages.some(m=>m.sender_id===sender&&m.request_key===key))messages.push({id,tenant_id:"shards-internal",sender_id:sender,recipient_id:recipient,body,created_at:created,request_key:key,read_at:null});
          return {meta:{changes:from&&to?1:0}};
        }
-       if(sql.startsWith("INSERT INTO audit_events")){audits.push(args);return {meta:{changes:1}}}
+       if(sql.startsWith("INSERT INTO audit_events")){
+         if(auditFailure)throw Error("Injected D1 audit failure");
+         const saved=messages.some(m=>m.id===args[4]&&m.tenant_id==="shards-internal");
+         if(saved)audits.push(args);
+         return {meta:{changes:saved?1:0}};
+       }
        throw Error("Unexpected run SQL: "+sql);
      },
      async all(){
@@ -180,6 +191,15 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    assert.equal(direct.messages[0].body,payload.body);
    const secondFeed=await worker.fetch(req("GET",api+"?agent_id="+otherId,user),env);
    assert.equal((await secondFeed.json()).messages[0].body,"Only for second agent");
+   auditFailure=true;
+   const broken=await worker.fetch(req("POST",endpoint,user,{...payload,request_id:"audit-failure-request-123"}),env);
+   assert.equal(broken.status,503,"Audit failure must reject the message");
+   assert.equal(messages.filter(m=>m.request_key==="audit-failure-request-123").length,0,"D1 batch rolls back message on audit failure");
+   auditFailure=false;
+   const recovered=await worker.fetch(req("POST",endpoint,user,{...payload,request_id:"audit-failure-request-123"}),env);
+   assert.equal(recovered.status,201,"A clean retry may now commit message and audit atomically");
+   assert.equal(messages.filter(m=>m.request_key==="audit-failure-request-123").length,1);
+   assert.equal(audits.length,2,"Every successful new message has exactly one audit entry");
    const escapedBody=String.fromCharCode(34).repeat(2000);
    const escaped=await worker.fetch(req("POST",endpoint,user,{...payload,body:escapedBody,request_id:"escaped-2000-char-unique"}),env);
    assert.equal(escaped.status,201,"Valid 2000-character JSON-escaped message must not be rejected by transport size cap");
