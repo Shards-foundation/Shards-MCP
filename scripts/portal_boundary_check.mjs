@@ -29,7 +29,7 @@ export async function checkPortalBoundary({ fetchImpl = fetch, endpoint = PORTAL
     const response = await fetchImpl(new URL(path, target.origin), opts);
     const evidence = { name, status: response.status };
     if (response.status === 401) {
-      evidence.bearerChallenge = /^Bearer\b/i.test(response.headers.get('www-authenticate') || '');
+      evidence.bearerChallenge = /(?:^|,\s*)Bearer(?:\s|$)/i.test(response.headers.get('www-authenticate') || '');
     }
     log.push(evidence);
     return response;
