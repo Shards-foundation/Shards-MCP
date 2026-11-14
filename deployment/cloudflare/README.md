@@ -156,11 +156,12 @@ The Worker now serves:
 
 | Public discovery route | Behaviour |
 | --- | --- |
+| `/.well-known/cloudflare-access-protected-resource/connect` | **Actual Access-advertised path** observed in the live HTTP 401 `WWW-Authenticate` header; returns canonical resource, verified issuer, and public Cloudflare protection metadata |
 | `/.well-known/oauth-protected-resource/connect` | RFC 9728 metadata: canonical resource `https://mcp.shardsinc.co.uk/connect`, configured Cloudflare Access issuer, and header-based bearer transport |
 | `/.well-known/oauth-protected-resource` | Temporary redirect to the path-bound resource metadata |
 | `/.well-known/oauth-authorization-server` | Temporary redirect to the **actual** `https://<ACCESS_TEAM>.cloudflareaccess.com/.well-known/oauth-authorization-server` metadata published by Cloudflare |
 
-The issuer is built only from the restricted Worker `ACCESS_TEAM` binding, never from query parameters or user input. These routes return 503 if the separate audience is missing, equal to the operator audience, or the team hostname configuration is invalid. They do **not** issue OAuth tokens, advertise unsupported providers, or bypass the Cloudflare Access policies.
+The issuer is built only from the restricted Worker `ACCESS_TEAM` binding, never from query parameters or user input. The exact Access-advertised metadata path was extracted from the deployed Cloudflare Access `401` challenge by the edge acceptance workflow, not guessed from the standards fallback. These routes return 503 if the separate audience is missing, equal to the operator audience, or the team hostname configuration is invalid. They do **not** issue OAuth tokens, advertise unsupported providers, or bypass the Cloudflare Access policies.
 
 These metadata endpoints permit anonymous cross-origin **GET** reads (`Access-Control-Allow-Origin: *`) because their contents are public. This CORS allowance applies **only to discovery metadata and redirects**; the authenticated `/connect` endpoint still rejects untrusted browser origins and does not expose bearer identities or privileged tools.
 
