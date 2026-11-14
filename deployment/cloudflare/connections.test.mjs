@@ -51,7 +51,7 @@ test('signed operator sees only owned agents, validated MCP bearer logs a receip
   {id:'agent-owner-one-0001',name:'MyHermes',client:'hermes-agent',created_by:owner,tenant_id:'shards-internal',scopes:'["agent:identity","message:read"]',created_at:'2026-11-14T03:00:00Z',disabled_at:null},
   {id:'agent-owner-two-0002',name:'OtherAgent',client:'cursor',created_by:otherOwner,tenant_id:'shards-internal',scopes:'["agent:identity"]',created_at:'2026-11-14T03:00:00Z',disabled_at:null}
  ];
- const token='smcp_'+'a'.repeat(64),tokenHash=await sha(token.slice(7));
+ const token='smcp_'+'a'.repeat(64),tokenHash=await sha(token);
  const tokens=[{agent_id:agents[0].id,token_sha256:tokenHash,revoked_at:null,expires_at:'2030-01-01T00:00:00Z'}];
  const receipts=[],audits=[];
  const mockPrepare=sql=>({
