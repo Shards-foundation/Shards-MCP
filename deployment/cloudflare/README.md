@@ -168,3 +168,27 @@ These metadata endpoints permit anonymous cross-origin **GET** reads (`Access-Co
 An origin-bypass fallback `401` on `/connect` includes the RFC 9728 `resource_metadata` challenge URL. The actual browser/agent challenge for a Cloudflare-protected request is managed by Cloudflare Access, which may replace that header.
 
 **Live verification required after deploying this change:** fetch all three discovery routes, follow the authorization-server redirect and confirm the real issuer and S256 support; confirm `/signin` and `/lab` still load, the original public `/mcp` remains available, and unauthenticated `/connect` is blocked by Access. A successful real user OAuth authorization-code exchange and token refresh remain **BLOCKED until observed in a supported client**; discovery and JWT mock tests alone are not proof.
+
+
+## Operator collaboration workspace (pilot)
+
+**Protected operator URL:** `https://mcp.shardsinc.co.uk/manage/workspace`
+
+Shards-MCP Edge now has a Slack-style **direct-conversation view of real D1 data**, intended for an owner/operator using the **existing** Cloudflare Access `/manage` policy:
+
+- Enrolled agent directory with runtime/client labels. **Enrolled is not online**: there is no heartbeat or verified activity timestamp.
+- Recent operator/agent/agent-to-agent messages from the existing `agent_messages` records, plus real task titles/states from `agent_tasks`. Data is bounded to 200 latest messages / 80 tasks in the single existing `shards-internal` tenant.
+- A message composer addressed to a separately enrolled agent. The server writes an idempotent record to the recipient's existing MCP inbox, never invokes a model, sends an external API call or claims the recipient read it. Agents must run their own processes and call `shards_message_inbox` to receive it.
+- Agent enrolment remains on `/manage`, using one-time-show 30-day scoped bearer tokens. No secret is displayed in the workspace or stored in the browser.
+
+**Operator identity and write boundary:** The first successfully authenticated operator message creates a non-token, distinct `operator-ui` sender principal in the same tenant, derived from the SHA-256 of the verified Access subject. The page cannot send as an AI principal, impersonate another tenant or perform agent task claims. Operator messages are auditable, have a unique request key and reject idempotency collisions. The API enforces the existing operator JWT signature, audience and expiry, checks same-origin POST, validates payload/recipient, and never accepts arbitrary SQL/tenant values.
+
+**Endpoints:** `GET /manage/api/workspace` is a privileged bounded feed. `POST /manage/api/workspace/messages` stores one message. `GET /manage/workspace` and `GET /manage/workspace.js` serve static UI assets inside the operator Access application. The existing `/mcp`, `/connect` and public Lab are unchanged.
+
+**Explicit nonfeatures:** No Slack-like shared room, real-time push, typing indicator, presence heartbeat, model runtime hosting, multi-tenant self-service, third-party bot bridge, WhatsApp/Discord/Telegram/Slack integration or AI-generated reply exists in this release. The UI labels those providers **Not connected**. Adding providers needs independent platform OAuth/API credentials, consent/scope review, a running adapter, secret storage, event verification, and inbound/outbound reconciliation. Cloudflare Access login does not grant model execution or broker third-party app privileges.
+
+### Acceptance and rollback
+
+Run `node --check deployment/cloudflare/worker.js` and `node --test deployment/cloudflare/worker.test.mjs deployment/cloudflare/workspace.test.mjs`. GitHub's edge workflow also checks the official signed MCP SDK path. After a versioned deployment with **strict inheritance** of `EDGE_DB`, `ACCESS_TEAM`, `ACCESS_AUD`, `CONNECT_ACCESS_AUD`, verify the protected workspace redirects anonymous visitors and that the signed operator sees the live agent directory; send a genuinely authorised message and inspect its persisted MCP inbox before claiming a fully tested live send. Do **not** insert fake demo messages into production as a substitute for live evidence.
+
+Rollback by restoring the pinned prior Worker version. The implementation uses existing D1 tables; no schema migration or token rotation is required. A previously stored operator message should remain durable after rollback, but the workspace UI and operator-composer route will disappear.
