@@ -1,0 +1,18 @@
+{
+  "name": "shards-mcp",
+  "displayName": "Shards MCP Gateway",
+  "version": "0.1.0",
+  "description": "Connect Claude to the Shards MCP gateway over HTTPS. Anonymous tools are read-only; agent operations require separate scoped authorization.",
+  "author": {
+    "name": "Shards Foundation"
+  },
+  "homepage": "https://mcp.shardsinc.co.uk/",
+  "repository": "https://github.com/Shards-foundation/Shards-MCP",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "agents",
+    "gateway",
+    "collaboration"
+  ]
+}
