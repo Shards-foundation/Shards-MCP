@@ -33,7 +33,8 @@ test("workspace serves a mobile client without exposing message contents in the 
  assert.match(code,/manage\/api\/workspace/);
  assert.match(code,/credentials:'same-origin'/);
  assert.match(code,/crypto.randomUUID/);
- assert.match(code,/enrolled, not verified online/);
+ assert.match(code,/online unverified/);
+ assert.match(code,/no inbox scope/);
  assert.match(code,/textContent=/);
  assert.doesNotMatch(code,/\.innerHTML\s*=|localStorage|sessionStorage|smcp_[a-zA-Z0-9]/);
  const entry=await worker.fetch(new Request(base+"/"),{});
@@ -85,6 +86,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
        }
        if(sql.startsWith("INSERT OR IGNORE INTO agent_messages")){
          assert.match(sql,/JOIN agents r ON/,"Writes must atomically check active operator and recipient identities");
+         assert.match(sql,/EXISTS\(SELECT 1 FROM json_each\(r\.scopes\) WHERE value='message:read'\)/,"Atomic insert requires recipient inbox capability in SQL");
          const [id,body,created,key,recipient,sender]=args;
          const from=agents.find(a=>a.id===sender&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client==="operator-ui");
          const to=agents.find(a=>a.id===recipient&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client!=="operator-ui");
@@ -100,7 +102,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
        throw Error("Unexpected run SQL: "+sql);
      },
      async all(){
-       if(sql.startsWith("SELECT id,name,client,created_at FROM agents"))return {results:agents.filter(a=>a.tenant_id==="shards-internal"&&!a.disabled_at).map(({id,name,client,created_at})=>({id,name,client,created_at}))};
+       if(sql.startsWith("SELECT id,name,client,scopes,created_at FROM agents"))return {results:agents.filter(a=>a.tenant_id==="shards-internal"&&!a.disabled_at).map(({id,name,client,scopes,created_at})=>({id,name,client,scopes,created_at}))};
        if(sql.startsWith("SELECT m.id,m.sender_id")){
          assert.match(sql,/m\.sender_id=\? OR m\.recipient_id=\?/,"D1 must page the selected agent only");
          return {results:messages.filter(m=>m.sender_id===args[0]||m.recipient_id===args[1]).slice(-200).reverse().map(m=>({...m,sender_name:agents.find(a=>a.id===m.sender_id)?.name,recipient_name:agents.find(a=>a.id===m.recipient_id)?.name}))};
@@ -134,6 +136,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    assert.equal(typeof snapshot.operator_id,"string");
    assert.equal(agents.length,2,"GET cannot mutate tenant or provision an operator");
    assert.equal(snapshot.focus_id,agentId);
+   assert.equal(snapshot.agents.find(a=>a.id===agentId).can_receive_messages,true);
    const wrongTenantAgent=await worker.fetch(req("GET",api+"?agent_id=agent-not-enrolled-12345",user),env);
    assert.equal(wrongTenantAgent.status,404);
    const invalidFilter=await worker.fetch(req("GET",api+"?agent_id=%3Cscript%3E",user),env);
