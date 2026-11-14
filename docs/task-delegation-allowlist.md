@@ -12,7 +12,9 @@ requires an exact `(creator_agent_id, assignee_agent_id)` operator-approved
 row in `delegation_grants`. No wildcard is accepted. The bootstrap operator
 can dispatch administrative work; no agent token can obtain that role.
 
-No approval row means **FORBIDDEN and no task or audit write**. The same check
+For a new cross-agent assignment to an active assignee, **no approval row**
+means **FORBIDDEN and no task or audit write**. Self-assignment and bootstrap
+operator dispatch use their separately authorised paths. The same check
 is applied to MCP/REST `task_create` and A2A `SendMessage` by their common
 `Gateway.task_create` path. The allowlist is persistent and is checked inside
 the SQLite write transaction, serialised with grant and revoke writes.
