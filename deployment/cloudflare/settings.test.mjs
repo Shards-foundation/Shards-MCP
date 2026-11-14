@@ -22,6 +22,7 @@ test("account settings UI exposes real labelled controls, secure CSP and script"
  assert.doesNotThrow(()=>new vm.Script(code));
  assert.match(code,/credentials:'same-origin'/);
  assert.match(code,/DELETE MY SHARDS ACCOUNT/);
+ assert.match(code,/revision:state\.profile\?\.revision\?\?0/,"Client must submit current profile revision");
  assert.doesNotMatch(code,/localStorage|sessionStorage|\.innerHTML\s*=/);
  const forbidden=await worker.fetch(new Request("https://malicious.example/manage/settings"),{});
  assert.equal(forbidden.status,404);
@@ -141,12 +142,15 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
    assert.equal(empty.profile.email,"person@example.test");
    assert.equal(empty.profile.theme,"system");
    assert.equal(records.accounts.length,0,"GET does not provision account or mutate storage");
+   assert.equal(empty.limits.api_keys,50,"Advertised active key limit matches SQL enforcement");
    assert.equal(empty.security.two_factor,"identity_provider");
    const profile={full_name:"Tester Name",theme:"contrast",avatar_data:null,revision:0};
    res=await worker.fetch(make(url+"/profile","PUT",good,profile,"https://evil.example"),env);assert.equal(res.status,403);
    res=await worker.fetch(make(url+"/profile","PUT",good,{...profile,email:"fake@attacker.test"}),env);assert.equal(res.status,400);
    res=await worker.fetch(make(url+"/profile","PUT",good,profile),env);assert.equal(res.status,200);
    assert.equal(records.accounts[0].theme,"contrast");assert.equal(records.accounts[0].email,"person@example.test");
+   const stale=await worker.fetch(make(url+"/profile","PUT",good,profile),env);
+   assert.equal(stale.status,409,"Stale profile writes must reject instead of overwriting changes");
    const badAvatar=await worker.fetch(make(url+"/profile","PUT",good,{...profile,avatar_data:"data:image/svg+xml;base64,PHN2Zz4="}),env);
    assert.equal(badAvatar.status,400,"SVG avatars must not be accepted");
    const invalidName=await worker.fetch(make(url+"/profile","PUT",good,{...profile,full_name:"<script>"}),env);assert.equal(invalidName.status,400);
@@ -187,9 +191,14 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
    assert.equal(records.ssh.length,1);
    const privateKey=await worker.fetch(make(url+"/ssh","POST",good,{label:"Private",public_key:"-----BEGIN OPENSSH PRIVATE KEY-----"}),env);
    assert.equal(privateKey.status,400);
+   res=await worker.fetch(make(url+"/ssh/"+added.id,"DELETE",other,{}),env);
+   assert.equal(res.status,200,"Cross-owner SSH remove is a privacy-preserving no-op");
+   assert.equal((await res.json()).deleted,false,"Non-owner cannot delete another operator's SSH key");
+   assert.equal(records.ssh.length,1,"Cross-owner SSH deletion did not remove stored key");
    res=await worker.fetch(make(url+"/ssh/"+added.id,"DELETE",good,{}),env);assert.equal(res.status,200);
    assert.equal(records.ssh.length,0);
    res=await worker.fetch(make(url+"/keys/"+issued.id,"DELETE",other,{}),env);
+   assert.equal(res.status,200,"Cross-owner key revoke is a privacy-preserving no-op");
    const auditCount=records.audits.length;
    assert.equal((await res.json()).deleted,false,"Other operator cannot revoke owner key");
    assert.equal(records.audits.length,auditCount,"No-op cross-account revoke cannot emit a successful audit event");

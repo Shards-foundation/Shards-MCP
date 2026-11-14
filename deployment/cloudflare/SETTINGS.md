@@ -2,9 +2,11 @@
 
 **Scope:** The existing single-operator Cloudflare Access application at https://mcp.shardsinc.co.uk/manage. This is not a public multi-user identity product.
 
-## Available features
+## Implemented features — live verification pending
 
-| Section | What actually works |
+**Release status: BLOCKED for production until the EU D1 migration, signed operator session, real credential issuance/use/revocation and rollback gates have been evidenced.** Source tests do not prove a deployed feature.
+
+| Section | Implemented in PR #35 (not independently live-verified) |
 | --- | --- |
 | Profile | Editable full name, provider-supplied identity email (read-only), local avatar upload |
 | Avatar | Mobile resize to 96×96 PNG/JPEG/WebP, magic-header validation, max 24 KB decoded, D1 persistence |
@@ -43,6 +45,6 @@ Agent tool credentials are separate. Account keys **cannot** enrol agents, send 
 
 ## Explicit product boundaries
 
-The operator Access application currently has a one-hour session. Password updates, MFA enrolment, and Google/GitHub/Apple/Microsoft/Meta/Discord/OpenAI/Claude account linking require real IdP configuration and consent; they cannot be safely simulated by switches in the website. Email OTP alone is not proof of two-factor authentication. The current settings do not provide a public tenant signup system, active SSH login, server credentials management for external providers, browser device/session revocation, or complete third-party integrations.
+The operator Cloudflare Access session duration is provider-configured and has not been independently verified for this release. Password updates, MFA enrolment, and Google/GitHub/Apple/Microsoft/Meta/Discord/OpenAI/Claude account linking require real IdP configuration and consent; they cannot be safely simulated by switches in the website. Email OTP alone is not proof of two-factor authentication. The current settings do not provide a public tenant signup system, active SSH login, server credentials management for external providers, browser device/session revocation, or complete third-party integrations.
 
 **Account deletion removes Shards-owned local records and revokes owned Shards credentials, but does not remove an external Cloudflare identity or historical organisation audit/messages.** The local account tombstone prevents subsequent Shards operator-management API access.

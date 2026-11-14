@@ -255,7 +255,7 @@ async function settingsAPI(request,env,url){
         profile:{full_name:account?.full_name||'',email:email||account?.email||null,avatar_data:account?.avatar_data||null,theme:account?.theme||'system',created_at:account?.created_at||null,revision:account?.revision??0},
         security:{identity:'Cloudflare Access',email_change:'identity_provider',password:'identity_provider',two_factor:'identity_provider',linked_methods:'not_self_service',session:'provider_managed'},
         api_keys:keys.results||[],ssh_keys:ssh.results||[],connections:{agents:agents.results||[],online_state:'not_tracked'},
-        limits:{api_keys:100,ssh_keys:100,avatar_bytes:24000,api_scope:'account:read',ssh_authorises_access:false}
+        limits:{api_keys:50,ssh_keys:100,avatar_bytes:24000,api_scope:'account:read',ssh_authorises_access:false}
       });
     }catch(e){return pub({error:'Cannot load account settings'},503)}
   }
