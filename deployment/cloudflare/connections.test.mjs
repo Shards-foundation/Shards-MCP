@@ -54,9 +54,9 @@ test('signed operator sees only owned agents, validated MCP bearer logs a receip
  const token='smcp_'+'a'.repeat(64),tokenHash=await sha(token.slice(7));
  const tokens=[{agent_id:agents[0].id,token_sha256:tokenHash,revoked_at:null,expires_at:'2030-01-01T00:00:00Z'}];
  const receipts=[],audits=[];
- const env={ACCESS_TEAM:'connect-test',ACCESS_AUD:'operator-audience',CONNECT_ACCESS_AUD:'connect-audience',EDGE_DB:{
-  prepare(sql){return {bind(...a){return {
-   async first(){
+ const mockPrepare=sql=>({
+  bind:(...a)=>({
+   first:async()=>{
     if(sql.includes('SELECT deleted_at FROM operator_accounts'))return null;
     if(sql.includes('FROM access_tokens t JOIN agents a ON t.agent_id=a.id')){
      const key=tokens.find(x=>x.token_sha256===a[0]&&!x.revoked_at&&x.expires_at>a[1]);
@@ -64,23 +64,23 @@ test('signed operator sees only owned agents, validated MCP bearer logs a receip
     }
     throw Error('Unexpected SQL first: '+sql);
    },
-   async all(){
+   all:async()=>{
     if(sql.includes('FROM agents a LEFT JOIN agent_connection_activity c')){
      assert.match(sql,/a\.created_by=\?/,'Owner identity must scope listing');
      return {results:agents.filter(x=>x.created_by===a[0]).map(x=>({...x,last_authenticated_at:receipts.find(z=>z.id===x.id)?.at||null,last_operation:receipts.find(z=>z.id===x.id)?.method||null}))};
     }
     throw Error('Unexpected SQL all: '+sql);
    },
-   async run(){
+   run:async()=>{
     if(sql.startsWith('INSERT INTO agent_connection_activity')){
      const key=tokens.find(x=>x.token_sha256===a[3]&&!x.revoked_at&&x.expires_at>a[4]);
-     if(key){const existing=receipts.find(x=>x.id===key.agent_id);if(existing){existing.at=a[1];existing.method=a[2]}else receipts.push({id:key.agent_id,at:a[1],method:a[2]});}
+     if(key){const found=receipts.find(x=>x.id===key.agent_id);if(found){found.at=a[1];found.method=a[2]}else receipts.push({id:key.agent_id,at:a[1],method:a[2]})}
      return {meta:{changes:key?1:0}};
     }
     if(sql.startsWith('UPDATE access_tokens SET revoked_at')){
      assert.match(sql,/created_by=\?/,'Revoke must enforce ownership at SQL write time');
-     const agent=agents.find(x=>x.id===a[1]&&x.created_by===a[3]&&!x.disabled_at);let n=0;
-     if(agent)for(const t of tokens)if(t.agent_id===agent.id&&!t.revoked_at){t.revoked_at=a[0];n++}
+     const agent=agents.find(x=>x.id===a[1]&&x.created_by===a[3]&&!x.disabled_at);
+     let n=0;if(agent)for(const t of tokens)if(t.agent_id===agent.id&&!t.revoked_at){t.revoked_at=a[0];n++}
      return {meta:{changes:n}};
     }
     if(sql.startsWith('UPDATE agents SET disabled_at')){
@@ -92,8 +92,11 @@ test('signed operator sees only owned agents, validated MCP bearer logs a receip
     if(sql.startsWith('INSERT INTO audit_events')){audits.push(a);return {meta:{changes:1}}}
     throw Error('Unexpected SQL run: '+sql);
    }
-  }}}}},
-  async batch(stmts){
+  })
+ });
+ const env={ACCESS_TEAM:'connect-test',ACCESS_AUD:'operator-audience',CONNECT_ACCESS_AUD:'connect-audience',EDGE_DB:{
+  prepare:mockPrepare,
+  batch:async stmts=>{
    const previous=JSON.stringify({agents,tokens,receipts});
    try{const results=[];for(const statement of stmts)results.push(await statement.run());return results}
    catch(e){const v=JSON.parse(previous);agents.splice(0,agents.length,...v.agents);tokens.splice(0,tokens.length,...v.tokens);receipts.splice(0,receipts.length,...v.receipts);throw e}
