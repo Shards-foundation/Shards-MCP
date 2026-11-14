@@ -35,3 +35,12 @@ Shards-MCP is a self-hosted, single-organisation gateway. The Python package, op
 5. Unsupported A2A/MCP optional capabilities, multi-tenancy, hosted OAuth sign-in and external-effect recovery must not appear as supported features.
 
 When documentation changes, use [the documentation review procedure](../GOVERNANCE.md). Links and examples are checked by `python scripts/docs_check.py` in CI.
+
+
+## Authority v2 design (not deployed)
+
+The v2 schema acceptance gate now includes the separate [operator cluster-role bootstrap](../infra/postgres/bootstrap_roles.sql) and [cross-session row-lock race test](../tests/sql/race_contract.py). **Neither procedure is safe against an existing customer database without operator-reviewed migration and rollback evidence.**
+
+- [ADR-0002 — Python as sole authority](adr/0002-python-authoritative-tenancy.md): separation of Cloudflare ingress and authoritative Python state, OAuth, origin trust, replay and verification boundaries.
+- [Tenancy migration and cutover plan](tenancy-migration-plan.md): preserving legacy SQLite/D1 integrity while migrating to a separately verified v2 datastore.
+- [New PostgreSQL schema contract](../migrations/postgres/0001_tenancy.sql): tenant-bound keys and forced RLS; follow with [audit/outbox migration](../migrations/postgres/0002_effects_audit.sql). These files are not safe to run against an existing live database.
