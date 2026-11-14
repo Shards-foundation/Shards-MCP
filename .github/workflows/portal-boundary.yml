@@ -8,6 +8,9 @@ on:
       - ".github/workflows/portal-boundary.yml"
       - "docs/portal-boundary-acceptance.md"
   workflow_dispatch:
+  schedule:
+    # Low-volume unauthenticated regression check. Active only if merged to main.
+    - cron: '23 9 * * *'
 permissions:
   contents: read
 jobs:
