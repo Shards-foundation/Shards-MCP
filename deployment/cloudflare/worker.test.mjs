@@ -6,7 +6,7 @@ import { webcrypto } from "node:crypto";
 
 const src = fs.readFileSync(new URL("./worker.js", import.meta.url), "utf8");
 const sandbox = {
-  Request, Response, Headers, URL, TextEncoder, TextDecoder, crypto: webcrypto, AbortSignal,
+  Request, Response, Headers, URL, TextEncoder, TextDecoder, crypto: webcrypto, AbortSignal, atob,
   fetch: async () => { throw new Error("test must never call the network"); },
 };
 vm.runInNewContext(src.replace("export default {", "globalThis.__edge = {"), sandbox, { filename: "worker.js" });
@@ -286,4 +286,135 @@ test("A stalled MCP call is actually aborted on timeout rather than left pending
   assert.match(page.element("outcome").textContent,/^FAIL/);
   assert.match(page.element("response").textContent,/MCP request aborted/);
   assert.equal(page.element("protocolRun").disabled,false);
+});
+
+
+test("Sign-in entrypoint exposes only a real Cloudflare Access handoff", async () => {
+  const r=await worker.fetch(new Request("https://mcp.shardsinc.co.uk/signin"),{});
+  assert.equal(r.status,200);
+  const html=await r.text();
+  assert.match(html, /Continue with Cloudflare/);
+  assert.match(html, /href="\/connect\/profile"/);
+  assert.deepEqual(html.match(/Continue with [^<]+<\/a>/g),["Continue with Cloudflare Access</a>"]);
+  assert.doesNotMatch(html, /Continue with (Google|GitHub|Discord|Apple|ChatGPT)/);
+  const csp=r.headers.get("content-security-policy");
+  assert.match(csp, /script-src 'none'/);
+  assert.doesNotMatch(html, /<script/);
+});
+
+test("Managed OAuth endpoint fails closed without configuration or signed Access JWT", async () => {
+  const target="https://mcp.shardsinc.co.uk/connect";
+  const unconfigured=await worker.fetch(new Request(target),{});
+  assert.equal(unconfigured.status,503);
+  const configured={ACCESS_TEAM:"test",CONNECT_ACCESS_AUD:"access-audience",ACCESS_AUD:"operator-audience"};
+  const unauthenticated=await worker.fetch(new Request(target),configured);
+  assert.equal(unauthenticated.status,401);
+  assert.match(unauthenticated.headers.get("www-authenticate"),/shards-mcp-connect/);
+  const fake=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":"invalid.jwt.token"}}),configured);
+  assert.equal(fake.status,401);
+  const oldPublic=await worker.fetch(post("tools/list"),configured);
+  assert.equal((await oldPublic.json()).result.tools.length,3);
+});
+
+test("Separate signed Cloudflare identity can discover only public and session tools", async () => {
+  const {publicKey,privateKey}=await webcrypto.subtle.generateKey(
+    {name:"RSASSA-PKCS1-v1_5",modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:"SHA-256"},true,["sign","verify"]
+  );
+  const jwk=await webcrypto.subtle.exportKey("jwk",publicKey);
+  jwk.kid="test-key";
+  const b64=x=>Buffer.from(JSON.stringify(x)).toString("base64url");
+  const make=async (changes={})=>{
+    const payload={iss:"https://test.cloudflareaccess.com",aud:["access-audience"],sub:"legitimate-access-user",email:"verified@example.com",exp:Math.floor(Date.now()/1000)+1200,nbf:Math.floor(Date.now()/1000)-10,...changes};
+    const partial=b64({alg:"RS256",kid:"test-key"})+"."+b64(payload);
+    const sig=await webcrypto.subtle.sign("RSASSA-PKCS1-v1_5",privateKey,new TextEncoder().encode(partial));
+    return partial+"."+Buffer.from(sig).toString("base64url");
+  };
+  const oldFetch=sandbox.fetch;
+  let jwksFetches=0;
+  sandbox.fetch=async url=>{
+    jwksFetches++;
+    assert.equal(url,"https://test.cloudflareaccess.com/cdn-cgi/access/certs");
+    return {ok:true,json:async()=>({keys:[jwk]})};
+  };
+  const env={ACCESS_TEAM:"test",CONNECT_ACCESS_AUD:"access-audience",ACCESS_AUD:"operator-audience"};
+  const target="https://mcp.shardsinc.co.uk/connect";
+  const signedPost=(method,params,token,extra={})=>new Request(target,{
+    method:"POST",headers:{"Content-Type":"application/json","cf-access-jwt-assertion":token,...extra},
+    body:JSON.stringify({jsonrpc:"2.0",id:7,method,params})
+  });
+  try{
+    const good=await make();
+    const profile=await worker.fetch(new Request(target+"/profile",{headers:{"cf-access-jwt-assertion":good}}),env);
+    assert.equal(profile.status,200);
+    const mcpGet=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":good}}),env);
+    assert.equal(mcpGet.status,405,"MCP GET must not serve an HTML profile");
+    assert.equal(mcpGet.headers.get("allow"),"POST");
+    const postProfile=await worker.fetch(signedPost("tools/list",{},good).clone(),env); // transport baseline still POST
+    assert.equal(postProfile.status,200);
+    const badProfileMethod=await worker.fetch(new Request(target+"/profile",{method:"POST",headers:{"cf-access-jwt-assertion":good}}),env);
+    assert.equal(badProfileMethod.status,405);
+    assert.equal(badProfileMethod.headers.get("allow"),"GET");
+    const html=await profile.text();
+    assert.match(html,/verified@example.com/);
+    assert.match(html,/VERIFIED IDENTITY/);
+    assert.doesNotMatch(html,/smcp_/);
+    const init=await worker.fetch(signedPost("initialize",{protocolVersion:"2025-11-25",capabilities:{},clientInfo:{name:"test",version:"1"}},good),env);
+    assert.equal((await init.json()).result.protocolVersion,"2025-11-25");
+    const list=await worker.fetch(signedPost("tools/list",{},good),env);
+    const visible=(await list.json()).result.tools.map(x=>x.name);
+    assert.deepEqual(Array.from(visible),[
+      "shards_gateway_status","shards_systems_catalog","shards_dns_lookup","shards_user_identity"
+    ]);
+    const identity=await worker.fetch(signedPost("tools/call",{name:"shards_user_identity",arguments:{}},good),env);
+    const own=(await identity.json()).result.structuredContent;
+    assert.equal(own.authenticated,true);
+    assert.equal(own.email,"verified@example.com");
+    assert.equal(own.subject_fingerprint.length,20);
+    assert.deepEqual(Array.from(own.privileged_scopes),[]);
+    const noTask=await worker.fetch(signedPost("tools/call",{name:"shards_task_create",arguments:{assignee_agent_id:"internal-agent"}},good,{
+      authorization:"Bearer smcp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }),env);
+    const denied=(await noTask.json()).result;
+    assert.equal(denied.isError,true);
+    assert.match(denied.content[0].text,/PERMISSION_DENIED/);
+    const manage=await worker.fetch(new Request("https://mcp.shardsinc.co.uk/manage/api/agents",{headers:{"cf-access-jwt-assertion":good}}),env);
+    assert.equal(manage.status,401,"Public Access token cannot impersonate the operator");
+    const badAudience=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({aud:["operator-audience"]})}}),env);
+    assert.equal(badAudience.status,401);
+    const wrongIssuer=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({iss:"https://wrong.cloudflareaccess.com"})}}),env);
+    assert.equal(wrongIssuer.status,401,"Wrong signed issuer must be rejected");
+    for(const value of [null,[],true,1,"string"]){
+      const invalid=await worker.fetch(signedPost("tools/call",{name:"shards_user_identity",arguments:value},good),env);
+      assert.equal((await invalid.json()).result.isError,true,"Primitive/array identity arguments must fail closed");
+    }
+    const expired=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({exp:Math.floor(Date.now()/1000)-10})}}),env);
+    assert.equal(expired.status,401);
+    const missingExpiry=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({exp:undefined})}}),env);
+    assert.equal(missingExpiry.status,401);
+    const nonNumericExpiry=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({exp:"never"})}}),env);
+    assert.equal(nonNumericExpiry.status,401);
+    const sameAudience=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":good}}),{...env,CONNECT_ACCESS_AUD:env.ACCESS_AUD});
+    assert.equal(sameAudience.status,503,"The new Access app must use a different audience");
+    const unsigned=good.slice(0,-5)+"xxxxx";
+    const tampered=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":unsigned}}),env);
+    assert.equal(tampered.status,401);
+    const htmlEscapeProbe=await worker.fetch(new Request(target+"/profile",{headers:{"cf-access-jwt-assertion":await make({email:'<script>alert("x")</script>'})}}),env);
+    assert.equal(htmlEscapeProbe.status,200);
+    const escaped=await htmlEscapeProbe.text();
+    assert.doesNotMatch(escaped,/<script>alert/);
+    assert.match(escaped,/&lt;script&gt;alert/);
+    const dollarEmail=await worker.fetch(new Request(target+"/profile",{headers:{"cf-access-jwt-assertion":await make({email:"user$&@example.com"})}}),env);
+    assert.equal(dollarEmail.status,200);
+    const exact=await dollarEmail.text();
+    assert.ok(exact.includes("user$&amp;@example.com"),"Replacement dollar directives must display literally");
+    assert.equal(jwksFetches,1,"Repeated signed requests reuse the verified issuer JWKS during the TTL");
+    const badConfig=await worker.fetch(new Request(target),{...env,CONNECT_ACCESS_AUD:env.ACCESS_AUD});
+    assert.equal(badConfig.status,503);
+    const oldMock=sandbox.fetch;
+    try {
+      sandbox.fetch=async()=>{throw Error("upstream JWKS outage")};
+      const upstream=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({iss:"https://unavailable.cloudflareaccess.com"})}}),{...env,ACCESS_TEAM:"unavailable"});
+      assert.equal(upstream.status,503,"Signing-key outages should not be labelled invalid user logins");
+    } finally { sandbox.fetch=oldMock; }
+  }finally{sandbox.fetch=oldFetch;}
 });
