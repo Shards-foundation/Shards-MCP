@@ -177,7 +177,7 @@ An origin-bypass fallback `401` on `/connect` includes the RFC 9728 `resource_me
 Shards-MCP Edge now has a Slack-style **direct-conversation view of real D1 data**, intended for an owner/operator using the **existing** Cloudflare Access `/manage` policy:
 
 - Enrolled agent directory with runtime/client labels. **Enrolled is not online**: there is no heartbeat or verified activity timestamp.
-- Recent operator/agent/agent-to-agent messages from the existing `agent_messages` records, plus real task titles/states from `agent_tasks`. Data is bounded to 200 latest messages / 80 tasks in the single existing `shards-internal` tenant.
+- Recent operator/agent/agent-to-agent messages from the existing `agent_messages` records, plus real task titles/states from `agent_tasks`. Data is bounded to the **selected agent's** 200 latest direct messages / 80 tasks, queried at the database rather than filtered from a tenant-wide window. Directory membership and record access remain restricted to the existing `shards-internal` operator tenant.
 - A message composer addressed to a separately enrolled agent. The server writes an idempotent record to the recipient's existing MCP inbox, never invokes a model, sends an external API call or claims the recipient read it. Agents must run their own processes and call `shards_message_inbox` to receive it.
 - Agent enrolment remains on `/manage`, using one-time-show 30-day scoped bearer tokens. No secret is displayed in the workspace or stored in the browser.
 
