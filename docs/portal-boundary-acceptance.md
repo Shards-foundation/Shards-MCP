@@ -19,7 +19,7 @@ This check runs from an independent GitHub Actions runner using **no credentials
 - Live tests: `node scripts/portal_boundary_check.mjs` (requires public network access to the real portal; intentionally uses no secrets).
 - GitHub: **Actions → Cloudflare MCP portal boundary (read-only) → Run workflow**, or open a PR changing the check.
 - Once merged into `main`, the same four read-only HTTP checks are scheduled daily at **09:23 UTC**. GitHub Actions may delay scheduled workflows; a schedule is not an SLA or paging service.
-- Results include HTTP status and challenge presence only; they never log bearer credentials, session cookies, email addresses or response bodies.
+- Results include probe names, verdict, portal origin, validation time, HTTP statuses and Bearer challenge presence only; they never log bearer credentials, session cookies, email addresses or response bodies.
 
 ## What this does *not* prove
 
