@@ -117,6 +117,15 @@ async function operatorSendMessage(env,sub,b){
   if(typeof recipient!=='string'||!idPattern.test(recipient)||!body||body.length>2000||!reqId(b.request_id))return pub({error:'Invalid recipient, message or idempotency key'},400);
   const hash=await digest(sub),operatorId=operatorPrincipalId(hash);
   if(recipient===operatorId)return pub({error:'Select a separate enrolled agent'},400);
+  // A committed retry is reportable even if the recipient was later revoked.
+  // Do not treat a replay as permission to create a new message after revocation.
+  const committed=await env.EDGE_DB.prepare("SELECT id,body,recipient_id FROM agent_messages WHERE tenant_id='shards-internal' AND sender_id=? AND request_key=?").bind(operatorId,b.request_id).first();
+  if(committed){
+    const principal=await env.EDGE_DB.prepare("SELECT disabled_at,client FROM agents WHERE id=? AND tenant_id='shards-internal'").bind(operatorId).first();
+    if(!principal||principal.disabled_at||principal.client!=='operator-ui')return pub({error:'Operator principal is disabled or invalid'},403);
+    if(committed.recipient_id!==recipient||committed.body!==body)return pub({error:'Idempotency key reused for a different message'},409);
+    return pub({id:committed.id,stored:true,idempotent:true},200);
+  }
   const target=await env.EDGE_DB.prepare("SELECT id,scopes FROM agents WHERE id=? AND tenant_id='shards-internal' AND disabled_at IS NULL AND client!='operator-ui'").bind(recipient).first();
   if(!target)return pub({error:'Recipient is not an enrolled active agent'},404);
   let scopes;try{scopes=JSON.parse(target.scopes)}catch(e){scopes=[]}
