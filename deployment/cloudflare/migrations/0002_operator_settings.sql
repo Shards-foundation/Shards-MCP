@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS operator_accounts (
   id TEXT PRIMARY KEY CHECK(length(id)=64),
   email TEXT,
   full_name TEXT NOT NULL DEFAULT '',
-  avatar_data TEXT,
+  avatar_data TEXT CHECK(avatar_data IS NULL OR length(avatar_data)<=33000),
   theme TEXT NOT NULL DEFAULT 'system' CHECK(theme IN ('system','dark','light','contrast')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -17,12 +17,14 @@ CREATE TABLE IF NOT EXISTS operator_api_keys (
   kind TEXT NOT NULL CHECK(kind IN ('api','cli')),
   label TEXT NOT NULL,
   token_sha256 TEXT NOT NULL UNIQUE,
+  request_key TEXT NOT NULL,
   prefix TEXT NOT NULL,
   scopes TEXT NOT NULL CHECK(scopes='["account:read"]'),
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   last_used_at TEXT,
-  revoked_at TEXT
+  revoked_at TEXT,
+  UNIQUE(owner_id,request_key)
 );
 CREATE INDEX IF NOT EXISTS idx_operator_api_keys_owner ON operator_api_keys(owner_id,created_at DESC);
 CREATE TABLE IF NOT EXISTS operator_ssh_keys (
