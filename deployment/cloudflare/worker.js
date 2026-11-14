@@ -426,6 +426,7 @@ async function settingsAPI(request,env,url){
         accountCreate(env,id,email,now),
         env.EDGE_DB.prepare('UPDATE operator_api_keys SET revoked_at=? WHERE owner_id=? AND revoked_at IS NULL').bind(now,id),
         env.EDGE_DB.prepare('DELETE FROM operator_ssh_keys WHERE owner_id=?').bind(id),
+        env.EDGE_DB.prepare('DELETE FROM operator_skills WHERE owner_id=?').bind(id),
         env.EDGE_DB.prepare('UPDATE access_tokens SET revoked_at=? WHERE agent_id IN (SELECT id FROM agents WHERE created_by=?) AND revoked_at IS NULL').bind(now,id),
         env.EDGE_DB.prepare('UPDATE agents SET disabled_at=? WHERE created_by=? AND disabled_at IS NULL').bind(now,id),
         env.EDGE_DB.prepare('UPDATE agents SET disabled_at=? WHERE id=? AND disabled_at IS NULL').bind(now,operatorAgent),
@@ -529,9 +530,11 @@ if(request.method==='GET'&&(
   return new Response(null,{status:302,headers:{...HEADERS,location:issuer+'/.well-known/oauth-authorization-server','cache-control':'no-store','access-control-allow-origin':'*'}});
 }
 if(u.pathname==='/v1/account/whoami'&&request.method==='GET')return accountTokenWhoAmI(request,env);
+if(u.pathname==='/manage/api/skills'||u.pathname.startsWith('/manage/api/skills/'))return skillsAPI(request,env,u);
 if(u.pathname==='/manage/api/account'||u.pathname.startsWith('/manage/api/account/'))return settingsAPI(request,env,u);
 if(request.method==='GET'&&u.pathname==='/manage/settings')return new Response(SETTINGS_HTML,{headers:{...HEADERS,'content-type':'text/html; charset=utf-8','content-security-policy':"default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; script-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; font-src 'self'"}});
 if(request.method==='GET'&&u.pathname==='/manage/settings.js')return plain(SETTINGS_CLIENT,200,'text/javascript; charset=utf-8');
+if(request.method==='GET'&&u.pathname==='/manage/skills.js')return plain(SKILLS_CLIENT,200,'text/javascript; charset=utf-8');
 if(request.method==='GET'&&u.pathname==='/api/status'){let status='unavailable';try{await env.EDGE_DB.prepare('SELECT 1 AS ok').first();status='connected'}catch(e){}return pub({service:'Shards MCP Edge',version:VERSION,endpoint:ORIGIN+'/mcp',db:status,tools:tools.map(t=>({name:t.name,description:t.description,public:t.public})),authentication:{public:'noauth',private:'per-agent bearer',oauth:'not yet available on the original /mcp endpoint',authenticated_connect:{endpoint:ORIGIN+'/connect',worker_listener_configured:Boolean(env.CONNECT_ACCESS_AUD&&env.CONNECT_ACCESS_AUD!==env.ACCESS_AUD),provider:'Cloudflare Access Managed OAuth',scope:'verified identity and three public tools only'}},limits:'Experimental edge service, no remote Python gateway federation'})}
 if(u.pathname==='/mcp')return mcp(request,env);
 if(u.pathname.startsWith('/manage/api/'))return manage(request,env,u);
