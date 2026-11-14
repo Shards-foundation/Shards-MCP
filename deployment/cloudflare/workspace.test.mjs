@@ -67,6 +67,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
      async first(){
        if(sql.includes("SELECT id FROM agents WHERE id=?"))return agents.find(a=>a.id===args[0]&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client!=="operator-ui")||null;
        if(sql.includes("SELECT id,body,recipient_id FROM agent_messages"))return messages.find(m=>m.tenant_id==="shards-internal"&&m.sender_id===args[0]&&m.request_key===args[1])||null;
+       if(sql.includes("SELECT disabled_at,client FROM agents"))return agents.find(a=>a.id===args[0]&&a.tenant_id==="shards-internal")||null;
        throw Error("Unexpected first SQL: "+sql);
      },
      async run(){
@@ -76,9 +77,12 @@ test("operator-only workspace uses a real signed admin identity and stores scope
          return {meta:{changes:1}};
        }
        if(sql.startsWith("INSERT OR IGNORE INTO agent_messages")){
-         const [id,sender,recipient,body,created,key]=args;
-         if(!messages.some(m=>m.sender_id===sender&&m.request_key===key))messages.push({id,tenant_id:"shards-internal",sender_id:sender,recipient_id:recipient,body,created_at:created,request_key:key,read_at:null});
-         return {meta:{changes:1}};
+         assert.match(sql,/JOIN agents r ON/,"Writes must atomically check active operator and recipient identities");
+         const [id,body,created,key,recipient,sender]=args;
+         const from=agents.find(a=>a.id===sender&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client==="operator-ui");
+         const to=agents.find(a=>a.id===recipient&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client!=="operator-ui");
+         if(from&&to&&!messages.some(m=>m.sender_id===sender&&m.request_key===key))messages.push({id,tenant_id:"shards-internal",sender_id:sender,recipient_id:recipient,body,created_at:created,request_key:key,read_at:null});
+         return {meta:{changes:from&&to?1:0}};
        }
        if(sql.startsWith("INSERT INTO audit_events")){audits.push(args);return {meta:{changes:1}}}
        throw Error("Unexpected run SQL: "+sql);
@@ -140,6 +144,17 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    assert.equal(audits.length,1);
    const collision=await worker.fetch(req("POST",endpoint,user,{...payload,body:"Different text"}),env);
    assert.equal(collision.status,409);
+   const operatorAccount=agents.find(a=>a.id===snapshot.operator_id);
+   operatorAccount.disabled_at=new Date().toISOString();
+   const disabled=await worker.fetch(req("POST",endpoint,user,{...payload,request_id:"second-request-12345"}),env);
+   assert.equal(disabled.status,403,"Revoking the operator principal must deny further sends");
+   assert.equal(messages.length,1,"No message is stored from a revoked sender");
+   operatorAccount.disabled_at=null;
+   const recipientAccount=agents.find(a=>a.id===agentId);
+   recipientAccount.disabled_at=new Date().toISOString();
+   const revokedTarget=await worker.fetch(req("POST",endpoint,user,{...payload,request_id:"third-request-123456"}),env);
+   assert.equal(revokedTarget.status,404,"Revoked recipient must not receive messages");
+   recipientAccount.disabled_at=null;
    const after=await worker.fetch(req("GET",api,user),env);
    const feed=await after.json();
    assert.equal(feed.messages.length,1);
