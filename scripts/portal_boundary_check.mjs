@@ -60,7 +60,12 @@ export async function checkPortalBoundary({ fetchImpl = fetch, endpoint = PORTAL
   assert.equal(protectedResource.status, 200, 'OAuth resource metadata must be discoverable');
   const contentType = protectedResource.headers.get('content-type') || '';
   assert.match(contentType, /application\/json/i, 'OAuth metadata must be JSON');
-  const metadata = await protectedResource.json();
+  let metadata;
+  try {
+    metadata = await protectedResource.json();
+  } catch {
+    assert.fail('OAuth resource metadata must be valid JSON');
+  }
   assert.ok(metadata && typeof metadata === 'object' && !Array.isArray(metadata), 'Metadata must be an object');
   assert.ok(
     typeof metadata.resource === 'string' &&
@@ -82,7 +87,12 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   } catch (error) {
     // No request, token or response body is ever emitted. Safe on public CI.
-    process.stderr.write('Portal boundary acceptance FAIL: ' + error.message + '\n');
+    // Unexpected transport/parser failures may embed untrusted response data in error.message.
+    // Only locally authored assertion messages are safe for public CI logs.
+    const safeMessage = error instanceof assert.AssertionError
+      ? error.message
+      : 'unexpected transport or response failure';
+    process.stderr.write('Portal boundary acceptance FAIL: ' + safeMessage + '\n');
     process.exitCode = 1;
   }
 }
