@@ -33,6 +33,8 @@ jobs:
           NODE
       - name: Isolated edge protocol and quota regression tests
         run: node --test deployment/cloudflare/worker.test.mjs
+      - name: Signed operator workspace and real messaging regression
+        run: node --test deployment/cloudflare/workspace.test.mjs
       - name: Official MCP SDK v1 signed-endpoint protocol interoperability
         run: |
           set -euo pipefail
