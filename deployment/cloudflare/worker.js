@@ -93,7 +93,50 @@ if(req.method==='resources/list')return pub(rpc(id,{resources:[]}));
 if(req.method==='prompts/list')return pub(rpc(id,{prompts:[]}));
 if(req.method==='tools/call'){const tname=req.params?.name;if(typeof tname!=='string')return pub(rpcError(id,-32602,'Tool name required'));if(signedIdentity){if(tname==='shards_user_identity'){const params=req.params&&Object.prototype.hasOwnProperty.call(req.params,'arguments')?req.params.arguments:{};if(typeof params!=='object'||params===null||Array.isArray(params)||Object.keys(params).length)return pub(rpc(id,errorResult('Unexpected tool arguments')));return pub(rpc(id,result({authenticated:true,provider:'cloudflare_access',subject_fingerprint:(await digest(signedIdentity.sub)).slice(0,20),email:typeof signedIdentity.email==='string'?signedIdentity.email:null,privileged_scopes:[]})))}if(!tools.some(t=>t.name===tname&&t.public))return pub(rpc(id,errorResult('PERMISSION_DENIED: Social login has no internal agent privileges')));return pub(rpc(id,await runTool(tname,req.params?.arguments||{},null,env,request)))}const actor=await authenticate(request,env);const r=await runTool(tname,req.params?.arguments||{},actor,env,request);return pub(rpc(id,r))}
 return pub(rpcError(id,-32601,'Method not found'))}
+// Operator workspace reuses the existing tenant, inbox and audit schema.
+// A human operator is a distinct non-token principal, never an impersonated AI agent.
+const operatorPrincipalId=subHash=>'operator_'+subHash.slice(0,32);
+async function workspaceSnapshot(env,operatorSub){
+  const principal=operatorPrincipalId(await digest(operatorSub));
+  const [agents,messages,tasks]=await Promise.all([
+    env.EDGE_DB.prepare("SELECT id,name,client,created_at FROM agents WHERE tenant_id='shards-internal' AND disabled_at IS NULL ORDER BY created_at DESC LIMIT 80").all(),
+    env.EDGE_DB.prepare("SELECT m.id,m.sender_id,m.recipient_id,m.body,m.created_at,m.read_at,s.name AS sender_name,r.name AS recipient_name FROM agent_messages m JOIN agents s ON m.sender_id=s.id JOIN agents r ON m.recipient_id=r.id WHERE m.tenant_id='shards-internal' ORDER BY m.created_at DESC LIMIT 200").all(),
+    env.EDGE_DB.prepare("SELECT t.id,t.creator_id,t.assignee_id,t.title,t.state,t.created_at,t.claimed_at,t.completed_at,a.name AS assignee_name FROM agent_tasks t JOIN agents a ON t.assignee_id=a.id WHERE t.tenant_id='shards-internal' ORDER BY t.created_at DESC LIMIT 80").all()
+  ]);
+  return {operator_id:principal,agents:agents.results||[],messages:messages.results||[],tasks:tasks.results||[],limits:{messages:200,tasks:80,refresh:'polling',presence:'unverified',tenant:'shards-internal'}};
+}
+async function operatorSendMessage(env,sub,b){
+  if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).some(k=>!['recipient_agent_id','body','request_id'].includes(k)))return pub({error:'Invalid message request'},400);
+  const recipient=b.recipient_agent_id,body=typeof b.body==='string'?b.body.trim():null;
+  if(typeof recipient!=='string'||!idPattern.test(recipient)||!body||body.length>2000||!reqId(b.request_id))return pub({error:'Invalid recipient, message or idempotency key'},400);
+  const hash=await digest(sub),operatorId=operatorPrincipalId(hash);
+  if(recipient===operatorId)return pub({error:'Select a separate enrolled agent'},400);
+  const target=await env.EDGE_DB.prepare("SELECT id FROM agents WHERE id=? AND tenant_id='shards-internal' AND disabled_at IS NULL AND client!='operator-ui'").bind(recipient).first();
+  if(!target)return pub({error:'Recipient is not an enrolled active agent'},404);
+  const createdAt=new Date().toISOString(),name='Operator_'+hash.slice(0,12);
+  await env.EDGE_DB.prepare("INSERT OR IGNORE INTO agents(id,tenant_id,name,client,scopes,created_by,created_at) VALUES(?,'shards-internal',?,'operator-ui','[]',?,?)").bind(operatorId,name,hash,createdAt).run();
+  const row=await env.EDGE_DB.prepare("SELECT id,body,recipient_id FROM agent_messages WHERE tenant_id='shards-internal' AND sender_id=? AND request_key=?").bind(operatorId,b.request_id).first();
+  if(row){
+    if(row.recipient_id!==recipient||row.body!==body)return pub({error:'Idempotency key reused for a different message'},409);
+    return pub({id:row.id,stored:true,idempotent:true},200);
+  }
+  const id=crypto.randomUUID();
+  await env.EDGE_DB.prepare("INSERT OR IGNORE INTO agent_messages(id,tenant_id,sender_id,recipient_id,body,created_at,request_key) VALUES(?,'shards-internal',?,?,?,?,?)").bind(id,operatorId,recipient,body,createdAt,b.request_id).run();
+  const saved=await env.EDGE_DB.prepare("SELECT id,body,recipient_id FROM agent_messages WHERE tenant_id='shards-internal' AND sender_id=? AND request_key=?").bind(operatorId,b.request_id).first();
+  if(!saved||saved.recipient_id!==recipient||saved.body!==body)return pub({error:'Concurrent idempotency conflict'},409);
+  if(saved.id===id)await audit(env,{id:operatorId,tenant_id:'shards-internal'},'operator_message_send',id,'stored');
+  return pub({id:saved.id,stored:true,idempotent:saved.id!==id},saved.id===id?201:200);
+}
 async function manage(request,env,url){if(!env.ACCESS_TEAM||!env.ACCESS_AUD)return pub({error:'Operator Access configuration is missing'},503);let sub;try{sub=await accessActor(request,env)}catch(e){return pub({error:'Signed Cloudflare Access login required'},401)}
+if(request.method==='GET'&&url.pathname==='/manage/api/workspace'){
+  try{return pub(await workspaceSnapshot(env,sub))}catch(e){return pub({error:'Workspace database unavailable'},503)}
+}
+if(request.method==='POST'&&url.pathname==='/manage/api/workspace/messages'){
+  if(request.headers.get('origin')!==ORIGIN)return pub({error:'Same-origin requests only'},403);
+  if(!request.headers.get('content-type')?.toLowerCase().startsWith('application/json'))return pub({error:'JSON required'},415);
+  let body;try{const raw=await request.text();if(raw.length>2400)throw Error('too long');body=JSON.parse(raw)}catch(e){return pub({error:'Malformed message JSON'},400)}
+  try{return await operatorSendMessage(env,sub,body)}catch(e){return pub({error:'Workspace message could not be stored'},503)}
+}
 if(request.method==='GET'&&url.pathname==='/manage/api/agents'){const r=await env.EDGE_DB.prepare("SELECT a.id,a.name,a.client,a.scopes,a.created_at,a.disabled_at,COUNT(t.id) AS token_count FROM agents a LEFT JOIN access_tokens t ON t.agent_id=a.id AND t.revoked_at IS NULL WHERE a.tenant_id='shards-internal' GROUP BY a.id ORDER BY a.created_at DESC LIMIT 80").all();return pub({agents:r.results||[]})}
 if(request.method==='POST'&&['/manage/api/agents','/manage/api/revoke'].includes(url.pathname)){
 if(request.headers.get('origin')!==ORIGIN)return pub({error:'Same-origin requests only'},403);
