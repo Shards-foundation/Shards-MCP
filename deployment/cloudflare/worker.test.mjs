@@ -117,6 +117,8 @@ test("Live Lab client is executable JS restricted to the public MCP operations",
   assert.match(js, /\.isError/);
   assert.doesNotMatch(js, /\/manage\/api\//);
   assert.doesNotMatch(js, /localStorage|sessionStorage|Bearer\s/);
+  assert.match(js, /\$\('copyEvidence'\)\.textContent = 'COPY JSON'/);
+  assert.match(js, /setTimeout\(\(\) => \{ \$\('copyEvidence'\)\.textContent = 'COPY JSON'; \}, 1600\)/);
 });
 
 test("Live Lab appears on the landing page, but never exposes cross-host routes", async () => {
