@@ -38,12 +38,13 @@ function jwtPart(value){if(!/^[A-Za-z0-9_-]+$/.test(value)||value.length>9000)th
 const accessJWKSCache=new Map();
 async function accessSigningKey(issuer,kid){
   const now=Date.now();let entry=accessJWKSCache.get(issuer);
-  if(!entry||entry.expires<=now||!entry.keys.some(x=>x.kid===kid&&x.kty==='RSA')){
+  const keyMissing=Boolean(entry&&!entry.keys.some(x=>x.kid===kid&&x.kty==='RSA'));
+  if(!entry||entry.expires<=now||(keyMissing&&now-(entry.unknownKidRefresh||0)>=30000)){
     let response;try{response=await fetch(issuer+'/cdn-cgi/access/certs',{redirect:'manual',signal:AbortSignal.timeout(4000)})}catch(e){throw Error('Cloudflare Access keys unavailable')}
     if(!response.ok)throw Error('Cloudflare Access keys unavailable');
     let data;try{data=await response.json()}catch(e){throw Error('Cloudflare Access keys unavailable')}
     if(!Array.isArray(data.keys)||data.keys.length<1||data.keys.length>30)throw Error('Cloudflare Access JWKS malformed');
-    entry={keys:data.keys,expires:now+300000};accessJWKSCache.set(issuer,entry);
+    entry={keys:data.keys,expires:now+300000,unknownKidRefresh:keyMissing?now:0};accessJWKSCache.set(issuer,entry);
   }
   const jwk=entry.keys.find(x=>x.kid===kid&&x.kty==='RSA');
   if(!jwk)throw Error('Unknown Access signing key');
