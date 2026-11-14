@@ -167,6 +167,191 @@ async function operatorSendMessage(env,sub,b){
   if(saved.recipient_id!==recipient||saved.body!==body)return pub({error:'Concurrent idempotency conflict'},409);
   return pub({id:saved.id,stored:true,idempotent:saved.id!==id},saved.id===id?201:200);
 }
+
+// Account Settings: an operator's Shards-local profile and separately scoped API credentials.
+// The signed Access subject, not an editable email address, owns every record.
+const SETTINGS_THEMES=new Set(['system','dark','light','contrast']);
+const accountLabel=x=>typeof x==='string'&&x.length>=2&&x.length<=60&&/^[\p{L}\p{N}][\p{L}\p{N} ._'-]*$/u.test(x);
+const profileName=x=>typeof x==='string'&&x.length<=100&&!/[\u0000-\u001f\u007f<>]/.test(x);
+const ownerIdentity=async claims=>await digest(claims.sub);
+const acctNow=()=>new Date().toISOString();
+async function settingsBody(req,maxBytes=50000){
+  if(!req.body)throw Error('Body required');
+  const stated=Number(req.headers.get('content-length'));
+  if(Number.isFinite(stated)&&stated>maxBytes)throw Error('Request too large');
+  const reader=req.body.getReader(),chunks=[];let size=0;
+  try{
+    while(true){
+      const {done,value}=await reader.read();if(done)break;
+      size+=value.byteLength;
+      if(size>maxBytes){await reader.cancel().catch(()=>{});throw Error('Request too large')}
+      chunks.push(value);
+    }
+  }finally{reader.releaseLock()}
+  const bytes=new Uint8Array(size);let at=0;for(const x of chunks){bytes.set(x,at);at+=x.byteLength}
+  const o=JSON.parse(decoder.decode(bytes));
+  if(!o||typeof o!=='object'||Array.isArray(o))throw Error('Object required');
+  return o;
+}
+function accountAvatar(value){
+  if(value===null)return null;
+  if(typeof value!=='string'||value.length>33000)throw Error('Avatar must be a small PNG, JPEG or WebP');
+  const m=/^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+  if(!m)throw Error('Invalid avatar data URI');
+  let b;try{b=atob(m[2])}catch(e){throw Error('Malformed avatar base64')}
+  if(b.length<16||b.length>24000)throw Error('Avatar exceeds maximum size');
+  const arr=Array.from(b.slice(0,16),x=>x.charCodeAt(0));
+  if(m[1]==='png'&&!(arr.slice(0,8).join(',')==='137,80,78,71,13,10,26,10'))throw Error('PNG signature mismatch');
+  if(m[1]==='jpeg'&&!(arr[0]===255&&arr[1]===216&&arr[2]===255))throw Error('JPEG signature mismatch');
+  if(m[1]==='webp'&&!(b.slice(0,4)==='RIFF'&&b.slice(8,12)==='WEBP'))throw Error('WebP signature mismatch');
+  return value;
+}
+function sshPublicKey(value){
+  if(typeof value!=='string'||value.length>1400||value.includes('\n')||value.includes('\r'))throw Error('SSH public key required');
+  const m=/^ssh-ed25519 ([A-Za-z0-9+/]+={0,2})(?: [^\r\n]{0,200})?$/.exec(value.trim());
+  if(!m)throw Error('Only OpenSSH Ed25519 public keys are supported');
+  let decoded;try{decoded=atob(m[1])}catch(e){throw Error('Invalid SSH key encoding')}
+  const bytes=Uint8Array.from(decoded,x=>x.charCodeAt(0));let at=0;
+  const take=()=>{if(at+4>bytes.length)throw Error('Malformed SSH key');const n=new DataView(bytes.buffer).getUint32(at);at+=4;if(n>64||at+n>bytes.length)throw Error('Malformed SSH key');const x=bytes.slice(at,at+n);at+=n;return x};
+  const algo=decoder.decode(take());if(algo!=='ssh-ed25519')throw Error('SSH key type mismatch');
+  const pubkey=take();if(pubkey.length!==32||at!==bytes.length)throw Error('Invalid Ed25519 key size');
+  return {canonical:'ssh-ed25519 '+m[1],bytes};
+}
+async function sshFingerprint(bytes){
+  const hash=new Uint8Array(await crypto.subtle.digest('SHA-256',bytes));
+  return 'SHA256:'+btoa(String.fromCharCode(...hash)).replace(/=+$/,'');
+}
+async function settingsClaim(req,env){
+  if(!env.ACCESS_TEAM||!env.ACCESS_AUD||env.ACCESS_AUD===env.CONNECT_ACCESS_AUD)throw Error('Invalid operator identity configuration');
+  const claims=await accessClaims(req,env,env.ACCESS_AUD);
+  return {id:await ownerIdentity(claims),email:typeof claims.email==='string'&&claims.email.length<=254?claims.email:null,claims};
+}
+const accountRow=async(env,id)=>env.EDGE_DB.prepare('SELECT id,email,full_name,avatar_data,theme,created_at,updated_at,deleted_at FROM operator_accounts WHERE id=?').bind(id).first();
+const accountCreate=(env,id,email,now)=>env.EDGE_DB.prepare("INSERT OR IGNORE INTO operator_accounts(id,email,created_at,updated_at) VALUES(?,?,?,?)").bind(id,email,now,now);
+const accountAudit=(env,id,event,objectId,now)=>env.EDGE_DB.prepare("INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) VALUES(?,'shards-internal',NULL,?,?,'accepted',?)").bind(crypto.randomUUID(),'account_'+event,objectId||id,now);
+async function settingsAPI(request,env,url){
+  let actor;
+  try{actor=await settingsClaim(request,env)}catch(e){return pub({error:'Signed operator Cloudflare Access login required'},401)}
+  const {id,email}=actor,method=request.method,path=url.pathname;
+  let account;
+  try{account=await accountRow(env,id)}catch(e){return pub({error:'Account settings storage is not configured'},503)}
+  if(account?.deleted_at)return pub({error:'This Shards-local account has been deleted. Cloudflare Access identity is managed separately.'},410);
+  if(method==='GET'&&path==='/manage/api/account'){
+    try{
+      const [keys,ssh,agents]=await Promise.all([
+        env.EDGE_DB.prepare("SELECT id,kind,label,prefix,scopes,created_at,expires_at,last_used_at,revoked_at FROM operator_api_keys WHERE owner_id=? ORDER BY created_at DESC LIMIT 100").bind(id).all(),
+        env.EDGE_DB.prepare("SELECT id,label,algorithm,public_key,fingerprint,created_at FROM operator_ssh_keys WHERE owner_id=? ORDER BY created_at DESC LIMIT 100").bind(id).all(),
+        env.EDGE_DB.prepare("SELECT a.id,a.name,a.client,a.created_at,a.disabled_at,COUNT(t.id) AS active_credentials FROM agents a LEFT JOIN access_tokens t ON t.agent_id=a.id AND t.revoked_at IS NULL AND t.expires_at>? WHERE a.created_by=? GROUP BY a.id ORDER BY a.created_at DESC LIMIT 80").bind(acctNow(),id).all()
+      ]);
+      return pub({
+        profile:{full_name:account?.full_name||'',email:email||account?.email||null,avatar_data:account?.avatar_data||null,theme:account?.theme||'system',created_at:account?.created_at||null},
+        security:{identity:'Cloudflare Access',email_change:'identity_provider',password:'identity_provider',two_factor:'identity_provider',linked_methods:'not_self_service',session:'provider_managed'},
+        api_keys:keys.results||[],ssh_keys:ssh.results||[],connections:{agents:agents.results||[],online_state:'not_tracked'},
+        limits:{api_keys:100,ssh_keys:100,avatar_bytes:24000,api_scope:'account:read',ssh_authorises_access:false}
+      });
+    }catch(e){return pub({error:'Cannot load account settings'},503)}
+  }
+  // All mutating routes require an actual same-origin request. The browser stores no access or API tokens.
+  if(request.headers.get('origin')!==ORIGIN)return pub({error:'Same-origin request required'},403);
+  if(method!=='PUT'&&method!=='POST'&&method!=='DELETE')return pub({error:'Method not allowed'},405);
+  let b;
+  try{
+    if(!request.headers.get('content-type')?.toLowerCase().startsWith('application/json'))return pub({error:'JSON required'},415);
+    b=await settingsBody(request,path==='/manage/api/account/profile'?50000:6000);
+  }catch(e){return pub({error:'Invalid or oversized JSON payload'},400)}
+  const now=acctNow();
+  if(method==='PUT'&&path==='/manage/api/account/profile'){
+    if(Object.keys(b).some(k=>!['full_name','theme','avatar_data'].includes(k))||!profileName(b.full_name)||!SETTINGS_THEMES.has(b.theme)||!Object.prototype.hasOwnProperty.call(b,'avatar_data'))return pub({error:'Invalid profile settings'},400);
+    let avatar;try{avatar=accountAvatar(b.avatar_data)}catch(e){return pub({error:e.message},400)}
+    try{
+      await env.EDGE_DB.batch([
+        accountCreate(env,id,email,now),
+        env.EDGE_DB.prepare('UPDATE operator_accounts SET full_name=?,email=?,avatar_data=?,theme=?,updated_at=? WHERE id=? AND deleted_at IS NULL').bind(b.full_name.trim(),email||account?.email||null,avatar,b.theme,now,id),
+        accountAudit(env,id,'profile_updated',id,now)
+      ]);
+      return pub({saved:true,theme:b.theme,full_name:b.full_name.trim(),avatar_data:avatar,email:email||account?.email||null});
+    }catch(e){return pub({error:'Profile update could not be persisted'},503)}
+  }
+  if(method==='POST'&&path==='/manage/api/account/keys'){
+    if(Object.keys(b).some(k=>!['kind','label','expires_days'].includes(k))||!['api','cli'].includes(b.kind)||!accountLabel(b.label)||![30,90].includes(b.expires_days))return pub({error:'Invalid key type, label or expiration'},400);
+    try{
+      const n=await env.EDGE_DB.prepare("SELECT COUNT(*) AS n FROM operator_api_keys WHERE owner_id=? AND revoked_at IS NULL AND expires_at>?").bind(id,now).first();
+      if((n?.n||0)>=50)return pub({error:'Active key limit reached'},409);
+      const bytes=new Uint8Array(32);crypto.getRandomValues(bytes);
+      const token='smcp_'+b.kind+'_'+Array.from(bytes,x=>x.toString(16).padStart(2,'0')).join('');
+      const keyId=crypto.randomUUID(),expiresAt=new Date(Date.now()+b.expires_days*86400000).toISOString();
+      await env.EDGE_DB.batch([
+        accountCreate(env,id,email,now),
+        env.EDGE_DB.prepare('INSERT INTO operator_api_keys(id,owner_id,kind,label,token_sha256,prefix,scopes,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?)').bind(keyId,id,b.kind,b.label,await digest(token),token.slice(0,19),'["account:read"]',now,expiresAt),
+        accountAudit(env,id,'key_created',keyId,now)
+      ]);
+      return pub({id:keyId,label:b.label,kind:b.kind,token,expires_at:expiresAt,scopes:['account:read'],warning:'Copy once. The plaintext is not stored.'},201);
+    }catch(e){return pub({error:'Key generation failed; no credential issued'},503)}
+  }
+  if(method==='POST'&&path==='/manage/api/account/ssh'){
+    if(Object.keys(b).some(k=>!['label','public_key'].includes(k))||!accountLabel(b.label))return pub({error:'Invalid SSH key label'},400);
+    let parsed,fp;try{parsed=sshPublicKey(b.public_key);fp=await sshFingerprint(parsed.bytes)}catch(e){return pub({error:e.message},400)}
+    try{
+      const n=await env.EDGE_DB.prepare('SELECT COUNT(*) AS n FROM operator_ssh_keys WHERE owner_id=?').bind(id).first();
+      if((n?.n||0)>=100)return pub({error:'SSH key limit reached'},409);
+      const keyId=crypto.randomUUID();
+      await env.EDGE_DB.batch([
+        accountCreate(env,id,email,now),
+        env.EDGE_DB.prepare("INSERT INTO operator_ssh_keys(id,owner_id,label,algorithm,public_key,fingerprint,created_at) VALUES(?, ?, ?, 'ssh-ed25519', ?, ?, ?)").bind(keyId,id,b.label,parsed.canonical,fp,now),
+        accountAudit(env,id,'ssh_added',keyId,now)
+      ]);
+      return pub({id:keyId,fingerprint:fp,stored:true,ssh_authorises_access:false},201);
+    }catch(e){return pub({error:'SSH public key already exists or storage failed'},409)}
+  }
+  const keyMatch=/^\/manage\/api\/account\/keys\/([0-9a-f-]{36})$/.exec(path);
+  const sshMatch=/^\/manage\/api\/account\/ssh\/([0-9a-f-]{36})$/.exec(path);
+  if(method==='DELETE'&&(keyMatch||sshMatch)){
+    if(Object.keys(b).length)return pub({error:'No delete payload fields allowed'},400);
+    const target=(keyMatch||sshMatch)[1];
+    try{
+      const rows=await env.EDGE_DB.batch([
+        keyMatch?
+          env.EDGE_DB.prepare('UPDATE operator_api_keys SET revoked_at=? WHERE id=? AND owner_id=? AND revoked_at IS NULL').bind(now,target,id):
+          env.EDGE_DB.prepare('DELETE FROM operator_ssh_keys WHERE id=? AND owner_id=?').bind(target,id),
+        accountAudit(env,id,keyMatch?'key_revoked':'ssh_removed',target,now)
+      ]);
+      return pub({deleted:rows?.[0]?.meta?.changes===1,kind:keyMatch?'api_key':'ssh_key'});
+    }catch(e){return pub({error:'Credential removal failed'},503)}
+  }
+  if(method==='DELETE'&&path==='/manage/api/account'){
+    if(Object.keys(b).length!==1||b.confirm!=='DELETE MY SHARDS ACCOUNT')return pub({error:'Typed confirmation required'},400);
+    try{
+      // Only Shards-local identity and owner-issued credentials are removed/disabled.
+      // Cloudflare identity and durable organisational audit/message history are outside this operation.
+      const operatorAgent='operator_'+id.slice(0,32);
+      await env.EDGE_DB.batch([
+        accountCreate(env,id,email,now),
+        env.EDGE_DB.prepare('UPDATE operator_api_keys SET revoked_at=? WHERE owner_id=? AND revoked_at IS NULL').bind(now,id),
+        env.EDGE_DB.prepare('DELETE FROM operator_ssh_keys WHERE owner_id=?').bind(id),
+        env.EDGE_DB.prepare('UPDATE access_tokens SET revoked_at=? WHERE agent_id IN (SELECT id FROM agents WHERE created_by=?) AND revoked_at IS NULL').bind(now,id),
+        env.EDGE_DB.prepare('UPDATE agents SET disabled_at=? WHERE created_by=? AND disabled_at IS NULL').bind(now,id),
+        env.EDGE_DB.prepare('UPDATE agents SET disabled_at=? WHERE id=? AND disabled_at IS NULL').bind(now,operatorAgent),
+        env.EDGE_DB.prepare("UPDATE operator_accounts SET email=NULL,full_name='',avatar_data=NULL,theme='system',deleted_at=?,updated_at=? WHERE id=?").bind(now,now,id),
+        accountAudit(env,id,'account_deleted',id,now)
+      ]);
+      return pub({deleted:true,identity_provider_deleted:false,history_retained:true,issued_agent_keys_revoked:true});
+    }catch(e){return pub({error:'Account deletion could not complete atomically'},503)}
+  }
+  return pub({error:'Unsupported account operation'},404);
+}
+async function accountTokenWhoAmI(request,env){
+  const raw=request.headers.get('authorization')||'';
+  if(!/^Bearer smcp_(?:api|cli)_[0-9a-f]{64}$/.test(raw))return pub({error:'Invalid Shards account bearer key'},401);
+  const hash=await digest(raw.slice(7)),now=acctNow();
+  try{
+    const row=await env.EDGE_DB.prepare("SELECT k.id,k.owner_id,k.kind,k.label,k.scopes,k.expires_at,a.full_name FROM operator_api_keys k JOIN operator_accounts a ON a.id=k.owner_id WHERE k.token_sha256=? AND k.revoked_at IS NULL AND k.expires_at>? AND a.deleted_at IS NULL").bind(hash,now).first();
+    if(!row)return pub({error:'Expired or revoked credential'},401);
+    if(row.scopes!=='["account:read"]')return pub({error:'Credential scope denied'},403);
+    await env.EDGE_DB.prepare('UPDATE operator_api_keys SET last_used_at=? WHERE id=? AND revoked_at IS NULL').bind(now,row.id).run();
+    return pub({account_id:row.owner_id,kind:row.kind,label:row.label,scopes:['account:read'],credential_active:true,can_call_agent_tools:false});
+  }catch(e){return pub({error:'Account token verification unavailable'},503)}
+}
+
 async function manage(request,env,url){if(!env.ACCESS_TEAM||!env.ACCESS_AUD||env.ACCESS_AUD===env.CONNECT_ACCESS_AUD)return pub({error:'Operator Access configuration is missing or shares user-login audience'},503);let sub;try{sub=await accessActor(request,env)}catch(e){return pub({error:'Signed Cloudflare Access login required'},401)}
 if(request.method==='GET'&&url.pathname==='/manage/api/workspace'){
   if(url.searchParams.getAll('agent_id').length>1)return pub({error:'One agent filter only'},400);
@@ -227,6 +412,8 @@ if(request.method==='GET'&&(
   }
   return new Response(null,{status:302,headers:{...HEADERS,location:issuer+'/.well-known/oauth-authorization-server','cache-control':'no-store','access-control-allow-origin':'*'}});
 }
+if(u.pathname==='/v1/account/whoami'&&request.method==='GET')return accountTokenWhoAmI(request,env);
+if(u.pathname==='/manage/api/account'||u.pathname.startsWith('/manage/api/account/'))return settingsAPI(request,env,u);
 if(request.method==='GET'&&u.pathname==='/api/status'){let status='unavailable';try{await env.EDGE_DB.prepare('SELECT 1 AS ok').first();status='connected'}catch(e){}return pub({service:'Shards MCP Edge',version:VERSION,endpoint:ORIGIN+'/mcp',db:status,tools:tools.map(t=>({name:t.name,description:t.description,public:t.public})),authentication:{public:'noauth',private:'per-agent bearer',oauth:'not yet available on the original /mcp endpoint',authenticated_connect:{endpoint:ORIGIN+'/connect',worker_listener_configured:Boolean(env.CONNECT_ACCESS_AUD&&env.CONNECT_ACCESS_AUD!==env.ACCESS_AUD),provider:'Cloudflare Access Managed OAuth',scope:'verified identity and three public tools only'}},limits:'Experimental edge service, no remote Python gateway federation'})}
 if(u.pathname==='/mcp')return mcp(request,env);
 if(u.pathname.startsWith('/manage/api/'))return manage(request,env,u);
