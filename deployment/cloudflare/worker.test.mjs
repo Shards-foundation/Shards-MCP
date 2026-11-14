@@ -84,3 +84,59 @@ test("operator issued-token rendering uses newline escapes, not literal backslas
   assert.ok(fragment.includes("\\n\\n"), "embedded JS must contain proper newline escape sequences");
   assert.equal(fragment.includes("\\\\n"), false, "embedded JS must not contain literal \\n");
 });
+
+
+test("Live Lab is a real same-origin route with a strict script policy", async () => {
+  const response = await worker.fetch(new Request("https://mcp.shardsinc.co.uk/lab"), {});
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /text\/html/);
+  const csp = response.headers.get("content-security-policy");
+  assert.match(csp, /script-src 'self'/);
+  assert.match(csp, /form-action 'none'/);
+  assert.match(csp, /connect-src 'self'/);
+  assert.doesNotMatch(csp, /unsafe-eval|script-src 'unsafe-inline'/);
+  const html = await response.text();
+  assert.match(html, /RUN PROTOCOL CHECK/);
+  assert.match(html, /QUERY LIVE CATALOGUE/);
+  assert.match(html, /id="dnsForm"/);
+  assert.match(html, /src="\/lab\.js"/);
+  assert.doesNotMatch(html, /<script(?![^>]*src=)/);
+});
+
+test("Live Lab client is executable JS restricted to the public MCP operations", async () => {
+  const response = await worker.fetch(new Request("https://mcp.shardsinc.co.uk/lab.js"), {});
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /text\/javascript/);
+  const js = await response.text();
+  assert.doesNotThrow(() => new vm.Script(js));
+  assert.match(js, /shards_gateway_status/);
+  assert.match(js, /shards_systems_catalog/);
+  assert.match(js, /shards_dns_lookup/);
+  assert.match(js, /credentials: 'omit'/);
+  assert.match(js, /response\.ok/);
+  assert.match(js, /\.isError/);
+  assert.doesNotMatch(js, /\/manage\/api\//);
+  assert.doesNotMatch(js, /localStorage|sessionStorage|Bearer\s/);
+});
+
+test("Live Lab appears on the landing page, but never exposes cross-host routes", async () => {
+  const main = await worker.fetch(new Request("https://mcp.shardsinc.co.uk/"), {});
+  assert.equal(main.status, 200);
+  assert.match(await main.text(), /href="\/lab">LIVE LAB/);
+  const denied = await worker.fetch(new Request("https://example.com/lab"), {});
+  assert.equal(denied.status, 404);
+  const missing = await worker.fetch(new Request("https://mcp.shardsinc.co.uk/lab-other"), {});
+  assert.equal(missing.status, 404);
+});
+
+test("Lab diagnostics do not require credentials; protected MCP tools still fail closed", async () => {
+  const discovery = await worker.fetch(post("tools/list"), {});
+  const listed = (await discovery.json()).result.tools.map(x => x.name);
+  assert.deepEqual(Array.from(listed), [
+    "shards_gateway_status", "shards_systems_catalog", "shards_dns_lookup"
+  ]);
+  const forbidden = await worker.fetch(post("tools/call", {name:"shards_task_create", arguments:{}}), {});
+  const body = await forbidden.json();
+  assert.equal(body.result.isError, true);
+  assert.match(body.result.content[0].text, /AUTH_REQUIRED/);
+});
