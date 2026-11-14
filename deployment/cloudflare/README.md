@@ -118,3 +118,28 @@ The browser client has **no credential field**, no arbitrary MCP method selectio
 The lab does not enrol agents, run private tasks, prove host-separated agent messaging or make the separate Python runtime available. It is a limited diagnostic utility, not a production certification dashboard.
 
 Validate source before a deployment with `node --check deployment/cloudflare/worker.js` and `node --test deployment/cloudflare/worker.test.mjs`, then test the hosted page and MCP endpoint after a separately approved Worker rollout. Merging a pull request does **not** deploy the Cloudflare Worker.
+
+
+## Authenticated MCP connection (separate Cloudflare Access application)
+
+`https://mcp.shardsinc.co.uk/signin` is a public sign-in entrypoint. `https://mcp.shardsinc.co.uk/connect` is a **separate Access-protected endpoint** for authenticating browsers and MCP clients. It must be bound to its **own** Cloudflare Access application and audience, not the existing operator-only `/manage` application.
+
+### Identity provider requirements
+
+- The account currently contains a Cloudflare identity provider. Its existing configuration restricts sign-in to Cloudflare account members. This is **not** equivalent to public Google/GitHub/Discord login.
+- Do not show buttons for Google, GitHub, Discord, Apple, Microsoft, Meta, OpenAI, Anthropic/Claude, phone/SMS or email OTP unless an actual configured IdP and a successful callback verify them. Each external provider requires suitable developer registration/credentials; SMS also requires a legitimate delivery/abuse-control provider. OpenAI and Anthropic consumer accounts are not assumed to provide general-purpose social-login OAuth.
+- If offering public self-service sign-in later, use a **separate** public login method and explicit enrolment/privacy/abuse policy. Do not relax the existing account-member-only operator IdP or change `/manage` policies.
+- Portal sessions, Cloudflare Access application tokens and existing `smcp_*` agent tokens are separate security domains.
+
+### Cloudflare Access Managed OAuth configuration
+
+1. Keep `/mcp`, `/lab`, `/api/status` and `/signin` public. Preserve the owner-only Access app for `/manage` exactly as it is.
+2. Create a new self-hosted Cloudflare Access application with destination **`mcp.shardsinc.co.uk/connect` only**. Select the actual configured IdP and an explicitly reviewed Access policy. Enable **Managed OAuth** and avoid enabling it on the operator application.
+3. Record the newly issued Access application **audience tag** in the Cloudflare Worker plain-text binding `CONNECT_ACCESS_AUD`. Retain `ACCESS_TEAM`, `ACCESS_AUD` and `EDGE_DB` unchanged. Use strict binding inheritance on Worker versions.
+4. Confirm an anonymous browser navigation to `/connect` redirects to real Cloudflare Access login, while an authenticated browser receives the signed-identity page.
+5. Test the MCP client at `https://mcp.shardsinc.co.uk/connect` (the Managed OAuth route). The client must support the RFC 8707 resource indicator and provider-managed PKCE flow. An unauthenticated non-browser MCP request should receive an OAuth `401` challenge from Access, not a fake success or arbitrary local browser token.
+6. After completing a real login, use `tools/list` and `shards_user_identity`. The supported authenticated tools are `shards_user_identity` plus the three existing **public** read-only tools. This is *not* a general user account, internal tenant membership, or an agent enrolment feature. Existing private messages/tasks remain restricted to separately provisioned `smcp_*` agents.
+
+**Security boundary:** Worker code verifies the JWT signature against the fixed Cloudflare Access JWKS, expected issuer, separate audience, expiry and nbf. The new route does not accept a user-provided issuer, an unverified JWT, or an arbitrary redirect URL. The operator JWT cannot be reused as a connect JWT and vice versa.
+
+**Rollback:** Revert only the new Access app/policy and Worker deployment to the prior pinned version. Never delete the D1 database, existing Access operator app or its policies. An attempted provider login must be labelled **BLOCKED** until a real user completes the provider consent/callback; the tests cannot impersonate a Cloudflare account or prove a UI login.
