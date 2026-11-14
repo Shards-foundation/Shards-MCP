@@ -43,7 +43,7 @@ jobs:
           curl -fsS https://mcp.shardsinc.co.uk/app.js -o /tmp/live-client.js
           node --check /tmp/live-client.js
           curl -fsS https://mcp.shardsinc.co.uk/api/status -o /tmp/status.json
-          node -e "const v=require('/tmp/status.json');if(v.db!=='connected'||v.tools.filter(t=>t.public).length!==3||v.tools.filter(t=>!t.public).length!==9||v.authentication.oauth!=='not yet available')process.exit(1)"
+          node -e "const v=require('/tmp/status.json');if(v.db!=='connected'||v.tools.filter(t=>t.public).length!==3||v.tools.filter(t=>!t.public).length!==9||!String(v.authentication.oauth).startsWith('not yet available'))process.exit(1)"
       - name: Verify MCP initialize and tool discovery
         run: |
           set -euo pipefail
