@@ -355,6 +355,10 @@ async function accountTokenWhoAmI(request,env){
 }
 
 async function manage(request,env,url){if(!env.ACCESS_TEAM||!env.ACCESS_AUD||env.ACCESS_AUD===env.CONNECT_ACCESS_AUD)return pub({error:'Operator Access configuration is missing or shares user-login audience'},503);let sub;try{sub=await accessActor(request,env)}catch(e){return pub({error:'Signed Cloudflare Access login required'},401)}
+try{
+  const erased=await env.EDGE_DB.prepare('SELECT deleted_at FROM operator_accounts WHERE id=?').bind(await digest(sub)).first();
+  if(erased?.deleted_at)return pub({error:'Shards-local operator account deleted; management access disabled'},410);
+}catch(e){return pub({error:'Operator account storage unavailable'},503)}
 if(request.method==='GET'&&url.pathname==='/manage/api/workspace'){
   if(url.searchParams.getAll('agent_id').length>1)return pub({error:'One agent filter only'},400);
   const id=url.searchParams.get('agent_id');
