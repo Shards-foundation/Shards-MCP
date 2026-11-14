@@ -78,6 +78,15 @@ A custom model/tool runtime must independently enforce those downstream
 policies. The `task:verify` control still requires a distinct agent ID, not
 a proven independent person/controller or authoritative evidence.
 
+## Backup and restore
+
+Current-format offline snapshot verification also requires the persistent
+`delegation_grants` table. A snapshot created before this schema existed must
+be handled with its matching historical verifier; the new verifier must not
+claim that such a snapshot preserves the newer authorisation policy. After
+upgrading, create and independently verify a new backup, and rehearse a restore
+before authorising sensitive agents.
+
 ## Acceptance / evidence
 
 ```bash

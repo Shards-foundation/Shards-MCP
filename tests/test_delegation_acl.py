@@ -141,7 +141,22 @@ class DelegationACLTests(unittest.TestCase):
 
     def test_no_mcp_tool_can_mutate_delegation_policy(self):
         exposed = {tool["name"] for tool in TOOL_LIST}
-        self.assertFalse(any("delegation_grant" in name or "delegation_revoke" in name for name in exposed))
+        self.assertFalse(any("delegation" in name.replace("-", "_") for name in exposed))
+
+    def test_existing_schema_migrates_to_empty_fail_closed_grants(self):
+        # Model a SQLite database written by the experimental version before
+        # delegation_grants existed; startup creates an empty policy table.
+        prior = self.g.task_create(self.root, self.destination, {}, "old-task")
+        with self.g.tx() as db:
+            db.execute("DROP TABLE delegation_grants")
+        migrated = Gateway(self.path, self.secret)
+        self.assertEqual(migrated.delegations(self.root), [])
+        self.assertEqual(migrated.task_get(self.root, prior["task_id"])["state"], "queued")
+        with self.assertRaises(GatewayError) as denied:
+            migrated.task_create(self.actor, self.destination, {}, "new-agent-task")
+        self.assertEqual(denied.exception.code, "FORBIDDEN")
+        migrated.delegation_grant(self.root, self.creator["agent_id"], self.destination)
+        self.assertEqual(migrated.task_create(self.actor, self.destination, {}, "new-agent-task")["state"], "queued")
 
     def test_local_admin_cli_grant_revoke_and_list(self):
         env = {**os.environ, "SHARDS_DB": self.path, "SHARDS_ADMIN_TOKEN": self.secret}
@@ -162,7 +177,9 @@ class DelegationACLTests(unittest.TestCase):
                          "--assignee", self.destination)
         self.assertEqual(revoked.returncode, 0, revoked.stderr)
         self.assertTrue(json.loads(revoked.stdout)["changed"])
-        self.assertNotIn(self.secret, granted.stdout + granted.stderr + revoked.stdout + revoked.stderr)
+        outputs = failed.stdout + failed.stderr + granted.stdout + granted.stderr + \
+                  listed.stdout + listed.stderr + revoked.stdout + revoked.stderr
+        self.assertNotIn(self.secret, outputs)
 
 
 if __name__ == "__main__":
