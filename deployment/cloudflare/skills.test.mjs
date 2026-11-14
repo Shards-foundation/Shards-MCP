@@ -83,7 +83,8 @@ test('operator skill registry requires cryptographic Access identity, persists s
  };
  const req=(suffix,method,token,body,origin=base)=>{
   const headers={'cf-access-jwt-assertion':token||''};
-  if(body!==undefined){headers.origin=origin;headers['content-type']='application/json'}
+  if(method!=='GET')headers.origin=origin;
+  if(body!==undefined)headers['content-type']='application/json';
   return new Request(base+'/manage/api/skills'+suffix,{method,headers,body:body===undefined?undefined:JSON.stringify(body)});
  };
  const good=await jwt(),other=await jwt('other-operator'),wrongAud=await jwt('skill-user','connect-audience');
