@@ -36,6 +36,7 @@ Worker bindings:
 - `EDGE_DB`: D1 database in EU; apply `schema.sql` before deployment
 - `ACCESS_TEAM`: the configured Cloudflare Access team slug, not a secret
 - `ACCESS_AUD`: exact Access application audience tag, not a secret
+- `CONNECT_ACCESS_AUD`: separate pilot MCP Access application audience tag (required for `/connect` and `/connect/profile`; must differ from `ACCESS_AUD`)
 
 A separate **self-hosted Cloudflare Access application** protects `mcp.shardsinc.co.uk/manage` and its subpaths, allowing only the existing administrator identity through the configured account IdP. The Worker also verifies each `cf-access-jwt-assertion` signature via the Access JWKS, issuer, audience, expiration, nbf and subject. Neither the JWT nor agent tokens are committed to the repository.
 
