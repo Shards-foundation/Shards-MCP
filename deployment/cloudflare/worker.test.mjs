@@ -294,7 +294,8 @@ test("Sign-in entrypoint exposes only a real Cloudflare Access handoff", async (
   assert.equal(r.status,200);
   const html=await r.text();
   assert.match(html, /Continue with Cloudflare/);
-  assert.match(html, /href="\/connect"/);
+  assert.match(html, /href="\/connect\/profile"/);
+  assert.deepEqual(html.match(/Continue with [^<]+<\/a>/g),["Continue with Cloudflare Access</a>"]);
   assert.doesNotMatch(html, /Continue with (Google|GitHub|Discord|Apple|ChatGPT)/);
   const csp=r.headers.get("content-security-policy");
   assert.match(csp, /script-src 'none'/);
@@ -343,8 +344,10 @@ test("Separate signed Cloudflare identity can discover only public and session t
   });
   try{
     const good=await make();
-    const profile=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":good}}),env);
+    const profile=await worker.fetch(new Request(target+"/profile",{headers:{"cf-access-jwt-assertion":good}}),env);
     assert.equal(profile.status,200);
+    const mcpGet=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":good}}),env);
+    assert.equal(mcpGet.status,405,"MCP GET must not serve an HTML profile");
     const html=await profile.text();
     assert.match(html,/verified@example.com/);
     assert.match(html,/VERIFIED IDENTITY/);
@@ -374,18 +377,32 @@ test("Separate signed Cloudflare identity can discover only public and session t
     assert.equal(badAudience.status,401);
     const expired=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({exp:Math.floor(Date.now()/1000)-10})}}),env);
     assert.equal(expired.status,401);
+    const missingExpiry=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({exp:undefined})}}),env);
+    assert.equal(missingExpiry.status,401);
+    const nonNumericExpiry=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({exp:"never"})}}),env);
+    assert.equal(nonNumericExpiry.status,401);
+    const sameAudience=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":good}}),{...env,CONNECT_ACCESS_AUD:env.ACCESS_AUD});
+    assert.equal(sameAudience.status,503,"The new Access app must use a different audience");
     const unsigned=good.slice(0,-5)+"xxxxx";
     const tampered=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":unsigned}}),env);
     assert.equal(tampered.status,401);
-    const htmlEscapeProbe=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({email:'<script>alert("x")</script>'})}}),env);
+    const htmlEscapeProbe=await worker.fetch(new Request(target+"/profile",{headers:{"cf-access-jwt-assertion":await make({email:'<script>alert("x")</script>'})}}),env);
     assert.equal(htmlEscapeProbe.status,200);
     const escaped=await htmlEscapeProbe.text();
     assert.doesNotMatch(escaped,/<script>alert/);
     assert.match(escaped,/&lt;script&gt;alert/);
-    const dollarEmail=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({email:"user$&@example.com"})}}),env);
+    const dollarEmail=await worker.fetch(new Request(target+"/profile",{headers:{"cf-access-jwt-assertion":await make({email:"user$&@example.com"})}}),env);
     assert.equal(dollarEmail.status,200);
     const exact=await dollarEmail.text();
     assert.ok(exact.includes("user$&amp;@example.com"),"Replacement dollar directives must display literally");
     assert.equal(jwksFetches,1,"Repeated signed requests reuse the verified issuer JWKS during the TTL");
+    const badConfig=await worker.fetch(new Request(target),{...env,CONNECT_ACCESS_AUD:env.ACCESS_AUD});
+    assert.equal(badConfig.status,503);
+    const oldMock=sandbox.fetch;
+    try {
+      sandbox.fetch=async()=>{throw Error("upstream JWKS outage")};
+      const upstream=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({iss:"https://unavailable.cloudflareaccess.com"})}}),{...env,ACCESS_TEAM:"unavailable"});
+      assert.equal(upstream.status,503,"Signing-key outages should not be labelled invalid user logins");
+    } finally { sandbox.fetch=oldMock; }
   }finally{sandbox.fetch=oldFetch;}
 });
