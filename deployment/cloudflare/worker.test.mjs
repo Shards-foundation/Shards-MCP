@@ -382,10 +382,10 @@ test("Separate signed Cloudflare identity can discover only public and session t
     const escaped=await htmlEscapeProbe.text();
     assert.doesNotMatch(escaped,/<script>alert/);
     assert.match(escaped,/&lt;script&gt;alert/);
-    const dollarEmail=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({email:"user    assert.match(escaped,/&lt;script&gt;alert/);@example.com"})}}),env);
+    const dollarEmail=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({email:"user$&@example.com"})}}),env);
     assert.equal(dollarEmail.status,200);
     const exact=await dollarEmail.text();
-    assert.match(exact,/user\    assert.match(escaped,/&lt;script&gt;alert/);amp;@example\.com/,"Replacement dollar directives must display literally");
+    assert.ok(exact.includes("user$&amp;@example.com"),"Replacement dollar directives must display literally");
     assert.equal(jwksFetches,1,"Repeated signed requests reuse the verified issuer JWKS during the TTL");
   }finally{sandbox.fetch=oldFetch;}
 });
