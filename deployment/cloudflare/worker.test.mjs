@@ -433,6 +433,15 @@ test("RFC 9728 OAuth discovery publishes the actual path-bound resource and trus
   assert.deepEqual(Array.from(metadata.authorization_servers),["https://gentle-shape-bee5.cloudflareaccess.com"]);
   assert.deepEqual(Array.from(metadata.bearer_methods_supported),["header"]);
   assert.doesNotMatch(JSON.stringify(metadata),/client_secret|token|identity|email|ACCESS_AUD/);
+  const cloudflareAlias=await worker.fetch(new Request(root+"/.well-known/cloudflare-access-protected-resource/connect"),env);
+  assert.equal(cloudflareAlias.status,200,"Actual Access challenge discovery path is served");
+  assert.equal(cloudflareAlias.headers.get("access-control-allow-origin"),"*");
+  const cfMetadata=await cloudflareAlias.json();
+  assert.equal(cfMetadata.resource,root+"/connect");
+  assert.equal(cfMetadata.protected,true);
+  assert.equal(cfMetadata.team_domain,"gentle-shape-bee5.cloudflareaccess.com");
+  assert.deepEqual(Array.from(cfMetadata.authorization_servers),["https://gentle-shape-bee5.cloudflareaccess.com"]);
+
 
   const fallback=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource"),env);
   assert.equal(fallback.status,302);
@@ -472,6 +481,6 @@ test("Unauthenticated connect origin exposes discoverable metadata without grant
   assert.equal(r.status,401);
   assert.equal(r.headers.get("access-control-allow-origin"),null,"Authenticated MCP responses never get wildcard CORS");
   assert.match(r.headers.get("www-authenticate"),/realm="shards-mcp-connect"/);
-  assert.match(r.headers.get("www-authenticate"),/resource_metadata="https:\/\/mcp\.shardsinc\.co\.uk\/\.well-known\/oauth-protected-resource\/connect"/);
+  assert.match(r.headers.get("www-authenticate"),/resource_metadata="https:\/\/mcp\.shardsinc\.co\.uk\/\.well-known\/cloudflare-access-protected-resource\/connect"/);
   assert.deepEqual(await r.json(),{error:"Cloudflare Access authentication required"},"The 401 response is a generic challenge, not a user-profile disclosure");
 });
