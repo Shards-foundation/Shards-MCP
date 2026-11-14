@@ -6,7 +6,7 @@ import { webcrypto } from "node:crypto";
 
 const src = fs.readFileSync(new URL("./worker.js", import.meta.url), "utf8");
 const sandbox = {
-  Request, Response, Headers, URL, TextEncoder, TextDecoder, crypto: webcrypto, AbortSignal,
+  Request, Response, Headers, URL, TextEncoder, TextDecoder, crypto: webcrypto, AbortSignal, atob,
   fetch: async () => { throw new Error("test must never call the network"); },
 };
 vm.runInNewContext(src.replace("export default {", "globalThis.__edge = {"), sandbox, { filename: "worker.js" });
