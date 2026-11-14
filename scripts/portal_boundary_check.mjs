@@ -82,7 +82,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   } catch (error) {
     // No request, token or response body is ever emitted. Safe on public CI.
-    process.stderr.write(\`Portal boundary acceptance FAIL: \${error.message}\n\`);
+    process.stderr.write('Portal boundary acceptance FAIL: ' + error.message + '\n');
     process.exitCode = 1;
   }
 }
