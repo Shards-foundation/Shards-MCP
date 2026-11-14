@@ -381,6 +381,12 @@ test("Separate signed Cloudflare identity can discover only public and session t
     assert.equal(manage.status,401,"Public Access token cannot impersonate the operator");
     const badAudience=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({aud:["operator-audience"]})}}),env);
     assert.equal(badAudience.status,401);
+    const wrongIssuer=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({iss:"https://wrong.cloudflareaccess.com"})}}),env);
+    assert.equal(wrongIssuer.status,401,"Wrong signed issuer must be rejected");
+    for(const value of [null,[],true,1,"string"]){
+      const invalid=await worker.fetch(signedPost("tools/call",{name:"shards_user_identity",arguments:value},good),env);
+      assert.equal((await invalid.json()).result.isError,true,"Primitive/array identity arguments must fail closed");
+    }
     const expired=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({exp:Math.floor(Date.now()/1000)-10})}}),env);
     assert.equal(expired.status,401);
     const missingExpiry=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":await make({exp:undefined})}}),env);
