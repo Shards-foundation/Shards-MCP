@@ -90,6 +90,33 @@ jobs:
           curl -fsS -X POST "$URL" -H 'Content-Type: application/json' -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: server/discover' \
             --data '{"jsonrpc":"2.0","id":7,"method":"server/discover","params":{}}' -o /tmp/modern.json
           node -e "const j=require('/tmp/modern.json');if(j.result.protocolVersion!=='2026-07-28')process.exit(1)"
+      - name: Verify existing Access OAuth challenge baseline (not new resource-metadata deployment)
+        run: |
+          set -euo pipefail
+          status=$(curl -sS -X POST https://mcp.shardsinc.co.uk/connect \
+            -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            --data '{"jsonrpc":"2.0","id":90,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"oauth-ci","version":"1"}}}' \
+            -D /tmp/connect-challenge-headers -o /tmp/connect-challenge-body -w '%{http_code}')
+          echo "Unauthenticated /connect HTTP status: $status"
+          test "$status" = 401
+          grep -qi '^www-authenticate:.*bearer' /tmp/connect-challenge-headers
+          grep -qi 'resource_metadata=' /tmp/connect-challenge-headers
+          echo "Real Access challenge includes RFC 9728 resource_metadata"
+          node <<'NODE'
+          const fs=require('node:fs');
+          const headers=fs.readFileSync('/tmp/connect-challenge-headers','utf8');
+          const challenge=headers.split(/\r?\n/).find(l=>/^www-authenticate:/i.test(l))||'';
+          const metadata=/resource_metadata\s*=\s*"?([^",\s]+)/i.exec(challenge);
+          if(!metadata)throw Error('OAuth resource_metadata missing');
+          const target=new URL(metadata[1]);
+          if(target.protocol!=='https:')throw Error('OAuth discovery URL must be HTTPS');
+          if(target.hostname!=='mcp.shardsinc.co.uk'||target.pathname!=='/.well-known/cloudflare-access-protected-resource/connect'){
+            throw Error('Access challenge advertises an unexpected metadata endpoint');
+          }
+          console.log('Access-advertised metadata host:',target.hostname);
+          console.log('Access-advertised metadata path:',target.pathname);
+          console.log('Note: discovery target content requires separate post-deployment acceptance');
+          NODE
       - name: Verify operator route is not publicly accessible
         run: |
           set -euo pipefail

@@ -418,3 +418,69 @@ test("Separate signed Cloudflare identity can discover only public and session t
     } finally { sandbox.fetch=oldMock; }
   }finally{sandbox.fetch=oldFetch;}
 });
+
+
+test("RFC 9728 OAuth discovery publishes the actual path-bound resource and trusted Access issuer", async () => {
+  const env={ACCESS_TEAM:"gentle-shape-bee5",ACCESS_AUD:"operator-aud",CONNECT_ACCESS_AUD:"different-connect-aud"};
+  const root="https://mcp.shardsinc.co.uk";
+  const m=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),env);
+  assert.equal(m.status,200);
+  assert.match(m.headers.get("content-type"),/application\/json/);
+  assert.match(m.headers.get("cache-control"),/max-age=120/);
+  assert.equal(m.headers.get("access-control-allow-origin"),"*","Public metadata can be read by standard browser OAuth clients");
+  const metadata=await m.json();
+  assert.equal(metadata.resource,root+"/connect");
+  assert.deepEqual(Array.from(metadata.authorization_servers),["https://gentle-shape-bee5.cloudflareaccess.com"]);
+  assert.deepEqual(Array.from(metadata.bearer_methods_supported),["header"]);
+  assert.doesNotMatch(JSON.stringify(metadata),/client_secret|token|identity|email|ACCESS_AUD/);
+  const cloudflareAlias=await worker.fetch(new Request(root+"/.well-known/cloudflare-access-protected-resource/connect"),env);
+  assert.equal(cloudflareAlias.status,200,"Actual Access challenge discovery path is served");
+  assert.equal(cloudflareAlias.headers.get("access-control-allow-origin"),"*");
+  const cfMetadata=await cloudflareAlias.json();
+  assert.equal(cfMetadata.resource,root+"/connect");
+  assert.equal(cfMetadata.protected,true);
+  assert.equal(cfMetadata.team_domain,"gentle-shape-bee5.cloudflareaccess.com");
+  assert.deepEqual(Array.from(cfMetadata.authorization_servers),["https://gentle-shape-bee5.cloudflareaccess.com"]);
+
+
+  const fallback=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource"),env);
+  assert.equal(fallback.status,302);
+  assert.equal(fallback.headers.get("access-control-allow-origin"),"*");
+  assert.equal(fallback.headers.get("location"),root+"/.well-known/oauth-protected-resource/connect");
+  const issuerAlias=await worker.fetch(new Request(root+"/.well-known/oauth-authorization-server"),env);
+  assert.equal(issuerAlias.status,302);
+  assert.equal(issuerAlias.headers.get("access-control-allow-origin"),"*");
+  assert.equal(issuerAlias.headers.get("location"),"https://gentle-shape-bee5.cloudflareaccess.com/.well-known/oauth-authorization-server");
+  assert.equal(issuerAlias.headers.get("cache-control"),"no-store");
+
+  const missing=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),{});
+  assert.equal(missing.status,503);
+  const wrongAudience=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),{...env,CONNECT_ACCESS_AUD:"operator-aud"});
+  assert.equal(wrongAudience.status,503);
+  const missingOperator=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),{ACCESS_TEAM:env.ACCESS_TEAM,CONNECT_ACCESS_AUD:env.CONNECT_ACCESS_AUD});
+  assert.equal(missingOperator.status,503);
+  for(const bad of ["", " ", "  broken "]) {
+    const invalidAudience=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),{...env,CONNECT_ACCESS_AUD:bad});
+    assert.equal(invalidAudience.status,503);
+  }
+  for(const badTeam of ["-bad","bad-","evil.test/path"]) {
+    const invalidTeam=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),{...env,ACCESS_TEAM:badTeam});
+    assert.equal(invalidTeam.status,503);
+  }
+  const badTeam=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),{...env,ACCESS_TEAM:"evil.test/path"});
+  assert.equal(badTeam.status,503);
+  const otherHost=await worker.fetch(new Request("https://untrusted.example/.well-known/oauth-protected-resource/connect"),env);
+  assert.equal(otherHost.status,404);
+  const wrongMethod=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect",{method:"POST"}),env);
+  assert.equal(wrongMethod.status,404);
+});
+
+test("Unauthenticated connect origin exposes discoverable metadata without granting identity", async () => {
+  const env={ACCESS_TEAM:"gentle-shape-bee5",ACCESS_AUD:"operator-aud",CONNECT_ACCESS_AUD:"different-connect-aud"};
+  const r=await worker.fetch(new Request("https://mcp.shardsinc.co.uk/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list",params:{}})}),env);
+  assert.equal(r.status,401);
+  assert.equal(r.headers.get("access-control-allow-origin"),null,"Authenticated MCP responses never get wildcard CORS");
+  assert.match(r.headers.get("www-authenticate"),/realm="shards-mcp-connect"/);
+  assert.match(r.headers.get("www-authenticate"),/resource_metadata="https:\/\/mcp\.shardsinc\.co\.uk\/\.well-known\/cloudflare-access-protected-resource\/connect"/);
+  assert.deepEqual(await r.json(),{error:"Cloudflare Access authentication required"},"The 401 response is a generic challenge, not a user-profile disclosure");
+});
