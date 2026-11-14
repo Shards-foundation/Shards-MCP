@@ -287,10 +287,10 @@ async function settingsAPI(request,env,url){
       const keyId=crypto.randomUUID(),expiresAt=new Date(Date.now()+b.expires_days*86400000).toISOString();
       const rows=await env.EDGE_DB.batch([
         accountCreate(env,id,email,now),
-        env.EDGE_DB.prepare("INSERT INTO operator_api_keys(id,owner_id,kind,label,token_sha256,prefix,scopes,created_at,expires_at) SELECT ?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM operator_accounts WHERE id=? AND deleted_at IS NULL)").bind(keyId,id,b.kind,b.label,await digest(token),token.slice(0,19),'["account:read"]',now,expiresAt,id),
+        env.EDGE_DB.prepare("INSERT INTO operator_api_keys(id,owner_id,kind,label,token_sha256,prefix,scopes,created_at,expires_at) SELECT ?,?,?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM operator_accounts WHERE id=? AND deleted_at IS NULL) AND (SELECT COUNT(*) FROM operator_api_keys WHERE owner_id=? AND revoked_at IS NULL AND expires_at>?)<50").bind(keyId,id,b.kind,b.label,await digest(token),token.slice(0,19),'["account:read"]',now,expiresAt,id,id,now),
         accountAudit(env,id,'key_created',keyId,now,true)
       ]);
-      if(rows?.[1]?.meta?.changes!==1)return pub({error:'Shards-local account was deleted'},410);
+      if(rows?.[1]?.meta?.changes!==1)return pub({error:'Account deleted or active credential limit reached'},409);
       return pub({id:keyId,label:b.label,kind:b.kind,token,expires_at:expiresAt,scopes:['account:read'],warning:'Copy once. The plaintext is not stored.'},201);
     }catch(e){return pub({error:'Key generation failed; no credential issued'},503)}
   }
@@ -303,12 +303,12 @@ async function settingsAPI(request,env,url){
       const keyId=crypto.randomUUID();
       const rows=await env.EDGE_DB.batch([
         accountCreate(env,id,email,now),
-        env.EDGE_DB.prepare("INSERT INTO operator_ssh_keys(id,owner_id,label,algorithm,public_key,fingerprint,created_at) SELECT ?, ?, ?, 'ssh-ed25519', ?, ?, ? WHERE EXISTS(SELECT 1 FROM operator_accounts WHERE id=? AND deleted_at IS NULL)").bind(keyId,id,b.label,parsed.canonical,fp,now,id),
+        env.EDGE_DB.prepare("INSERT INTO operator_ssh_keys(id,owner_id,label,algorithm,public_key,fingerprint,created_at) SELECT ?, ?, ?, 'ssh-ed25519', ?, ?, ? WHERE EXISTS(SELECT 1 FROM operator_accounts WHERE id=? AND deleted_at IS NULL) AND (SELECT COUNT(*) FROM operator_ssh_keys WHERE owner_id=?)<100").bind(keyId,id,b.label,parsed.canonical,fp,now,id,id),
         accountAudit(env,id,'ssh_added',keyId,now,true)
       ]);
-      if(rows?.[1]?.meta?.changes!==1)return pub({error:'Shards-local account was deleted'},410);
+      if(rows?.[1]?.meta?.changes!==1)return pub({error:'Account deleted or SSH key limit reached'},409);
       return pub({id:keyId,fingerprint:fp,stored:true,ssh_authorises_access:false},201);
-    }catch(e){return pub({error:'SSH public key already exists or storage failed'},409)}
+    }catch(e){if(String(e?.message||'').toLowerCase().includes('unique'))return pub({error:'SSH public key already exists'},409);return pub({error:'SSH public key storage unavailable'},503)}
   }
   const keyMatch=/^\/manage\/api\/account\/keys\/([0-9a-f-]{36})$/.exec(path);
   const sshMatch=/^\/manage\/api\/account\/ssh\/([0-9a-f-]{36})$/.exec(path);
