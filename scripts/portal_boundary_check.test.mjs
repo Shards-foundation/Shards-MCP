@@ -2,12 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { checkPortalBoundary } from './portal_boundary_check.mjs';
 
-function mockGateway({ anonymousListStatus = 401, anonymousCallStatus = 401, invalidStatus = 401, challenge = true, metadataValid = true, resource = 'https://portal.shardsinc.co.uk/mcp' } = {}) {
+function mockGateway({ anonymousListStatus = 401, anonymousCallStatus = 401, invalidStatus = 401, challenge = true, metadataValid = true, metadataMalformed = false, resource = 'https://portal.shardsinc.co.uk/mcp' } = {}) {
   const seen = [];
   async function fetchImpl(url, opts) {
     const body = opts.body && JSON.parse(opts.body);
     seen.push({ path: url.pathname, method: opts.method, authorization: opts.headers.Authorization || null });
     if (url.pathname === '/.well-known/oauth-protected-resource/mcp') {
+      if (metadataMalformed) return new Response('{INVALID_JSON_SENSITIVE_MARKER}', {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
       return Response.json(metadataValid
         ? { resource, authorization_servers: ['https://portal.shardsinc.co.uk'] }
         : { authorization_servers: [] });
@@ -50,6 +53,17 @@ test('missing OAuth challenge fails closed', async () => {
 
 test('invalid resource metadata fails closed', async () => {
   await assert.rejects(checkPortalBoundary(mockGateway({ metadataValid: false })), /Resource metadata must identify the exact protected endpoint/);
+});
+
+test('malformed OAuth JSON is rejected without leaking its response body', async () => {
+  await assert.rejects(
+    checkPortalBoundary(mockGateway({ metadataMalformed: true })),
+    error => {
+      assert.match(error.message, /OAuth resource metadata must be valid JSON/);
+      assert.doesNotMatch(error.message, /SENSITIVE_MARKER/);
+      return true;
+    },
+  );
 });
 
 test('OAuth metadata with same-origin but wrong resource path fails closed', async () => {
