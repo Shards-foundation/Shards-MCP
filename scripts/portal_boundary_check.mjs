@@ -64,8 +64,8 @@ export async function checkPortalBoundary({ fetchImpl = fetch, endpoint = PORTAL
   assert.ok(metadata && typeof metadata === 'object' && !Array.isArray(metadata), 'Metadata must be an object');
   assert.ok(
     typeof metadata.resource === 'string' &&
-    new URL(metadata.resource).origin === target.origin,
-    'Resource metadata must identify this portal origin',
+    new URL(metadata.resource).href === target.href,
+    'Resource metadata must identify the exact protected endpoint',
   );
   assert.ok(
     Array.isArray(metadata.authorization_servers) && metadata.authorization_servers.length > 0 &&
