@@ -110,6 +110,9 @@ jobs:
           if(!metadata)throw Error('OAuth resource_metadata missing');
           const target=new URL(metadata[1]);
           if(target.protocol!=='https:')throw Error('OAuth discovery URL must be HTTPS');
+          if(target.hostname!=='mcp.shardsinc.co.uk'||target.pathname!=='/.well-known/cloudflare-access-protected-resource/connect'){
+            throw Error('Access challenge advertises an unexpected metadata endpoint');
+          }
           console.log('Access-advertised metadata host:',target.hostname);
           console.log('Access-advertised metadata path:',target.pathname);
           console.log('Note: discovery target content requires separate post-deployment acceptance');
