@@ -139,7 +139,7 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
    assert.equal(empty.profile.theme,"system");
    assert.equal(records.accounts.length,0,"GET does not provision account or mutate storage");
    assert.equal(empty.security.two_factor,"identity_provider");
-   const profile={full_name:"Tester Name",theme:"contrast",avatar_data:null};
+   const profile={full_name:"Tester Name",theme:"contrast",avatar_data:null,revision:0};
    res=await worker.fetch(make(url+"/profile","PUT",good,profile,"https://evil.example"),env);assert.equal(res.status,403);
    res=await worker.fetch(make(url+"/profile","PUT",good,{...profile,email:"fake@attacker.test"}),env);assert.equal(res.status,400);
    res=await worker.fetch(make(url+"/profile","PUT",good,profile),env);assert.equal(res.status,200);
