@@ -150,6 +150,10 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    assert.equal(off.status,400);
    const unknown=await worker.fetch(req("POST",endpoint,user,{...payload,evil:true}),env);
    assert.equal(unknown.status,400);
+   const oversize=await worker.fetch(req("POST",endpoint,user,{...payload,body:"x".repeat(20000)}),env);
+   assert.equal(oversize.status,400,"Streaming request must be rejected before an oversized JSON body is fully buffered");
+   const longUtf8=await worker.fetch(req("POST",endpoint,user,{...payload,body:"😀".repeat(1500)}),env);
+   assert.equal(longUtf8.status,400,"UTF-16 message length limit must reject oversized emoji payload");
    const recipientMissingScope=agents.find(a=>a.id===agentId);
    const originalScopes=recipientMissingScope.scopes;
    recipientMissingScope.scopes=JSON.stringify(["agent:identity"]);
