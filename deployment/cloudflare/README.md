@@ -28,6 +28,10 @@ The edge currently supports:
 - verified Cloudflare Access operator identity, scoped credentials, expiry and revocation
 - simple daily operation budgets and fixed-target passive DNS
 
+## Operator account and credential settings
+
+The operator-only account settings page provides profile/avatar, system/dark/light/high-contrast themes, read-only API and CLI keys, SSH public key storage and local account deletion. Password, provider login and MFA controls are **provider-managed**, not simulated. See [Account Settings](SETTINGS.md) for exact API contracts, D1 migration, deletion boundaries and release gates.
+
 ## Cloudflare configuration
 
 The live deployment is in the existing Shards-inc Cloudflare account. Keep control of hostname and zone in your Cloudflare dashboard, not in an agent's prompt.
