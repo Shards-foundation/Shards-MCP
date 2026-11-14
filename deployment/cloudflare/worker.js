@@ -239,13 +239,18 @@ async function settingsAPI(request,env,url){
   const {id,email}=actor,method=request.method,path=url.pathname;
   let account;
   try{account=await accountRow(env,id)}catch(e){return pub({error:'Account settings storage is not configured'},503)}
-  if(account?.deleted_at)return pub({error:'This Shards-local account has been deleted. Cloudflare Access identity is managed separately.'},410);
+  if(account?.deleted_at){
+    if(method==='DELETE'&&path==='/manage/api/account'&&request.headers.get('origin')===ORIGIN&&request.headers.get('content-type')?.toLowerCase().startsWith('application/json')){
+      try{const body=await settingsBody(request,6000);if(Object.keys(body).length===1&&body.confirm==='DELETE MY SHARDS ACCOUNT')return pub({deleted:true,idempotent:true,identity_provider_deleted:false,history_retained:true})}catch(e){}
+    }
+    return pub({error:'This Shards-local account has been deleted. Cloudflare Access identity is managed separately.'},410);
+  }
   if(method==='GET'&&path==='/manage/api/account'){
     try{
       const [keys,ssh,agents]=await Promise.all([
         env.EDGE_DB.prepare("SELECT id,kind,label,prefix,scopes,created_at,expires_at,last_used_at,revoked_at FROM operator_api_keys WHERE owner_id=? ORDER BY CASE WHEN revoked_at IS NULL AND expires_at>? THEN 0 ELSE 1 END,created_at DESC LIMIT 100").bind(id,acctNow()).all(),
         env.EDGE_DB.prepare("SELECT id,label,algorithm,public_key,fingerprint,created_at FROM operator_ssh_keys WHERE owner_id=? ORDER BY created_at DESC LIMIT 100").bind(id).all(),
-        env.EDGE_DB.prepare("SELECT a.id,a.name,a.client,a.created_at,a.disabled_at,COUNT(t.id) AS active_credentials FROM agents a LEFT JOIN access_tokens t ON t.agent_id=a.id AND t.revoked_at IS NULL AND t.expires_at>? WHERE a.created_by=? GROUP BY a.id ORDER BY a.created_at DESC LIMIT 80").bind(acctNow(),id).all()
+        env.EDGE_DB.prepare("SELECT a.id,a.name,a.client,a.created_at,a.disabled_at,COUNT(t.id) AS active_credentials FROM agents a LEFT JOIN access_tokens t ON t.agent_id=a.id AND t.revoked_at IS NULL AND t.expires_at>? WHERE a.created_by=? AND a.client!='operator-ui' GROUP BY a.id ORDER BY a.created_at DESC LIMIT 80").bind(acctNow(),id).all()
       ]);
       return pub({
         profile:{full_name:account?.full_name||'',email:email||account?.email||null,avatar_data:account?.avatar_data||null,theme:account?.theme||'system',created_at:account?.created_at||null,revision:account?.revision??0},
@@ -259,7 +264,9 @@ async function settingsAPI(request,env,url){
   if(request.headers.get('origin')!==ORIGIN)return pub({error:'Same-origin request required'},403);
   if(method!=='PUT'&&method!=='POST'&&method!=='DELETE')return pub({error:'Method not allowed'},405);
   let b;
-  try{
+  const emptyCredentialDelete=method==='DELETE'&&/^\/manage\/api\/account\/(?:keys|ssh)\/[0-9a-f-]{36}$/.test(path)&&!request.body;
+  if(emptyCredentialDelete)b={};
+  else try{
     if(!request.headers.get('content-type')?.toLowerCase().startsWith('application/json'))return pub({error:'JSON required'},415);
     b=await settingsBody(request,path==='/manage/api/account/profile'?50000:6000);
   }catch(e){return pub({error:'Invalid or oversized JSON payload'},400)}
@@ -354,7 +361,10 @@ async function accountTokenWhoAmI(request,env){
     const row=await env.EDGE_DB.prepare("SELECT k.id,k.owner_id,k.kind,k.label,k.scopes,k.expires_at,a.full_name FROM operator_api_keys k JOIN operator_accounts a ON a.id=k.owner_id WHERE k.token_sha256=? AND k.revoked_at IS NULL AND k.expires_at>? AND a.deleted_at IS NULL").bind(hash,now).first();
     if(!row)return pub({error:'Expired or revoked credential'},401);
     if(row.scopes!=='["account:read"]')return pub({error:'Credential scope denied'},403);
-    await env.EDGE_DB.prepare('UPDATE operator_api_keys SET last_used_at=? WHERE id=? AND revoked_at IS NULL').bind(now,row.id).run();
+    await env.EDGE_DB.batch([
+      env.EDGE_DB.prepare('UPDATE operator_api_keys SET last_used_at=? WHERE id=? AND revoked_at IS NULL AND expires_at>?').bind(now,row.id,now),
+      accountAudit(env,row.owner_id,'key_used',row.id,now,true)
+    ]);
     return pub({account_id:row.owner_id,kind:row.kind,label:row.label,scopes:['account:read'],credential_active:true,can_call_agent_tools:false});
   }catch(e){return pub({error:'Account token verification unavailable'},503)}
 }
