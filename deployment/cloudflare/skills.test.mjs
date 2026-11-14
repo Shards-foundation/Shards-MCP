@@ -119,7 +119,7 @@ test('Skills D1 migration matches fresh schema and account deletion includes ski
  const migration=fs.readFileSync(new URL('./migrations/0003_operator_skills.sql',import.meta.url),'utf8');
  const schema=fs.readFileSync(new URL('./schema.sql',import.meta.url),'utf8');
  const start='CREATE TABLE IF NOT EXISTS operator_skills';
- assert.equal(schema.slice(schema.indexOf(start)).trim(),migration.slice(migration.indexOf(start)).trim());
+ assert.equal(schema.slice(schema.indexOf(start),schema.indexOf('-- Authenticated MCP request receipts.')).trim(),migration.slice(migration.indexOf(start)).trim());
  assert.match(source,/DELETE FROM operator_skills WHERE owner_id=\?/);
  assert.match(migration,/UNIQUE\(owner_id,source_url\)/);
  assert.match(migration,/CHECK\(length\(content\) BETWEEN 20 AND 65000\)/);
