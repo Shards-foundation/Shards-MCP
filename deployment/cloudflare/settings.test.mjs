@@ -13,7 +13,7 @@ test("D1 migration and fresh schema operator DDL remain identical and reject NUL
  const migration=fs.readFileSync(new URL("./migrations/0002_operator_settings.sql",import.meta.url),"utf8");
  const baseline=fs.readFileSync(new URL("./schema.sql",import.meta.url),"utf8");
  const start="CREATE TABLE IF NOT EXISTS operator_accounts";
- assert.equal(baseline.slice(baseline.indexOf(start)).trim(),migration.slice(migration.indexOf(start)).trim());
+ assert.equal(baseline.slice(baseline.indexOf(start),baseline.indexOf("-- Operator-owned SKILL.md registry")).trim(),migration.slice(migration.indexOf(start)).trim());
  for(const table of ["operator_accounts","operator_api_keys","operator_ssh_keys"])assert.ok(migration.includes("CREATE TABLE IF NOT EXISTS "+table+" (\n  id TEXT NOT NULL PRIMARY KEY"),table+" must reject NULL ids");
 });
 
