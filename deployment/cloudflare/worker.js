@@ -111,10 +111,27 @@ async function workspaceSnapshot(env,operatorSub,requestedAgentId=null){
   ]);
   return {operator_id:principal,focus_id:focus,agents,messages:messages.results||[],tasks:tasks.results||[],limits:{messages:200,tasks:80,refresh:'polling',presence:'unverified',tenant:'shards-internal'}};
 }
+async function readWorkspaceJSON(request){
+  const limit=16000;
+  const stated=Number(request.headers.get('content-length'));
+  if(Number.isFinite(stated)&&stated>limit)throw Error('Request too large');
+  if(!request.body)throw Error('Missing body');
+  const reader=request.body.getReader(),parts=[];let size=0;
+  try{
+    while(true){
+      const {done,value}=await reader.read();if(done)break;
+      size+=value.byteLength;if(size>limit){await reader.cancel().catch(()=>{});throw Error('Request too large')}
+      parts.push(value);
+    }
+  }finally{reader.releaseLock()}
+  const data=new Uint8Array(size);let at=0;
+  for(const part of parts){data.set(part,at);at+=part.byteLength}
+  return JSON.parse(decoder.decode(data));
+}
 async function operatorSendMessage(env,sub,b){
   if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).some(k=>!['recipient_agent_id','body','request_id'].includes(k)))return pub({error:'Invalid message request'},400);
   const recipient=b.recipient_agent_id,body=typeof b.body==='string'?b.body.trim():null;
-  if(typeof recipient!=='string'||!idPattern.test(recipient)||!body||body.length>2000||!reqId(b.request_id))return pub({error:'Invalid recipient, message or idempotency key'},400);
+  if(typeof recipient!=='string'||!idPattern.test(recipient)||!body||body.length>2000||encoder.encode(body).byteLength>8000||!reqId(b.request_id))return pub({error:'Invalid recipient, message or idempotency key'},400);
   const hash=await digest(sub),operatorId=operatorPrincipalId(hash);
   if(recipient===operatorId)return pub({error:'Select a separate enrolled agent'},400);
   // A committed retry is reportable even if the recipient was later revoked.
@@ -160,7 +177,7 @@ if(request.method==='GET'&&url.pathname==='/manage/api/workspace'){
 if(request.method==='POST'&&url.pathname==='/manage/api/workspace/messages'){
   if(request.headers.get('origin')!==ORIGIN)return pub({error:'Same-origin requests only'},403);
   if(!request.headers.get('content-type')?.toLowerCase().startsWith('application/json'))return pub({error:'JSON required'},415);
-  let body;try{const raw=await request.text();if(raw.length>14000)throw Error('too long');body=JSON.parse(raw)}catch(e){return pub({error:'Malformed message JSON'},400)}
+  let body;try{body=await readWorkspaceJSON(request)}catch(e){return pub({error:'Malformed or oversized message JSON'},400)}
   try{return await operatorSendMessage(env,sub,body)}catch(e){return pub({error:'Workspace message could not be stored'},503)}
 }
 if(request.method==='GET'&&url.pathname==='/manage/api/agents'){const r=await env.EDGE_DB.prepare("SELECT a.id,a.name,a.client,a.scopes,a.created_at,a.disabled_at,COUNT(t.id) AS token_count FROM agents a LEFT JOIN access_tokens t ON t.agent_id=a.id AND t.revoked_at IS NULL WHERE a.tenant_id='shards-internal' GROUP BY a.id ORDER BY a.created_at DESC LIMIT 80").all();return pub({agents:r.results||[]})}
