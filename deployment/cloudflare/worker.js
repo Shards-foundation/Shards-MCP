@@ -126,12 +126,12 @@ if(request.method==='GET'&&(
   const issuer=oauthIssuer(env);
   if(!issuer)return pub({error:'OAuth discovery unavailable'},503,{'cache-control':'no-store'});
   if(u.pathname==='/.well-known/oauth-protected-resource/connect'){
-    return pub({resource:ORIGIN+'/connect',authorization_servers:[issuer],bearer_methods_supported:['header']},200,{'cache-control':'public, max-age=120'});
+    return pub({resource:ORIGIN+'/connect',authorization_servers:[issuer],bearer_methods_supported:['header']},200,{'cache-control':'public, max-age=120','access-control-allow-origin':'*'});
   }
   if(u.pathname==='/.well-known/oauth-protected-resource'){
-    return new Response(null,{status:302,headers:{...HEADERS,location:ORIGIN+'/.well-known/oauth-protected-resource/connect','cache-control':'no-store'}});
+    return new Response(null,{status:302,headers:{...HEADERS,location:ORIGIN+'/.well-known/oauth-protected-resource/connect','cache-control':'no-store','access-control-allow-origin':'*'}});
   }
-  return new Response(null,{status:302,headers:{...HEADERS,location:issuer+'/.well-known/oauth-authorization-server','cache-control':'no-store'}});
+  return new Response(null,{status:302,headers:{...HEADERS,location:issuer+'/.well-known/oauth-authorization-server','cache-control':'no-store','access-control-allow-origin':'*'}});
 }
 if(request.method==='GET'&&u.pathname==='/api/status'){let status='unavailable';try{await env.EDGE_DB.prepare('SELECT 1 AS ok').first();status='connected'}catch(e){}return pub({service:'Shards MCP Edge',version:VERSION,endpoint:ORIGIN+'/mcp',db:status,tools:tools.map(t=>({name:t.name,description:t.description,public:t.public})),authentication:{public:'noauth',private:'per-agent bearer',oauth:'not yet available on the original /mcp endpoint',authenticated_connect:{endpoint:ORIGIN+'/connect',worker_listener_configured:Boolean(env.CONNECT_ACCESS_AUD&&env.CONNECT_ACCESS_AUD!==env.ACCESS_AUD),provider:'Cloudflare Access Managed OAuth',scope:'verified identity and three public tools only'}},limits:'Experimental edge service, no remote Python gateway federation'})}
 if(u.pathname==='/mcp')return mcp(request,env);
