@@ -348,6 +348,12 @@ test("Separate signed Cloudflare identity can discover only public and session t
     assert.equal(profile.status,200);
     const mcpGet=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":good}}),env);
     assert.equal(mcpGet.status,405,"MCP GET must not serve an HTML profile");
+    assert.equal(mcpGet.headers.get("allow"),"POST");
+    const postProfile=await worker.fetch(signedPost("tools/list",{},good).clone(),env); // transport baseline still POST
+    assert.equal(postProfile.status,200);
+    const badProfileMethod=await worker.fetch(new Request(target+"/profile",{method:"POST",headers:{"cf-access-jwt-assertion":good}}),env);
+    assert.equal(badProfileMethod.status,405);
+    assert.equal(badProfileMethod.headers.get("allow"),"GET");
     const html=await profile.text();
     assert.match(html,/verified@example.com/);
     assert.match(html,/VERIFIED IDENTITY/);
