@@ -92,6 +92,11 @@ class Gateway:
                   idem TEXT, created TEXT NOT NULL, updated TEXT NOT NULL,
                   UNIQUE(creator, idem)
                 );
+                CREATE TABLE IF NOT EXISTS delegation_grants (
+                  creator TEXT NOT NULL, assignee TEXT NOT NULL,
+                  granted_by TEXT NOT NULL, created TEXT NOT NULL,
+                  PRIMARY KEY (creator, assignee)
+                );
                 CREATE TABLE IF NOT EXISTS verifications (
                   task_id TEXT PRIMARY KEY, verifier TEXT NOT NULL,
                   approved INTEGER NOT NULL, evidence TEXT NOT NULL, created TEXT NOT NULL
@@ -272,6 +277,51 @@ class Gateway:
             self.audit(db, actor.agent_id, "agent.revoke", agent_id, {})
         return {"revoked": True, "agent_id": agent_id}
 
+    def delegation_grant(self, actor: Principal, creator: str, assignee: str) -> dict[str, Any]:
+        """Locally provision a specific creator->assignee delegation; never a wildcard.
+
+        Operator-only; never exposed by the MCP/REST/A2A tool dispatch surface.
+        The grant and its attribution commit in the same transaction.
+        """
+        actor.require("*")
+        self.required(creator, "creator")
+        self.required(assignee, "assignee")
+        if creator == assignee:
+            raise GatewayError("self-assignment needs no delegation grant")
+        with self.tx() as db:
+            self.agent_exists(db, creator)
+            self.agent_exists(db, assignee)
+            if db.execute("SELECT 1 FROM delegation_grants WHERE creator=? AND assignee=?",
+                          (creator, assignee)).fetchone():
+                return {"creator": creator, "assignee": assignee, "granted": True,
+                        "unchanged": True}
+            db.execute("""INSERT INTO delegation_grants(creator,assignee,granted_by,created)
+                          VALUES (?,?,?,?)""", (creator, assignee, actor.agent_id, now()))
+            self.audit(db, actor.agent_id, "delegation.grant", creator,
+                       {"assignee": assignee})
+        return {"creator": creator, "assignee": assignee, "granted": True, "unchanged": False}
+
+    def delegation_revoke(self, actor: Principal, creator: str, assignee: str) -> dict[str, Any]:
+        """Block new dispatch. Existing durable tasks remain under their original leases."""
+        actor.require("*")
+        self.required(creator, "creator")
+        self.required(assignee, "assignee")
+        with self.tx() as db:
+            changed = db.execute("DELETE FROM delegation_grants WHERE creator=? AND assignee=?",
+                                 (creator, assignee))
+            if changed.rowcount:
+                self.audit(db, actor.agent_id, "delegation.revoke", creator,
+                           {"assignee": assignee})
+        return {"creator": creator, "assignee": assignee, "granted": False,
+                "changed": bool(changed.rowcount)}
+
+    def delegations(self, actor: Principal) -> list[dict[str, Any]]:
+        actor.require("*")
+        with self.read_tx() as db:
+            rows = db.execute("""SELECT creator,assignee,granted_by,created
+                                 FROM delegation_grants ORDER BY creator,assignee""").fetchall()
+        return [dict(row) for row in rows]
+
     def agents(self, actor: Principal) -> list[dict[str, Any]]:
         actor.require("agent:read")
         with self.tx() as db:
@@ -391,6 +441,11 @@ class Gateway:
                     raise GatewayError("idempotency key reused with different task", "CONFLICT")
                 return {"task_id": previous["id"], "state": previous["state"], "deduplicated": True}
             self.agent_exists(db, assignee)
+            if actor.agent_id != "operator" and actor.agent_id != assignee:
+                permitted = db.execute("""SELECT 1 FROM delegation_grants
+                    WHERE creator=? AND assignee=?""", (actor.agent_id, assignee)).fetchone()
+                if not permitted:
+                    raise GatewayError("task delegation to this assignee is not authorized", "FORBIDDEN")
             task_id = uid("tsk")
             stamp = now()
             db.execute("""INSERT INTO tasks
@@ -775,6 +830,7 @@ class Gateway:
 
     def schedule_create(self, actor: Principal, assignee: str, payload: Any,
                         interval_seconds: int) -> dict[str, Any]:
+        """Out-of-band operator approval for recurring tasks, not an agent delegation."""
         actor.require("*")
         if not isinstance(interval_seconds, int) or not 60 <= interval_seconds <= 2592000:
             raise GatewayError("interval_seconds must be 60..2592000")
@@ -804,6 +860,11 @@ class Gateway:
         return {"schedule_id": schedule_id, "enabled": False}
 
     def schedule_tick(self, actor: Principal) -> dict[str, Any]:
+        """Dispatch operator-provisioned schedules using the bootstrap identity only.
+
+        This privileged path intentionally differs from task_create(agent,...).
+        A remote agent with task:create cannot provision or tick schedules.
+        """
         actor.require("*")
         created: list[str] = []
         with self.tx() as db:

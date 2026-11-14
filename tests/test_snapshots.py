@@ -29,6 +29,7 @@ class SnapshotTests(unittest.TestCase):
         b = self.gateway.register(self.root, "snapshot-worker", "test", [], ["task:read"])
         self.actor = self.gateway.authenticate(a["token"])
         self.dest = b["agent_id"]
+        self.gateway.delegation_grant(self.root, a["agent_id"], self.dest)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -43,6 +44,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertGreater(result["bytes"], 1024)
         self.assertEqual(result["records"]["messages"], 1)
         self.assertEqual(result["records"]["tasks"], 1)
+        self.assertEqual(result["records"]["delegation_grants"], 1)
         if os.name == "posix":
             self.assertEqual(output.stat().st_mode & 0o777, 0o600)
         self.assertEqual(inspect_snapshot(str(output))["sha256"], result["sha256"])
@@ -72,6 +74,14 @@ class SnapshotTests(unittest.TestCase):
         with sqlite3.connect(output) as db:
             db.execute("DROP TRIGGER audit_reject_update")
             db.execute("UPDATE audit SET action='forged' WHERE seq=1")
+        with self.assertRaises(GatewayError):
+            inspect_snapshot(str(output))
+
+    def test_snapshot_missing_delegation_table_is_not_current_format_valid(self):
+        output = self.backups / "legacy-policy.sqlite"
+        create_snapshot(self.gateway, self.root, str(output))
+        with sqlite3.connect(output) as db:
+            db.execute("DROP TABLE delegation_grants")
         with self.assertRaises(GatewayError):
             inspect_snapshot(str(output))
 

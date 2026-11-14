@@ -32,6 +32,13 @@ def main() -> None:
     revoke = sub.add_parser("revoke", help="Revoke an agent ID")
     revoke.add_argument("agent_id")
     sub.add_parser("list", help="List agent IDs and scopes without tokens")
+    grant = sub.add_parser("delegation-grant", help="Allow a specific creator to assign tasks to an agent")
+    grant.add_argument("--creator", required=True, help="Existing active creator agent ID")
+    grant.add_argument("--assignee", required=True, help="Existing active destination agent ID")
+    deny = sub.add_parser("delegation-revoke", help="Block new task assignment on one delegation pair")
+    deny.add_argument("--creator", required=True)
+    deny.add_argument("--assignee", required=True)
+    sub.add_parser("delegation-list", help="List operator-authorized task delegation pairs")
     backup = sub.add_parser("backup", help="Create an exclusive consistent online SQLite snapshot")
     backup.add_argument("--output", required=True, help="New file in an owner-only backup directory")
     check = sub.add_parser("verify-snapshot", help="Verify an offline snapshot without starting a gateway")
@@ -85,6 +92,12 @@ def main() -> None:
                 raise
         elif args.action == "revoke":
             print(json.dumps(gateway.revoke(root, args.agent_id)))
+        elif args.action == "delegation-grant":
+            print(json.dumps(gateway.delegation_grant(root, args.creator, args.assignee), sort_keys=True))
+        elif args.action == "delegation-revoke":
+            print(json.dumps(gateway.delegation_revoke(root, args.creator, args.assignee), sort_keys=True))
+        elif args.action == "delegation-list":
+            print(json.dumps(gateway.delegations(root), sort_keys=True))
         elif args.action == "backup":
             print(json.dumps(create_snapshot(gateway, root, args.output), sort_keys=True))
         else:

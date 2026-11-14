@@ -37,6 +37,7 @@ def main() -> int:
         }
         creator, worker, verifier = (actors[k] for k in ("creator", "worker", "verifier"))
         require(len({creator.agent_id, worker.agent_id, verifier.agent_id}) == 3, "roles not distinct")
+        gateway.delegation_grant(admin, creator.agent_id, worker.agent_id)
         input_data = {"action": "echo", "data": "shards-mcp-safe-demo"}
         created = gateway.task_create(creator, worker.agent_id, input_data, "demo-echo-001")
         repeated = gateway.task_create(creator, worker.agent_id, input_data, "demo-echo-001")
