@@ -427,6 +427,7 @@ test("RFC 9728 OAuth discovery publishes the actual path-bound resource and trus
   assert.equal(m.status,200);
   assert.match(m.headers.get("content-type"),/application\/json/);
   assert.match(m.headers.get("cache-control"),/max-age=120/);
+  assert.equal(m.headers.get("access-control-allow-origin"),"*","Public metadata can be read by standard browser OAuth clients");
   const metadata=await m.json();
   assert.equal(metadata.resource,root+"/connect");
   assert.deepEqual(Array.from(metadata.authorization_servers),["https://gentle-shape-bee5.cloudflareaccess.com"]);
@@ -435,9 +436,11 @@ test("RFC 9728 OAuth discovery publishes the actual path-bound resource and trus
 
   const fallback=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource"),env);
   assert.equal(fallback.status,302);
+  assert.equal(fallback.headers.get("access-control-allow-origin"),"*");
   assert.equal(fallback.headers.get("location"),root+"/.well-known/oauth-protected-resource/connect");
   const issuerAlias=await worker.fetch(new Request(root+"/.well-known/oauth-authorization-server"),env);
   assert.equal(issuerAlias.status,302);
+  assert.equal(issuerAlias.headers.get("access-control-allow-origin"),"*");
   assert.equal(issuerAlias.headers.get("location"),"https://gentle-shape-bee5.cloudflareaccess.com/.well-known/oauth-authorization-server");
   assert.equal(issuerAlias.headers.get("cache-control"),"no-store");
 
@@ -457,6 +460,7 @@ test("Unauthenticated connect origin exposes discoverable metadata without grant
   const env={ACCESS_TEAM:"gentle-shape-bee5",ACCESS_AUD:"operator-aud",CONNECT_ACCESS_AUD:"different-connect-aud"};
   const r=await worker.fetch(new Request("https://mcp.shardsinc.co.uk/connect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list",params:{}})}),env);
   assert.equal(r.status,401);
+  assert.equal(r.headers.get("access-control-allow-origin"),null,"Authenticated MCP responses never get wildcard CORS");
   assert.match(r.headers.get("www-authenticate"),/realm="shards-mcp-connect"/);
   assert.match(r.headers.get("www-authenticate"),/resource_metadata="https:\/\/mcp\.shardsinc\.co\.uk\/\.well-known\/oauth-protected-resource\/connect"/);
   assert.doesNotMatch(await r.text(),/Cloudflare.*email|smcp_/);
