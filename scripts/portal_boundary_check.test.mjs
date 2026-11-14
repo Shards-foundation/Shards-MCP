@@ -2,14 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { checkPortalBoundary } from './portal_boundary_check.mjs';
 
-function mockGateway({ anonymousListStatus = 401, anonymousCallStatus = 401, invalidStatus = 401, challenge = true, metadataValid = true } = {}) {
+function mockGateway({ anonymousListStatus = 401, anonymousCallStatus = 401, invalidStatus = 401, challenge = true, metadataValid = true, resource = 'https://portal.shardsinc.co.uk/mcp' } = {}) {
   const seen = [];
   async function fetchImpl(url, opts) {
     const body = opts.body && JSON.parse(opts.body);
     seen.push({ path: url.pathname, method: opts.method, authorization: opts.headers.Authorization || null });
     if (url.pathname === '/.well-known/oauth-protected-resource/mcp') {
       return Response.json(metadataValid
-        ? { resource: 'https://portal.shardsinc.co.uk/mcp', authorization_servers: ['https://portal.shardsinc.co.uk'] }
+        ? { resource, authorization_servers: ['https://portal.shardsinc.co.uk'] }
         : { authorization_servers: [] });
     }
     const invalid = !!opts.headers.Authorization;
@@ -50,6 +50,15 @@ test('missing OAuth challenge fails closed', async () => {
 
 test('invalid resource metadata fails closed', async () => {
   await assert.rejects(checkPortalBoundary(mockGateway({ metadataValid: false })), /Resource metadata must identify the exact protected endpoint/);
+});
+
+test('OAuth metadata with same-origin but wrong resource path fails closed', async () => {
+  for (const resource of ['https://portal.shardsinc.co.uk/', 'https://portal.shardsinc.co.uk/other']) {
+    await assert.rejects(
+      checkPortalBoundary(mockGateway({ resource })),
+      /exact protected endpoint/,
+    );
+  }
 });
 
 test('insecure portal URL fails before network access', async () => {
