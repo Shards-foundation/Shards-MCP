@@ -146,3 +146,22 @@ Validate source before a deployment with `node --check deployment/cloudflare/wor
 **Rollback:** Revert only the new Access app/policy and Worker deployment to the prior pinned version. Never delete the D1 database, existing Access operator app or its policies. An attempted provider login must be labelled **BLOCKED** until a real user completes the provider consent/callback; the tests cannot impersonate a Cloudflare account or prove a UI login.
 
 **Pricing/admission gate:** Cloudflare Access Free is intended for fewer than 50 users; avoid enabling unrestricted customer self-sign-up via an Access `Everyone` policy. The initial `/connect` app is a limited operator-approved pilot, not a commercial identity platform. For public customer growth, use a dedicated customer-identity platform and a migration design.
+
+
+## Path-bound OAuth discovery for `/connect`
+
+Cloudflare Access Managed OAuth is enabled on the separate application scoped to `mcp.shardsinc.co.uk/connect`, **not** the whole MCP hostname. On the prior deployment, the root `/.well-known/` endpoints returned HTTP 404 because the root hostname is intentionally public and handled by the Worker. This prevented standards-based clients from locating the issuer through the conventional resource URLs.
+
+The Worker now serves:
+
+| Public discovery route | Behaviour |
+| --- | --- |
+| `/.well-known/oauth-protected-resource/connect` | RFC 9728 metadata: canonical resource `https://mcp.shardsinc.co.uk/connect`, configured Cloudflare Access issuer, and header-based bearer transport |
+| `/.well-known/oauth-protected-resource` | Temporary redirect to the path-bound resource metadata |
+| `/.well-known/oauth-authorization-server` | Temporary redirect to the **actual** `https://<ACCESS_TEAM>.cloudflareaccess.com/.well-known/oauth-authorization-server` metadata published by Cloudflare |
+
+The issuer is built only from the restricted Worker `ACCESS_TEAM` binding, never from query parameters or user input. These routes return 503 if the separate audience is missing, equal to the operator audience, or the team hostname configuration is invalid. They do **not** issue OAuth tokens, advertise unsupported providers, or bypass the Cloudflare Access policies.
+
+An origin-bypass fallback `401` on `/connect` includes the RFC 9728 `resource_metadata` challenge URL. The actual browser/agent challenge for a Cloudflare-protected request is managed by Cloudflare Access, which may replace that header.
+
+**Live verification required after deploying this change:** fetch all three discovery routes, follow the authorization-server redirect and confirm the real issuer and S256 support; confirm `/signin` and `/lab` still load, the original public `/mcp` remains available, and unauthenticated `/connect` is blocked by Access. A successful real user OAuth authorization-code exchange and token refresh remain **BLOCKED until observed in a supported client**; discovery and JWT mock tests alone are not proof.
