@@ -42,6 +42,7 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
  };
  const records={accounts:[],keys:[],ssh:[],audits:[],agents:[]};
  let failAudit=false;
+ let lastChanges=0;
  const db={
    prepare(sql){
      const ctx=(args=[])=>({
@@ -75,6 +76,7 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
          }
          if(sql.startsWith("INSERT INTO audit_events")){
            if(failAudit)throw Error("Injected audit failure");
+           if(sql.includes("WHERE changes()=1")&&lastChanges!==1)return {meta:{changes:0}};
            records.audits.push(args);return {meta:{changes:1}};
          }
          if(sql.startsWith("INSERT INTO operator_api_keys")){
@@ -115,7 +117,7 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
    },
    async batch(stmts){
      const snap=JSON.stringify(records);
-     const output=[];try{for(const s of stmts)output.push(await s.run());return output}
+     const output=[];try{for(const stmt of stmts){const result=await stmt.run();lastChanges=result?.meta?.changes??0;output.push(result)}return output}
      catch(e){const old=JSON.parse(snap);for(const key of Object.keys(records))records[key]=old[key];throw e}
    }
  };
@@ -156,6 +158,10 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
    assert.match(issued.token,/^smcp_cli_[0-9a-f]{64}$/);assert.deepEqual(Array.from(issued.scopes),["account:read"]);
    assert.equal(records.keys.length,1);
    assert.equal(records.keys[0].token_sha256.length,64);
+   const createdAudit=records.audits.at(-1);
+   assert.match(createdAudit[1],/^operator_[0-9a-f]{32}$/,"Audit actor must be the signed operator subject fingerprint");
+   assert.equal(createdAudit[3],issued.id,"Credential audit must retain target id");
+
    assert.ok(!JSON.stringify(records).includes(issued.token),"Plaintext token must not be retained");
    const who=await worker.fetch(new Request(base+"/v1/account/whoami",{headers:{authorization:"Bearer "+issued.token}}),env);
    assert.equal(who.status,200);assert.equal((await who.json()).can_call_agent_tools,false);
@@ -175,7 +181,9 @@ test("real signed Access profile, key lifecycle, SSH key records and local accou
    res=await worker.fetch(make(url+"/ssh/"+added.id,"DELETE",good,{}),env);assert.equal(res.status,200);
    assert.equal(records.ssh.length,0);
    res=await worker.fetch(make(url+"/keys/"+issued.id,"DELETE",other,{}),env);
+   const auditCount=records.audits.length;
    assert.equal((await res.json()).deleted,false,"Other operator cannot revoke owner key");
+   assert.equal(records.audits.length,auditCount,"No-op cross-account revoke cannot emit a successful audit event");
    res=await worker.fetch(make(url+"/keys/"+issued.id,"DELETE",good,{}),env);
    assert.equal((await res.json()).deleted,true);
    const revoked=await worker.fetch(new Request(base+"/v1/account/whoami",{headers:{authorization:"Bearer "+issued.token}}),env);
