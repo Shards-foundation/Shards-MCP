@@ -178,8 +178,8 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    const direct=await focused.json();
    assert.equal(direct.messages.length,1,"Only chosen agent messages returned");
    assert.equal(direct.messages[0].body,payload.body);
-   const second=await worker.fetch(req("GET",api+"?agent_id="+otherId,user),env);
-   assert.equal((await second.json()).messages[0].body,"Only for second agent");
+   const secondFeed=await worker.fetch(req("GET",api+"?agent_id="+otherId,user),env);
+   assert.equal((await secondFeed.json()).messages[0].body,"Only for second agent");
    const escapedBody=String.fromCharCode(34).repeat(2000);
    const escaped=await worker.fetch(req("POST",endpoint,user,{...payload,body:escapedBody,request_id:"escaped-2000-char-unique"}),env);
    assert.equal(escaped.status,201,"Valid 2000-character JSON-escaped message must not be rejected by transport size cap");
