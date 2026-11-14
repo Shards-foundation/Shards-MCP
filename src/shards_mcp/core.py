@@ -830,6 +830,7 @@ class Gateway:
 
     def schedule_create(self, actor: Principal, assignee: str, payload: Any,
                         interval_seconds: int) -> dict[str, Any]:
+        """Out-of-band operator approval for recurring tasks, not an agent delegation."""
         actor.require("*")
         if not isinstance(interval_seconds, int) or not 60 <= interval_seconds <= 2592000:
             raise GatewayError("interval_seconds must be 60..2592000")
@@ -859,6 +860,11 @@ class Gateway:
         return {"schedule_id": schedule_id, "enabled": False}
 
     def schedule_tick(self, actor: Principal) -> dict[str, Any]:
+        """Dispatch operator-provisioned schedules using the bootstrap identity only.
+
+        This privileged path intentionally differs from task_create(agent,...).
+        A remote agent with task:create cannot provision or tick schedules.
+        """
         actor.require("*")
         created: list[str] = []
         with self.tx() as db:

@@ -17,8 +17,9 @@ is applied to MCP/REST `task_create` and A2A `SendMessage` by their common
 `Gateway.task_create` path. The allowlist is persistent and is checked inside
 the SQLite write transaction, serialised with grant and revoke writes.
 
-Grant/deny/list operations are **local admin CLI only**, require
-`SHARDS_ADMIN_TOKEN` in the operator's environment, and are not registered
+Grant/deny/list operations are **local admin CLI only**, require the
+operator bootstrap credential configured through **either**
+`SHARDS_ADMIN_TOKEN` **or** `SHARDS_ADMIN_TOKEN_FILE`, and are not registered
 as MCP, REST or A2A tools. Never share the bootstrap token with a model.
 
 ## Upgrade behaviour: deliberate fail-closed change
@@ -27,7 +28,12 @@ This changes behaviour from experimental v0.1.x: `task:create` no longer
 allows arbitrary cross-agent assignment. Existing persisted tasks, leases and
 messages remain intact. Existing installations start with **zero grants** and
 new cross-agent task creation will be denied until an operator provisions the
-intended pairs. Schedule dispatch by the bootstrap operator is unchanged.
+intended pairs. **Operator-created recurring schedules are a separate,
+privileged dispatch path**: `schedule_create` and `schedule_tick` both require
+the bootstrap operator identity, and ordinary agents cannot create or execute
+them. A schedule is explicitly approved by the operator at creation; the
+agent-to-agent allowlist does not grant or revoke schedule authority. To stop
+an operator-created schedule, use the separate `schedule_disable` control.
 
 After a source/database backup and an operator inventory, stop agent task
 submission temporarily. With the existing environment-based admin secret and
@@ -58,6 +64,9 @@ effects. The creator can still repeat an identical idempotency key for an
 existing task after a policy change; a changed payload with the same key is
 rejected with `CONFLICT`. Emergency stop requires separate worker/tool
 revocation, cancellation where safe, and external-effect reconciliation.
+Revoking a creator-to-assignee grant does **not** disable an independently
+operator-approved recurring schedule for that assignee; audit and disable
+active schedules separately when performing emergency containment.
 
 ## What this does not establish
 

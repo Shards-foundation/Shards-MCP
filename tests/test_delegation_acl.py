@@ -71,7 +71,10 @@ class DelegationACLTests(unittest.TestCase):
         reopened = Gateway(self.path, self.secret)
         self.assertEqual(len(reopened.delegations(self.root)), 1)
         self.assertTrue(reopened.delegation_revoke(self.root, self.creator["agent_id"], self.destination)["changed"])
+        audit_after_first = reopened.audit_list(self.root, 5)
+        self.assertEqual(sum(item["action"] == "delegation.revoke" for item in audit_after_first), 1)
         self.assertFalse(reopened.delegation_revoke(self.root, self.creator["agent_id"], self.destination)["changed"])
+        self.assertEqual(reopened.audit_list(self.root, 5), audit_after_first)
         with self.assertRaises(GatewayError) as denied:
             reopened.task_create(self.actor, self.destination, {"action": "health"}, "new")
         self.assertEqual(denied.exception.code, "FORBIDDEN")
@@ -96,6 +99,28 @@ class DelegationACLTests(unittest.TestCase):
         self.assertEqual(self.g.task_create(self.root, self.destination, {}, "admin")["state"], "queued")
         with self.assertRaises(GatewayError):
             self.g.delegation_grant(self.root, self.creator["agent_id"], self.creator["agent_id"])
+
+    def test_scheduler_is_out_of_band_operator_approved_not_agent_delegation(self):
+        # The administrator explicitly provisions recurring tasks. Agent tokens
+        # cannot provision, disable or dispatch schedules; there is no general
+        # agent-controlled bypass of the creator -> assignee allowlist.
+        with self.assertRaises(GatewayError) as denied:
+            self.g.schedule_create(self.actor, self.destination, {"action": "health"}, 60)
+        self.assertEqual(denied.exception.code, "FORBIDDEN")
+        with self.assertRaises(GatewayError) as denied:
+            self.g.schedule_tick(self.actor)
+        self.assertEqual(denied.exception.code, "FORBIDDEN")
+        schedule = self.g.schedule_create(self.root, self.destination, {"action": "health"}, 60)
+        with self.g.tx() as db:
+            db.execute("UPDATE schedules SET next_due='2000-01-01T00:00:00+00:00' WHERE id=?",
+                       (schedule["schedule_id"],))
+        dispatched = self.g.schedule_tick(self.root)["dispatched"]
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual(self.g.task_get(self.root, dispatched[0])["creator"], "scheduler")
+        with self.assertRaises(GatewayError) as denied:
+            self.g.task_create(self.actor, self.destination, {}, "still-denied")
+        self.assertEqual(denied.exception.code, "FORBIDDEN")
+        self.assertTrue(self.g.audit_verify(self.root)["valid"])
 
     def test_revoked_agents_cannot_receive_new_grants(self):
         self.g.revoke(self.root, self.destination)
