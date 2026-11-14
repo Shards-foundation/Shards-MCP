@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS operator_accounts (
   theme TEXT NOT NULL DEFAULT 'system' CHECK(theme IN ('system','dark','light','contrast')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK(revision>=0),
   deleted_at TEXT
 );
 CREATE TABLE IF NOT EXISTS operator_api_keys (
@@ -109,3 +110,5 @@ CREATE TABLE IF NOT EXISTS operator_ssh_keys (
   UNIQUE(owner_id,fingerprint)
 );
 CREATE INDEX IF NOT EXISTS idx_operator_ssh_keys_owner ON operator_ssh_keys(owner_id,created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_agents_created_by ON agents(created_by,created_at DESC);
