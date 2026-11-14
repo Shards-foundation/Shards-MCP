@@ -91,11 +91,12 @@ test("Live Lab is a real same-origin route with a strict script policy", async (
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type"), /text\/html/);
   const csp = response.headers.get("content-security-policy");
-  const policies = Object.fromEntries(csp.split(";").map(p => p.trim().split(/\s+/)).filter(a => a[0]).map(([key,...values]) => [key, values]));
+  const directives = csp.split(";").map(p => p.trim().split(/\s+/)).filter(a => a[0]);
+  const policies = Object.fromEntries(directives.map(([key,...values]) => [key, values]));
   assert.deepEqual(policies["script-src"], ["'self'"], "No inline, remote, eval or data scripts");
   assert.deepEqual(policies["connect-src"], ["'self'"]);
   assert.deepEqual(policies["form-action"], ["'none'"]);
-  assert.equal(Object.keys(policies).filter(p => p === "script-src").length, 1);
+  assert.equal(directives.filter(([key]) => key === "script-src").length, 1);
   const html = await response.text();
   assert.match(html, /RUN PROTOCOL CHECK/);
   assert.match(html, /QUERY LIVE CATALOGUE/);
