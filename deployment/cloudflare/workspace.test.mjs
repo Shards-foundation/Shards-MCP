@@ -22,7 +22,8 @@ test("workspace serves a mobile client without exposing message contents in the 
  assert.match(html,/id="composer"/);
  assert.match(html,/id="taskList"/);
  assert.match(html,/id="agentList"/);
- assert.match(html,/not verified online/);
+ assert.match(html,/presence not tracked/);
+
  assert.match(html,/Not connected/);
  assert.doesNotMatch(html,/<script(?![^>]*src=)/);
  const js=await worker.fetch(new Request(base+"/manage/workspace.js"),{});
@@ -32,6 +33,7 @@ test("workspace serves a mobile client without exposing message contents in the 
  assert.match(code,/manage\/api\/workspace/);
  assert.match(code,/credentials:'same-origin'/);
  assert.match(code,/crypto.randomUUID/);
+ assert.match(code,/enrolled, not verified online/);
  assert.match(code,/textContent=/);
  assert.doesNotMatch(code,/\.innerHTML\s*=|localStorage|sessionStorage|smcp_[a-zA-Z0-9]/);
  const entry=await worker.fetch(new Request(base+"/"),{});
