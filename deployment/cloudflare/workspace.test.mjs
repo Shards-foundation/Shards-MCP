@@ -59,7 +59,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    const signature=await webcrypto.subtle.sign("RSASSA-PKCS1-v1_5",keys.privateKey,new TextEncoder().encode(head));
    return head+"."+Buffer.from(signature).toString("base64url");
  }
- const agents=[{id:agentId,tenant_id:"shards-internal",name:"ExternalWorker",client:"claude",created_at:"2026-11-13T12:00:00Z",disabled_at:null}];
+ const agents=[{id:agentId,tenant_id:"shards-internal",name:"ExternalWorker",client:"claude",scopes:JSON.stringify(["agent:identity","message:read","message:send"]),created_at:"2026-11-13T12:00:00Z",disabled_at:null}];
  const messages=[],tasks=[],audits=[];
  let auditFailure=false;
  const env={ACCESS_TEAM:"workspace-integration",ACCESS_AUD:"operator-audience",CONNECT_ACCESS_AUD:"connect-audience",EDGE_DB:{
@@ -71,7 +71,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
   prepare(sql){
    const make=(args=[])=>({
      async first(){
-       if(sql.includes("SELECT id FROM agents WHERE id=?"))return agents.find(a=>a.id===args[0]&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client!=="operator-ui")||null;
+       if(sql.includes("SELECT id,scopes FROM agents WHERE id=?"))return agents.find(a=>a.id===args[0]&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client!=="operator-ui")||null;
        if(sql.includes("SELECT id,body,recipient_id FROM agent_messages"))return messages.find(m=>m.tenant_id==="shards-internal"&&m.sender_id===args[0]&&m.request_key===args[1])||null;
        if(sql.includes("SELECT disabled_at,client FROM agents"))return agents.find(a=>a.id===args[0]&&a.tenant_id==="shards-internal")||null;
        throw Error("Unexpected first SQL: "+sql);
@@ -87,7 +87,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
          const [id,body,created,key,recipient,sender]=args;
          const from=agents.find(a=>a.id===sender&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client==="operator-ui");
          const to=agents.find(a=>a.id===recipient&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client!=="operator-ui");
-         if(from&&to&&!messages.some(m=>m.sender_id===sender&&m.request_key===key))messages.push({id,tenant_id:"shards-internal",sender_id:sender,recipient_id:recipient,body,created_at:created,request_key:key,read_at:null});
+         if(from&&to&&JSON.parse(to.scopes||"[]").includes("message:read")&&!messages.some(m=>m.sender_id===sender&&m.request_key===key))messages.push({id,tenant_id:"shards-internal",sender_id:sender,recipient_id:recipient,body,created_at:created,request_key:key,read_at:null});
          return {meta:{changes:from&&to?1:0}};
        }
        if(sql.startsWith("INSERT INTO audit_events")){
@@ -183,7 +183,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    assert.equal(feed.messages[0].body,payload.body);
    assert.equal(feed.messages[0].sender_name,agents.find(a=>a.id===snapshot.operator_id).name);
    const otherId="second-agent-123456";
-   agents.push({id:otherId,tenant_id:"shards-internal",name:"AnotherWorker",client:"codex",created_at:"2026-11-13T13:00:00Z",disabled_at:null});
+   agents.push({id:otherId,tenant_id:"shards-internal",name:"AnotherWorker",client:"codex",scopes:JSON.stringify(["message:read"]),created_at:"2026-11-13T13:00:00Z",disabled_at:null});
    messages.push({id:"old-message-for-other",tenant_id:"shards-internal",sender_id:otherId,recipient_id:otherId,body:"Only for second agent",created_at:"2026-11-13T13:00:00Z",request_key:"outside",read_at:null});
    const focused=await worker.fetch(req("GET",api+"?agent_id="+agentId,user),env);
    const direct=await focused.json();
