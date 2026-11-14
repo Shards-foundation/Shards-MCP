@@ -70,3 +70,75 @@ CREATE TABLE IF NOT EXISTS route_budgets (
   used INTEGER NOT NULL DEFAULT 0 CHECK(used>=0),
   PRIMARY KEY(window_key,operation)
 );
+
+-- Operator account baseline. Existing installations apply migrations/0002_operator_settings.sql.
+-- Shards MCP Edge operator settings, created only after PR review and predeploy D1 backup.
+-- Independent of the Python gateway and tenant-wide agent authorisation.
+CREATE TABLE IF NOT EXISTS operator_accounts (
+  id TEXT NOT NULL PRIMARY KEY CHECK(length(id)=64),
+  email TEXT,
+  full_name TEXT NOT NULL DEFAULT '',
+  avatar_data TEXT CHECK(avatar_data IS NULL OR length(avatar_data)<=33000),
+  theme TEXT NOT NULL DEFAULT 'system' CHECK(theme IN ('system','dark','light','contrast')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK(revision>=0),
+  deleted_at TEXT
+);
+CREATE TABLE IF NOT EXISTS operator_api_keys (
+  id TEXT NOT NULL PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES operator_accounts(id),
+  kind TEXT NOT NULL CHECK(kind IN ('api','cli')),
+  label TEXT NOT NULL,
+  token_sha256 TEXT NOT NULL UNIQUE,
+  request_key TEXT NOT NULL,
+  prefix TEXT NOT NULL,
+  scopes TEXT NOT NULL CHECK(scopes='["account:read"]'),
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at TEXT,
+  UNIQUE(owner_id,request_key)
+);
+CREATE INDEX IF NOT EXISTS idx_operator_api_keys_owner ON operator_api_keys(owner_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS operator_ssh_keys (
+  id TEXT NOT NULL PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES operator_accounts(id),
+  label TEXT NOT NULL,
+  algorithm TEXT NOT NULL CHECK(algorithm='ssh-ed25519'),
+  public_key TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(owner_id,fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_operator_ssh_keys_owner ON operator_ssh_keys(owner_id,created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_agents_created_by ON agents(created_by,created_at DESC);
+
+-- Operator-owned SKILL.md registry. Imported text is inert and never executed by the Worker.
+-- Apply after 0002_operator_settings.sql and before deploying the Skills UI.
+CREATE TABLE IF NOT EXISTS operator_skills (
+  id TEXT NOT NULL PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES operator_accounts(id),
+  name TEXT NOT NULL CHECK(length(name) BETWEEN 2 AND 90),
+  description TEXT NOT NULL DEFAULT '' CHECK(length(description)<=400),
+  category TEXT NOT NULL DEFAULT 'other' CHECK(length(category) BETWEEN 1 AND 50),
+  source_type TEXT NOT NULL CHECK(source_type IN ('upload','github')),
+  source_url TEXT,
+  content TEXT NOT NULL CHECK(length(content) BETWEEN 20 AND 65000),
+  content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+  created_at TEXT NOT NULL,
+  CHECK ((source_type='github' AND source_url IS NOT NULL) OR (source_type='upload' AND source_url IS NULL)),
+  UNIQUE(owner_id,source_url)
+);
+CREATE INDEX IF NOT EXISTS idx_operator_skills_owner ON operator_skills(owner_id,created_at DESC);
+
+-- Authenticated MCP request receipts. A receipt proves use of a scoped token,
+-- not agent process uptime or the provenance of the caller's software.
+CREATE TABLE IF NOT EXISTS agent_connection_activity (
+  agent_id TEXT NOT NULL PRIMARY KEY REFERENCES agents(id),
+  first_authenticated_at TEXT NOT NULL,
+  last_authenticated_at TEXT NOT NULL,
+  last_operation TEXT NOT NULL CHECK(length(last_operation) BETWEEN 1 AND 80)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_connection_last_seen ON agent_connection_activity(last_authenticated_at DESC);
