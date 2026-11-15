@@ -97,14 +97,15 @@ async function auditedMutation(env,mutation,auditStatement){
     throw Error('Atomic mutation or audit unconfirmed');
   return rows[0];
 }
-async function classifyTaskWriteFailure(env,actor,taskId,expectedState,denialMessage){
-  // Retry/error classification is scoped by verified tenant AND assigned agent.
-  // A DB read failure never becomes a fabricated "task not found" conclusion.
+async function requireTaskState(env,actor,taskId,expectedState,denialMessage){
+  // Perform a scoped precondition read for a deterministic ownership/state denial.
+  // Races after this read remain fail-closed as storage/audit uncertainty; do not
+  // misattribute a failed audit transaction to another agent's task state.
   let current;
   try{current=await env.EDGE_DB.prepare('SELECT state FROM agent_tasks WHERE id=? AND tenant_id=? AND assignee_id=?')
     .bind(taskId,actor.tenant_id,actor.id).first()}
-  catch(e){return Error('Atomic mutation or audit unavailable')}
-  return !current||current.state!==expectedState?Error(denialMessage):Error('Atomic mutation or audit unavailable');
+  catch(e){throw Error('ATOMIC_STORAGE_OR_AUDIT_UNAVAILABLE')}
+  if(!current||current.state!==expectedState)throw Error(denialMessage);
 }
 async function budget(env,operation,max){const day=new Date().toISOString().slice(0,10);try{const r=await env.EDGE_DB.prepare('INSERT INTO route_budgets(window_key,operation,used) VALUES(?,?,1) ON CONFLICT(window_key,operation) DO UPDATE SET used=used+1 WHERE used<?').bind(day,operation,max).run();return r.meta?.changes===1}catch(e){return false}}
 function validateDNS(input){const domain=String(input.domain||'').toLowerCase().trim().replace(/\.$/,'');const type=input.type||'A';if(!/^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)||!['A','AAAA','TXT','MX','CAA'].includes(type))throw Error('Valid public domain and supported DNS record type required');return {domain,type}}
@@ -195,8 +196,12 @@ if(name==='shards_agent_identity')return result({id:actor.id,tenant:actor.tenant
 if(name==='shards_agents_list'){const r=await env.EDGE_DB.prepare('SELECT id,name,client,created_at FROM agents WHERE tenant_id=? AND disabled_at IS NULL ORDER BY created_at DESC LIMIT 60').bind(actor.tenant_id).all();return result({agents:r.results||[]})}
 if(name==='shards_message_send'){
   if(!idPattern.test(args.recipient_agent_id)||typeof args.body!=='string'||!args.body.trim()||args.body.length>2000||!reqId(args.request_id))throw Error('Invalid recipient, message or idempotency key');
-  const target=await env.EDGE_DB.prepare('SELECT id FROM agents WHERE id=? AND tenant_id=? AND disabled_at IS NULL').bind(args.recipient_agent_id,actor.tenant_id).first();
+  const target=await env.EDGE_DB.prepare('SELECT id,scopes FROM agents WHERE id=? AND tenant_id=? AND disabled_at IS NULL').bind(args.recipient_agent_id,actor.tenant_id).first();
   if(!target)throw Error('Recipient not enrolled in this tenant');
+  // Scopes are a JSON array issued by the operator. Fail closed on malformed stored grants.
+  let receiverScopes;
+  try{receiverScopes=JSON.parse(target.scopes)}catch{throw Error('RECIPIENT_SCOPE_INVALID')}
+  if(!Array.isArray(receiverScopes)||!receiverScopes.includes('message:read'))throw Error('RECIPIENT_SCOPE_DENIED: recipient cannot read messages');
   const query='SELECT id,body,recipient_id FROM agent_messages WHERE tenant_id=? AND sender_id=? AND request_key=?';
   const prior=await env.EDGE_DB.prepare(query).bind(actor.tenant_id,actor.id,args.request_id).first();
   if(prior){if(prior.body!==args.body||prior.recipient_id!==args.recipient_agent_id)throw Error('Idempotency key conflict');return result({id:prior.id,idempotent:true,delivered:true})}
@@ -213,8 +218,12 @@ if(name==='shards_message_send'){
 if(name==='shards_message_inbox'){const r=await env.EDGE_DB.prepare('SELECT id,sender_id,body,created_at FROM agent_messages WHERE tenant_id=? AND recipient_id=? ORDER BY created_at DESC LIMIT 20').bind(actor.tenant_id,actor.id).all();return result({messages:r.results||[]})}
 if(name==='shards_task_create'){
   if(!idPattern.test(args.assignee_agent_id)||typeof args.title!=='string'||args.title.length>150||!args.title.trim()||!reqId(args.request_id)||!args.input||typeof args.input!=='object'||Array.isArray(args.input)||JSON.stringify(args.input).length>3500)throw Error('Invalid assignee, title, task input or idempotency key');
-  const target=await env.EDGE_DB.prepare("SELECT id FROM agents WHERE id=? AND tenant_id=? AND disabled_at IS NULL AND client!='operator-ui'").bind(args.assignee_agent_id,actor.tenant_id).first();
+  const target=await env.EDGE_DB.prepare("SELECT id,scopes FROM agents WHERE id=? AND tenant_id=? AND disabled_at IS NULL AND client!='operator-ui'").bind(args.assignee_agent_id,actor.tenant_id).first();
   if(!target)throw Error('Assignee not an active agent runtime');
+  let assigneeScopes;
+  try{assigneeScopes=JSON.parse(target.scopes)}catch{throw Error('ASSIGNEE_SCOPE_INVALID')}
+  if(!Array.isArray(assigneeScopes)||!assigneeScopes.includes('task:claim'))
+    throw Error('ASSIGNEE_SCOPE_DENIED: assignee cannot claim tasks');
   const query='SELECT id,state,title,input_json,assignee_id FROM agent_tasks WHERE tenant_id=? AND creator_id=? AND request_key=?';
   const prior=await env.EDGE_DB.prepare(query).bind(actor.tenant_id,actor.id,args.request_id).first();
   const input=JSON.stringify(args.input);
@@ -232,22 +241,20 @@ if(name==='shards_task_create'){
 if(name==='shards_task_inbox'){const r=await env.EDGE_DB.prepare('SELECT id,title,input_json,state,creator_id,created_at,claimed_at,completed_at,result_json FROM agent_tasks WHERE tenant_id=? AND assignee_id=? ORDER BY created_at DESC LIMIT 30').bind(actor.tenant_id,actor.id).all();return result({tasks:(r.results||[]).map(t=>({...t,input:JSON.parse(t.input_json),result:t.result_json?JSON.parse(t.result_json):null,input_json:undefined,result_json:undefined}))})}
 if(name==='shards_task_claim'){
   if(!/^[0-9a-f-]{36}$/.test(args.task_id))throw Error('Invalid task ID');
+  await requireTaskState(env,actor,args.task_id,'queued','Task unavailable, already claimed or not assigned');
   const mutation=env.EDGE_DB.prepare("UPDATE agent_tasks SET state='claimed',claimed_at=? WHERE id=? AND tenant_id=? AND assignee_id=? AND state='queued' RETURNING id,title,input_json,state")
     .bind(new Date().toISOString(),args.task_id,actor.tenant_id,actor.id);
-  let out;
-  try{out=await auditedMutation(env,mutation,auditForTransition(env,actor,name,args.task_id))}
-  catch(e){throw await classifyTaskWriteFailure(env,actor,args.task_id,'queued','Task unavailable, already claimed or not assigned')}
+  const out=await auditedMutation(env,mutation,auditForTransition(env,actor,name,args.task_id))
   const row=out.results?.[0];
   if(!row)throw Error('Task unavailable, already claimed or not assigned');
   return result({id:row.id,title:row.title,input:JSON.parse(row.input_json),state:row.state});
 }
 if(name==='shards_task_complete'){
   if(!/^[0-9a-f-]{36}$/.test(args.task_id)||!args.result||typeof args.result!=='object'||Array.isArray(args.result)||JSON.stringify(args.result).length>3500)throw Error('Invalid task ID or result');
+  await requireTaskState(env,actor,args.task_id,'claimed','Task not claimed by this agent');
   const mutation=env.EDGE_DB.prepare("UPDATE agent_tasks SET state='completed',completed_at=?,result_json=? WHERE id=? AND tenant_id=? AND assignee_id=? AND state='claimed' RETURNING id,state")
     .bind(new Date().toISOString(),JSON.stringify(args.result),args.task_id,actor.tenant_id,actor.id);
-  let out;
-  try{out=await auditedMutation(env,mutation,auditForTransition(env,actor,name,args.task_id))}
-  catch(e){throw await classifyTaskWriteFailure(env,actor,args.task_id,'claimed','Task not claimed by this agent')}
+  const out=await auditedMutation(env,mutation,auditForTransition(env,actor,name,args.task_id))
   const row=out.results?.[0];
   if(!row)throw Error('Task not claimed by this agent');
   return result({id:row.id,state:row.state});
