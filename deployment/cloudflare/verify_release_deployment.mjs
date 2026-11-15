@@ -41,10 +41,9 @@ export function verifySnapshot(actual,recorded){
  */
 export async function verifyRelease({accountId,token,expectedVersion,fetchImpl=fetch}){
   requireUuid(expectedVersion,"Expected deployed Worker version");
-  if(typeof accountId!=="string"||!UUID.test(accountId)) {
-    // Account IDs are 32 hexadecimal characters, not UUIDs.
-    if(!/^[0-9a-f]{32}$/i.test(accountId||""))throw Error("Expected Cloudflare account ID is missing or invalid");
-  }
+  // Account IDs are 32 hexadecimal characters, never hyphenated version UUIDs.
+  if(typeof accountId!=="string"||!/^[0-9a-f]{32}$/i.test(accountId))
+    throw Error("Expected Cloudflare account ID is missing or invalid");
   if(typeof token!=="string"||!token.trim())throw Error("BLOCKED: Cloudflare read-only API token secret not configured");
   const base=API+"/accounts/"+accountId+"/workers";
   const result=await apiJson(fetchImpl,base+"/scripts/"+WORKER+"/deployments?per_page=10",token);
