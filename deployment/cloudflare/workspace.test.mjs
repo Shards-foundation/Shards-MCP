@@ -62,7 +62,8 @@ test("operator-only workspace uses a real signed admin identity and stores scope
  }
  const agents=[{id:agentId,tenant_id:"shards-internal",name:"ExternalWorker",client:"claude",scopes:JSON.stringify(["agent:identity","message:read","message:send"]),created_at:"2026-11-13T12:00:00Z",disabled_at:null}];
  agents.push({id:"foreign-agent-123456",tenant_id:"another-tenant",name:"ForeignWorker",client:"claude",scopes:JSON.stringify(["message:read"]),created_at:"2026-11-13T12:00:00Z",disabled_at:null});
- const messages=[],tasks=[],audits=[];
+ const messages=[],tasks=[],audits=[],operatorAccounts=new Map();
+ let observedOperatorAccountId=null;
  let auditFailure=false;
  const env={ACCESS_TEAM:"workspace-integration",ACCESS_AUD:"operator-audience",CONNECT_ACCESS_AUD:"connect-audience",EDGE_DB:{
   async batch(statements){
@@ -74,7 +75,10 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    const make=(args=[])=>({
      async first(){
        // The live Worker now verifies a signed operator's local account tombstone.
-       if(sql.includes("SELECT deleted_at FROM operator_accounts WHERE id=?"))return null;
+       if(sql.includes("SELECT deleted_at FROM operator_accounts WHERE id=?")){
+         observedOperatorAccountId=args[0];
+         return operatorAccounts.get(args[0])||null;
+       }
        if(sql.includes("SELECT id,scopes FROM agents WHERE id=?"))return agents.find(a=>a.id===args[0]&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client!=="operator-ui")||null;
        if(sql.includes("SELECT id,body,recipient_id FROM agent_messages"))return messages.find(m=>m.tenant_id==="shards-internal"&&m.sender_id===args[0]&&m.request_key===args[1])||null;
        if(sql.includes("SELECT disabled_at,client FROM agents"))return agents.find(a=>a.id===args[0]&&a.tenant_id==="shards-internal")||null;
@@ -138,6 +142,19 @@ test("operator-only workspace uses a real signed admin identity and stores scope
    assert.equal(typeof snapshot.operator_id,"string");
    assert.equal(agents.length,2,"GET cannot mutate tenant or provision an operator");
    assert.equal(snapshot.focus_id,agentId);
+   assert.equal(typeof observedOperatorAccountId,"string","Operator tombstone lookup must bind an owner ID");
+   operatorAccounts.set(observedOperatorAccountId,{deleted_at:"2026-11-15T14:00:00Z"});
+   const tombstonedGet=await worker.fetch(req("GET",api,user),env);
+   assert.equal(tombstonedGet.status,410,"Deleted operator must be denied a workspace read");
+   const tombstonedPost=await worker.fetch(req("POST",api+"/messages",user,{
+     recipient_agent_id:agentId,body:"Must not persist",request_id:"tombstone-request-12345"
+   }),env);
+   assert.equal(tombstonedPost.status,410,"Deleted operator must be denied message creation");
+   assert.equal(messages.length,0);
+   assert.equal(agents.length,2);
+   operatorAccounts.delete(observedOperatorAccountId);
+   const restored=await worker.fetch(req("GET",api,user),env);
+   assert.equal(restored.status,200,"Active operator must retain original access");
    assert.equal(snapshot.agents.find(a=>a.id===agentId).can_receive_messages,true);
    const wrongTenantAgent=await worker.fetch(req("GET",api+"?agent_id=agent-not-enrolled-12345",user),env);
    assert.equal(wrongTenantAgent.status,404);
