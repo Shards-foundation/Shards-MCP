@@ -19,7 +19,7 @@ const taskId="11111111-1111-4111-8111-111111111111";
 const reqId="req-audit-0001";
 
 function makeDB({auditFailure=false,task=null,recipientScopes=['message:read','task:claim'],recipientActive=true,recipientClient='agent'}={}){
-  const state={messages:[],tasks:task?[structuredClone(task)]:[],audits:[],batches:[],standaloneMutations:0};
+  const state={messages:[],tasks:task?[structuredClone(task)]:[],audits:[],batches:[],standaloneMutations:0,attemptedEffects:0};
   const database={
     prepare(sql){return {bind(...params){
       const stmt={sql,params};
@@ -55,9 +55,10 @@ function makeDB({auditFailure=false,task=null,recipientScopes=['message:read','t
       const [effect,audit]=stmts;
       assert.match(audit.sql,/^INSERT INTO audit_events/);
       state.batches.push({effect:effect.sql,audit:audit.sql});
-      // The test models Cloudflare D1's transactional rollback on a failed statement.
-      // No change to state may be applied when the audit insert is rejected.
-      if(auditFailure)throw Error("INJECTED_AUDIT_D1_FAILURE");
+      // Model D1 transactional failure injection *after* the mutation has run.
+      // The snapshot is restored if the subsequent audit insert fails.
+      const snapshot={messages:structuredClone(state.messages),tasks:structuredClone(state.tasks),audits:structuredClone(state.audits)};
+      state.attemptedEffects++;
       let rows=[];
       if(effect.sql.startsWith("INSERT OR IGNORE INTO agent_messages")){
         const [id,tenant_id,sender_id,recipient_id,body,created_at,request_key]=effect.params;
@@ -85,6 +86,12 @@ function makeDB({auditFailure=false,task=null,recipientScopes=['message:read','t
           rows=[{id:t.id,state:t.state}];
         }else throw Error("Unknown state transition");
       }else throw Error("Unexpected mutation: "+effect.sql);
+      if(auditFailure){
+        state.messages=snapshot.messages;
+        state.tasks=snapshot.tasks;
+        state.audits=snapshot.audits;
+        throw Error("INJECTED_AUDIT_D1_FAILURE_AFTER_EFFECT");
+      }
       state.audits.push({statement:audit.sql,params:audit.params});
       return [{success:true,results:rows,meta:{changes:1}},{success:true,meta:{changes:1},results:[]}];
     }
@@ -110,6 +117,7 @@ test("Message write and its audit share one D1 transaction; audit failure leaves
   assert.equal(env.state.audits.length,0);
   assert.equal(env.state.standaloneMutations,0);
   assert.equal(env.state.batches.length,1);
+  assert.equal(env.state.attemptedEffects,1,"Failure must be injected after attempted write");
   const ok=makeDB();
   const accepted=await runTool("shards_message_send",args,actor,ok,request);
   assert.equal(accepted.isError,false);
@@ -160,6 +168,7 @@ test("Task create audit rollback and idempotent replay",async()=>{
   assert.equal((await runTool("shards_task_create",args,actor,fail,request)).isError,true);
   assert.equal(fail.state.tasks.length,0);
   assert.equal(fail.state.audits.length,0);
+  assert.equal(fail.state.attemptedEffects,1);
   const ok=makeDB();
   assert.equal((await runTool("shards_task_create",args,actor,ok,request)).isError,false);
   assert.equal(ok.state.tasks.length,1);
@@ -175,6 +184,7 @@ test("Task claim audit failure cannot transition queued state",async()=>{
   assert.doesNotMatch(denied.content[0].text,/already claimed|not assigned|NOT NULL|D1_ERROR/);
   assert.equal(fail.state.tasks[0].state,"queued");
   assert.equal(fail.state.audits.length,0);
+  assert.equal(fail.state.attemptedEffects,1);
   const ok=makeDB({task:seededTask()});
   const result=await runTool("shards_task_claim",{task_id:taskId},actor,ok,request);
   assert.equal(result.isError,false);
@@ -196,6 +206,7 @@ test("Task completion audit failure cannot transition claimed state",async()=>{
   assert.doesNotMatch(denied.content[0].text,/not claimed|not assigned|NOT NULL|D1_ERROR/);
   assert.equal(fail.state.tasks[0].state,"claimed");
   assert.equal(fail.state.audits.length,0);
+  assert.equal(fail.state.attemptedEffects,1);
   const ok=makeDB({task:claimed});
   const accepted=await runTool("shards_task_complete",args,actor,ok,request);
   assert.equal(accepted.isError,false);
