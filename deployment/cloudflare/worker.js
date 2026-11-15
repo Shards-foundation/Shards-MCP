@@ -260,7 +260,13 @@ if(name==='shards_task_complete'){
   return result({id:row.id,state:row.state});
 }
 if(name==='shards_audit_tail'){const r=await env.EDGE_DB.prepare('SELECT action,object_id,status,created_at FROM audit_events WHERE tenant_id=? AND agent_id=? ORDER BY created_at DESC LIMIT 20').bind(actor.tenant_id,actor.id).all();return result({events:r.results||[]})}
-return errorResult('Tool not implemented')}catch(e){return errorResult('DENIED: '+(e.message||'Operation failed'))}}
+return errorResult('Tool not implemented')}catch(e){
+  const message=e?.message||'Operation failed';
+  if(message==='Atomic mutation or audit unavailable'||message==='Atomic mutation or audit unconfirmed'||
+    message==='Atomic D1 batch is unavailable'||message==='ATOMIC_STORAGE_OR_AUDIT_UNAVAILABLE')
+    return errorResult('UNAVAILABLE: '+message);
+  return errorResult('DENIED: '+message);
+}}
 async function mcp(request,env,signedIdentity=null){const origin=request.headers.get('origin');if(origin&&origin!==ORIGIN)return pub({error:'Invalid Origin'},403);if(request.method!=='POST')return plain('MCP supports POST JSON-RPC; GET SSE not implemented',405,'text/plain; charset=utf-8',{allow:'POST'});if(!request.headers.get('content-type')?.toLowerCase().startsWith('application/json'))return pub({error:'Content-Type application/json required'},415);const len=Number(request.headers.get('content-length')||0);if(len>16000)return pub({error:'Payload too large'},413);let req;try{const raw=await request.text();if(raw.length>16000)throw Error('Request oversized');req=JSON.parse(raw);if(Array.isArray(req)||typeof req!=='object'||req.jsonrpc!=='2.0'||typeof req.method!=='string'||req.method.length>80)throw Error('Malformed JSON-RPC')}catch(e){return pub(rpcError(null,-32700,'Invalid JSON-RPC request'),400)}
 const id=('id' in req)?req.id:null;
 const version=request.headers.get('MCP-Protocol-Version')||'2025-11-25';if(!['2025-11-25','2025-06-18','2026-07-28'].includes(version))return pub(rpcError(id,-32600,'Unsupported MCP protocol version'),400);
