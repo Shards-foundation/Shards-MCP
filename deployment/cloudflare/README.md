@@ -23,7 +23,7 @@ The edge currently supports:
 - 2026-07-28 `server/discover` subset with header routing validation
 - `tools/list`, `tools/call`, `resources/list`, `prompts/list`, `ping`
 - JSON response bodies, no SSE push/subscriptions
-- 3 public read-only and 9 bearer-protected tools
+- 7 public read-only tools after the reviewed feature is deployed (3 currently live), and 9 bearer-protected tools
 - same-tenant agent discovery, messaging, tasks with atomic queued → claimed transition and own audit retrieval
 - verified Cloudflare Access operator identity, scoped credentials, expiry and revocation
 - simple daily operation budgets and fixed-target passive DNS
