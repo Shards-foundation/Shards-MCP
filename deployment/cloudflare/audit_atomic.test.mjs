@@ -18,8 +18,17 @@ const recipient="agent_recipient_00001";
 const taskId="11111111-1111-4111-8111-111111111111";
 const reqId="req-audit-0001";
 
-function makeDB({auditFailure=false,task=null,recipientScopes=['message:read','task:claim'],recipientActive=true,recipientClient='agent'}={}){
-  const state={messages:[],tasks:task?[structuredClone(task)]:[],audits:[],batches:[],standaloneMutations:0,attemptedEffects:0};
+function makeDB({auditFailure=false,task=null,recipientScopes=['message:read','task:claim'],recipientActive=true,recipientClient='agent',parallelKind=null}={}){
+  const state={messages:[],tasks:task?[structuredClone(task)]:[],audits:[],batches:[],standaloneMutations:0,attemptedEffects:0,barrierReads:0};
+  let releaseBarrier;
+  const barrier=new Promise(resolve=>{releaseBarrier=resolve;});
+  async function snapshotBeforeConcurrentInsert(kind,row){
+    if(parallelKind!==kind || state.barrierReads>=2)return row;
+    state.barrierReads++;
+    if(state.barrierReads===2)releaseBarrier();
+    await barrier;
+    return row; // Both calls observe the identical pre-insert state.
+  }
   const database={
     prepare(sql){return {bind(...params){
       const stmt={sql,params};
@@ -38,13 +47,15 @@ function makeDB({auditFailure=false,task=null,recipientScopes=['message:read','t
             return {id:params[0],scopes:recipientScopes==="INVALID_JSON"?"{broken":JSON.stringify(recipientScopes)};
           }
           if(sql.includes("FROM agent_messages")){
-            return state.messages.find(m=>m.tenant_id===params[0]&&m.sender_id===params[1]&&m.request_key===params[2])||null;
+            const row=state.messages.find(m=>m.tenant_id===params[0]&&m.sender_id===params[1]&&m.request_key===params[2])||null;
+            return snapshotBeforeConcurrentInsert('message',row);
           }
           if(sql.startsWith("SELECT state FROM agent_tasks WHERE id=?")){
             return state.tasks.find(t=>t.id===params[0]&&t.tenant_id===params[1]&&t.assignee_id===params[2])||null;
           }
           if(sql.includes("FROM agent_tasks")){
-            return state.tasks.find(t=>t.tenant_id===params[0]&&t.creator_id===params[1]&&t.request_key===params[2])||null;
+            const row=state.tasks.find(t=>t.tenant_id===params[0]&&t.creator_id===params[1]&&t.request_key===params[2])||null;
+            return snapshotBeforeConcurrentInsert('task',row);
           }
           throw Error("Unexpected first query: "+sql);
         }
@@ -59,17 +70,21 @@ function makeDB({auditFailure=false,task=null,recipientScopes=['message:read','t
       // The snapshot is restored if the subsequent audit insert fails.
       const snapshot={messages:structuredClone(state.messages),tasks:structuredClone(state.tasks),audits:structuredClone(state.audits)};
       state.attemptedEffects++;
-      let rows=[];
+      let rows=[],effectChanged=1;
       if(effect.sql.startsWith("INSERT OR IGNORE INTO agent_messages")){
         const [id,tenant_id,sender_id,recipient_id,body,created_at,request_key]=effect.params;
-        assert.match(audit.sql,/\(SELECT tenant_id FROM agent_messages WHERE/);
+        assert.match(audit.sql,/SELECT \?,tenant_id,\?,\?,id,\?,\? FROM agent_messages WHERE/);
+        assert.match(audit.sql,/AND changes\(\)=1/);
         if(!state.messages.some(m=>m.tenant_id===tenant_id&&m.sender_id===sender_id&&m.request_key===request_key))
           state.messages.push({id,tenant_id,sender_id,recipient_id,body,created_at,request_key});
+        else effectChanged=0;
       }else if(effect.sql.startsWith("INSERT OR IGNORE INTO agent_tasks")){
         const [id,tenant_id,creator_id,assignee_id,title,input_json,current_state,created_at,request_key]=effect.params;
-        assert.match(audit.sql,/\(SELECT tenant_id FROM agent_tasks WHERE/);
+        assert.match(audit.sql,/SELECT \?,tenant_id,\?,\?,id,\?,\? FROM agent_tasks WHERE/);
+        assert.match(audit.sql,/AND changes\(\)=1/);
         if(!state.tasks.some(t=>t.tenant_id===tenant_id&&t.creator_id===creator_id&&t.request_key===request_key))
           state.tasks.push({id,tenant_id,creator_id,assignee_id,title,input_json,state:current_state,created_at,request_key});
+        else effectChanged=0;
       }else if(effect.sql.startsWith("UPDATE agent_tasks")){
         assert.match(audit.sql,/CASE WHEN changes\(\)=1 THEN \? ELSE NULL END/);
         if(effect.sql.includes("SET state='claimed'")){
@@ -86,14 +101,14 @@ function makeDB({auditFailure=false,task=null,recipientScopes=['message:read','t
           rows=[{id:t.id,state:t.state}];
         }else throw Error("Unknown state transition");
       }else throw Error("Unexpected mutation: "+effect.sql);
-      if(auditFailure){
+      if(auditFailure&&effectChanged===1){
         state.messages=snapshot.messages;
         state.tasks=snapshot.tasks;
         state.audits=snapshot.audits;
         throw Error("INJECTED_AUDIT_D1_FAILURE_AFTER_EFFECT");
       }
-      state.audits.push({statement:audit.sql,params:audit.params});
-      return [{success:true,results:rows,meta:{changes:1}},{success:true,meta:{changes:1},results:[]}];
+      if(effectChanged===1)state.audits.push({statement:audit.sql,params:audit.params});
+      return [{success:true,results:rows,meta:{changes:effectChanged}},{success:true,meta:{changes:effectChanged},results:[]}];
     }
   };
   return {state,EDGE_DB:database};
@@ -227,4 +242,37 @@ test("Write tools fail closed when the database lacks transactional batch",async
   assert.match(denied.content[0].text,/Atomic D1 batch is unavailable/);
   assert.equal(env.state.messages.length,0);
   assert.equal(env.state.standaloneMutations,0);
+});
+
+
+test("Concurrent identical requests produce one message and one audit event",async()=>{
+  const env=makeDB({parallelKind:"message"});
+  const args={recipient_agent_id:recipient,body:"same request",request_id:reqId};
+  const results=await Promise.all([runTool("shards_message_send",args,actor,env,request),
+    runTool("shards_message_send",args,actor,env,request)]);
+  assert.deepEqual(results.map(r=>r.isError),[false,false],"Concurrent exact retries are both idempotent success");
+  assert.equal(env.state.barrierReads,2,"Both requests must miss the initial existence lookup");
+  assert.equal(env.state.messages.length,1);
+  assert.equal(env.state.audits.length,1,"Exactly one audit event for exactly one committed effect");
+  assert.deepEqual(results.map(r=>r.structuredContent.idempotent).sort(),[false,true]);
+});
+test("Concurrent identical task creations produce one task and one audit event",async()=>{
+  const env=makeDB({parallelKind:"task"});
+  const args={assignee_agent_id:recipient,title:"Same job",input:{read_only:true},request_id:reqId};
+  const results=await Promise.all([runTool("shards_task_create",args,actor,env,request),
+    runTool("shards_task_create",args,actor,env,request)]);
+  assert.deepEqual(results.map(r=>r.isError),[false,false]);
+  assert.equal(env.state.barrierReads,2);
+  assert.equal(env.state.tasks.length,1);
+  assert.equal(env.state.audits.length,1);
+  assert.deepEqual(results.map(r=>r.structuredContent.idempotent).sort(),[false,true]);
+});
+test("Concurrent claims yield a single transition and a single audit entry",async()=>{
+  const env=makeDB({task:seededTask()});
+  const outcomes=await Promise.all([runTool("shards_task_claim",{task_id:taskId},actor,env,request),
+    runTool("shards_task_claim",{task_id:taskId},actor,env,request)]);
+  assert.equal(outcomes.filter(r=>r.isError===false).length,1);
+  assert.equal(outcomes.filter(r=>r.isError===true).length,1);
+  assert.equal(env.state.tasks[0].state,"claimed");
+  assert.equal(env.state.audits.length,1);
 });
