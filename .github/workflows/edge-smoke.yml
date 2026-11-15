@@ -32,7 +32,7 @@ jobs:
           console.log('Worker and all 8 client setup modules parse correctly');
           NODE
       - name: Isolated edge protocol and quota regression tests
-        run: node --test deployment/cloudflare/worker.test.mjs
+        run: node --test deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs
       - name: Signed operator workspace and real messaging regression
         run: node --test deployment/cloudflare/workspace.test.mjs
       - name: Official MCP SDK v1 signed-endpoint protocol interoperability
