@@ -78,6 +78,18 @@ test("The active deployment must remain identical across the entire MCP smoke se
   assert.throws(()=>verifySnapshot({...snapshot,version_id:"ff6379db-06fc-4053-87b0-c06010bb2cdb"},snapshot),/ACTIVE_DEPLOYMENT_CHANGED/);
   assert.throws(()=>verifySnapshot({...snapshot,domain_id:"different"},snapshot),/ACTIVE_DEPLOYMENT_CHANGED/);
 });
+test("Hyphenated account UUID and incorrect account IDs are rejected before network",async()=>{
+  const mock=fakeCloudflare();
+  for(const badAccount of [
+    "1417254b-dbe8-4e9b-b479-b5d474ca6726",
+    "not-an-account","",accountId+"00"
+  ]){
+    await assert.rejects(verifyRelease({
+      accountId:badAccount,token,expectedVersion,fetchImpl:mock.fetchImpl
+    }),/Cloudflare account ID/);
+  }
+  assert.equal(mock.calls.length,0,"No Cloudflare API request for malformed account IDs");
+});
 test("Verification does not contact API on a malformed version",async()=>{
   const mock=fakeCloudflare();
   await assert.rejects(verifyRelease({accountId,token,expectedVersion:"not-a-uuid",fetchImpl:mock.fetchImpl}),/version UUID/);
