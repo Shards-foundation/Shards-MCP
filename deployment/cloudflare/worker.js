@@ -424,9 +424,11 @@ const accountAudit=(env,id,event,objectId,now,onlyIfChanged=false)=>env.EDGE_DB.
 const SKILLS_CATALOGUE_URL='https://raw.githubusercontent.com/Shards-foundation/shards-skills/main/catalogue/catalogue.json';
 const SHARDS_CORE_SKILLS=['shards-a2a-harness','shards-agent-handoff','shards-automation-operator','shards-catalogue-sync','shards-dual-channel','shards-parallel-swarm','shards-release-gate','shards-repository-health','shards-skill-audit','shards-skill-dispatch','shards-subagents'];
 const skillSummary=s=>({id:s.id,name:s.name,description:s.description,category:s.category,source_type:s.source_type,source_url:s.source_url,content_sha256:s.content_sha256,created_at:s.created_at});
-const skillValid=x=>typeof x==='string'&&x.length>=20&&x.length<=65000&&!x.includes('\0')&&(/^\s*(---\s*\n|#\s)/.test(x)||x.includes('\n# '));
-const skillName=x=>typeof x==='string'&&x.length>=2&&x.length<=90&&!/[\u0000-\u001f\u007f<>]/.test(x);
-const skillDesc=x=>typeof x==='string'&&x.length<=400&&!/[\u0000-\u001f\u007f<>]/.test(x);
+// SQLite length(text) counts Unicode code points, not JavaScript UTF-16 code units.
+const skillCodePoints=x=>[...x].length;
+const skillValid=x=>typeof x==='string'&&skillCodePoints(x)>=20&&skillCodePoints(x)<=65000&&!x.includes('\0')&&(/^\s*(---\s*\n|#\s)/.test(x)||x.includes('\n# '));
+const skillName=x=>typeof x==='string'&&skillCodePoints(x.trim())>=2&&skillCodePoints(x.trim())<=90&&!/[\u0000-\u001f\u007f<>]/.test(x);
+const skillDesc=x=>typeof x==='string'&&skillCodePoints(x.trim())<=400&&!/[\u0000-\u001f\u007f<>]/.test(x);
 async function skillResponseText(response,limit){
   if(!response.ok)throw Error('GitHub returned HTTP '+response.status);
   if(Number(response.headers.get('content-length'))>limit)throw Error('GitHub file too large');
