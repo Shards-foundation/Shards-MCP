@@ -204,9 +204,14 @@ nvm use 22.16.0
 node --version
 node --test --test-reporter=tap deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs
 node --test deployment/cloudflare/verify_release_deployment.test.mjs
+# The workflow additionally runs signed workspace and official MCP SDK interoperability:
+node --test deployment/cloudflare/workspace.test.mjs
+npm install --prefix deployment/cloudflare --no-save --no-package-lock --ignore-scripts --audit=false --fund=false @modelcontextprotocol/sdk@1 zod@4
+node --test deployment/cloudflare/sdk.test.mjs
+python3 deployment/cloudflare/schema_migrations_test.py -v
 ```
 
-`node --test` must report **zero failed and zero cancelled tests**. The browser's stalled-MCP regression awaits a deliberately pending promise until `AbortSignal.timeout()` fires. Node's abort timer is unref'd; therefore the test must start its referenced 1.5-second failure watchdog **before** awaiting the button handler. An unresolved test is a failure, not a pass. GitHub Actions enforces the full TAP summary using this pinned Node version.
+`node --test` must report **zero failed and zero cancelled tests**. The browser's stalled-MCP regression awaits a deliberately pending promise until `AbortSignal.timeout()` fires. Node's abort timer is unref'd; therefore the test must start its referenced 1.5-second failure watchdog **before** awaiting the button handler. An unresolved test is a failure, not a pass. GitHub Actions enforces the full TAP summary using this pinned Node version: the Worker + audit combined suite must have **at least 27 tests**, every reported test must pass, and both failed and cancelled counts must equal zero. The additional workspace, SDK, release-verifier and SQLite migration test commands above reproduce the other Edge acceptance steps. Installing the official MCP SDK and Zod in the SDK step requires npm access but no paid service.
 
 **Post-deployment verification:** The separate `.github/workflows/edge-production-release-gate.yml` workflow (manually invoked only *after* an approved release) takes a `deployed_worker_version` UUID. It does **not** trust that UUID as evidence by itself. The workflow calls the read-only Cloudflare Workers Deployments API to check the actual latest `shards-mcp-edge` deployment is assigned to that exact version with 100% traffic. It separately checks Cloudflare's Worker Custom Domains API for `mcp.shardsinc.co.uk` mapped uniquely to the enabled production service. Both checks run before the live MCP tests; the deployment and route IDs are checked a second time afterward to catch a concurrent release. Only then are the exact seven public tools and nine protected tool declarations accepted. An undeployed three-tool site must FAIL the post-deployment workflow.
 
