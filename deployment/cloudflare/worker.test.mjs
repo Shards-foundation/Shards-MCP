@@ -526,7 +526,7 @@ test("Public research returns bounded live-source results from fixed GitHub orig
     if(String(url).endsWith("/catalogue/catalogue.json"))return new Response(JSON.stringify(index),{status:200,headers});
     if(String(url).endsWith("/skills/shards-sec-vibecoding-gate/SKILL.md"))return new Response("# Real instructions, not executed",{status:200,headers:{"content-type":"text/plain"}});
     if(String(url).endsWith("/Shards-MCP/main/AGENTS.md"))return new Response("# Agent rules",{status:200,headers:{"content-type":"text/plain"}});
-    if(String(url).includes("/pulls?"))return new Response(JSON.stringify([{number:42,title:"Add tests",html_url:"https://github.com/Shards-foundation/Shards-MCP/pull/42",updated_at:"2026-11-15T00:00:00Z",draft:false}]),{status:200,headers});
+    if(String(url).includes("/pulls?"))return new Response(JSON.stringify(Array.from({length:4},(_,i)=>({number:42+i,title:"Add tests "+i,body:"long-review-description".repeat(5000),html_url:"https://github.com/Shards-foundation/Shards-MCP/pull/"+(42+i),updated_at:"2026-11-15T00:00:00Z",draft:false}))),{status:200,headers});
     throw Error("Unexpected upstream URL: "+url);
   };
   const fake={Request,Response,Headers,URL,TextEncoder,TextDecoder,crypto:webcrypto,AbortSignal,atob,fetch:mockFetch};
@@ -543,6 +543,31 @@ test("Public research returns bounded live-source results from fixed GitHub orig
   assert.equal(doc.content,"# Agent rules");
   const prs=await call("shards_open_prs",{repository:"Shards-MCP"});
   assert.equal(prs.pull_requests[0].number,42);
+  assert.equal(prs.pull_requests.length,4,"Long upstream descriptions must not prevent metadata-only result");
+  assert.equal('body' in prs.pull_requests[0],false,"PR bodies must never be returned");
   assert.ok(calls.every(c=>c.url.startsWith("https://raw.githubusercontent.com/Shards-foundation/")||c.url.startsWith("https://api.github.com/repos/Shards-foundation/")));
   assert.ok(calls.every(c=>c.options.redirect==="error"));
+});
+
+
+test("Public read streaming limit cancels an oversized source with no content-length", async () => {
+  let cancelled=false,requested=false;
+  const stream=new ReadableStream({
+    start(controller){controller.enqueue(new Uint8Array(400000));},
+    cancel(){cancelled=true;}
+  });
+  const mockFetch=async (url)=>{
+    requested=true;
+    assert.equal(String(url),"https://raw.githubusercontent.com/Shards-foundation/Shards-MCP/main/README.md");
+    return new Response(stream,{status:200,headers:{"content-type":"text/plain"}});
+  };
+  const fake={Request,Response,Headers,URL,TextEncoder,TextDecoder,crypto:webcrypto,AbortSignal,atob,fetch:mockFetch};
+  vm.runInNewContext(src.replace("export default {", "globalThis.__edge = {"),fake,{filename:"worker.js"});
+  const env={EDGE_DB:{prepare(){return {bind(){return {run:async()=>({meta:{changes:1}})}}};}}};
+  const result=await fake.__edge.fetch(post("tools/call",{name:"shards_repo_document",arguments:{repository:"Shards-MCP"}}),env);
+  const json=await result.json();
+  assert.equal(requested,true);
+  assert.equal(json.result.isError,true);
+  assert.match(json.result.content[0].text,/Public source too large/);
+  assert.equal(cancelled,true,"Reader must cancel when the byte limit is crossed");
 });
