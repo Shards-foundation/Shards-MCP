@@ -30,6 +30,17 @@ def schema_objects(db):
     }
 
 
+def schema_definitions(db):
+    # Compare complete SQL declarations, not just matching object names.
+    return {
+        (kind, name): re.sub(r"\s+", " ", ddl.strip()).lower()
+        for kind, name, ddl in db.execute(
+            "SELECT type,name,sql FROM sqlite_master "
+            "WHERE type IN ('table','index') AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+
+
 def db_from_schema(sql):
     db = sqlite3.connect(":memory:", isolation_level=None)
     db.execute("PRAGMA foreign_keys=ON")
@@ -88,6 +99,21 @@ class ReconciledD1SQL(unittest.TestCase):
                 upgraded.executescript(file.read_text(encoding="utf-8"))
         fresh = db_from_schema(FULL_SCHEMA)
         self.assertEqual(schema_objects(upgraded), schema_objects(fresh))
+        self.assertEqual(schema_definitions(upgraded), schema_definitions(fresh),
+                         "Upgrade/fresh declarations must match columns, checks, keys and indexes")
+        required_indexes = {
+            "idx_access_agent", "idx_inbox", "idx_tasks_assignee", "idx_audit_time",
+            "idx_operator_api_keys_owner", "idx_operator_ssh_keys_owner",
+            "idx_agents_created_by", "idx_operator_skills_owner",
+            "idx_agent_connection_last_seen"
+        }
+        actual = {name for kind,name in schema_objects(upgraded) if kind == "index"}
+        self.assertTrue(required_indexes <= actual, required_indexes - actual)
+        skills_columns = {row[1]: row for row in upgraded.execute("PRAGMA table_info(operator_skills)")}
+        self.assertEqual(skills_columns["content_sha256"][3],1,"Digest must be NOT NULL")
+        self.assertEqual(skills_columns["name"][3],1,"Skill name must be NOT NULL")
+        fkeys = list(upgraded.execute("PRAGMA foreign_key_list(operator_skills)"))
+        self.assertTrue(any(row[2]=="operator_accounts" for row in fkeys))
         self.assertEqual(upgraded.execute("SELECT COUNT(*) FROM agents WHERE id='existing-agent'").fetchone()[0], 1)
         upgraded.close()
         fresh.close()
@@ -134,7 +160,7 @@ class ReconciledD1SQL(unittest.TestCase):
         insert_queued_task(db)
         db.execute(
             "CREATE TRIGGER deny_audit BEFORE INSERT ON audit_events "
-            "BEGIN SELECT RAISE(ABORT,'injected audit storage failure'); END"
+            "BEGIN SELECT RAISE(ROLLBACK,'injected audit storage failure'); END"
         )
         db.execute("BEGIN IMMEDIATE")
         db.execute("UPDATE agent_tasks SET state='claimed' WHERE id='task-id'")
@@ -143,7 +169,8 @@ class ReconciledD1SQL(unittest.TestCase):
                 "audit-fail", "shards-internal", "test-agent", "shards_task_claim",
                 "task-id", "accepted", "2026-11-15T12:00:00Z",
             ))
-        db.execute("ROLLBACK")
+        self.assertFalse(db.in_transaction,
+                         "Injected audit failure must automatically roll back the whole transaction")
         self.assertEqual(db.execute("SELECT state FROM agent_tasks WHERE id='task-id'").fetchone()[0], "queued")
         self.assertEqual(db.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0], 0)
         db.close()
