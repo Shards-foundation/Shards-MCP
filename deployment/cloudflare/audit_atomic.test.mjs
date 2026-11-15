@@ -62,13 +62,13 @@ function makeDB({auditFailure=false,task=null}={}){
           state.tasks.push({id,tenant_id,creator_id,assignee_id,title,input_json,state:current_state,created_at,request_key});
       }else if(effect.sql.startsWith("UPDATE agent_tasks")){
         assert.match(audit.sql,/CASE WHEN changes\(\)=1 THEN \? ELSE NULL END/);
-        if(effect.sql.includes("state='claimed'")){
+        if(effect.sql.includes("SET state='claimed'")){
           const [time,id,tenant,assignee]=effect.params;
           const t=state.tasks.find(t=>t.id===id&&t.tenant_id===tenant&&t.assignee_id===assignee&&t.state==="queued");
           if(!t)throw Error("No matching transition: audit NOT NULL guard rolls back batch");
           t.state="claimed";t.claimed_at=time;
           rows=[{id:t.id,title:t.title,input_json:t.input_json,state:t.state}];
-        }else if(effect.sql.includes("state='completed'")){
+        }else if(effect.sql.includes("SET state='completed'")){
           const [time,data,id,tenant,assignee]=effect.params;
           const t=state.tasks.find(t=>t.id===id&&t.tenant_id===tenant&&t.assignee_id===assignee&&t.state==="claimed");
           if(!t)throw Error("No matching transition: audit NOT NULL guard rolls back batch");
