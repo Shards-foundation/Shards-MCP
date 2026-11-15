@@ -39,7 +39,7 @@ function makeDB({auditFailure=false,task=null,recipientScopes=['message:read','t
           throw Error("Protected writes must be batched");
         },
         async first(){
-          if(sql.startsWith("SELECT id,scopes FROM agents")){
+          if(sql.startsWith("SELECT id,scopes")&&sql.includes("FROM agents")){
             assert.match(sql,/tenant_id=\?/,"Recipient/assignee lookup must be tenant-scoped");
             assert.match(sql,/disabled_at IS NULL/,"Recipient/assignee lookup must require active principal");
             if(!recipientActive)return null;
