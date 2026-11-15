@@ -201,12 +201,27 @@ if(name==='shards_agent_identity')return result({id:actor.id,tenant:actor.tenant
 if(name==='shards_agents_list'){const r=await env.EDGE_DB.prepare('SELECT id,name,client,created_at FROM agents WHERE tenant_id=? AND disabled_at IS NULL ORDER BY created_at DESC LIMIT 60').bind(actor.tenant_id).all();return result({agents:r.results||[]})}
 if(name==='shards_message_send'){
   if(!idPattern.test(args.recipient_agent_id)||typeof args.body!=='string'||!args.body.trim()||args.body.length>2000||!reqId(args.request_id))throw Error('Invalid recipient, message or idempotency key');
-  const target=await env.EDGE_DB.prepare('SELECT id,scopes FROM agents WHERE id=? AND tenant_id=? AND disabled_at IS NULL').bind(args.recipient_agent_id,actor.tenant_id).first();
+  const target=await env.EDGE_DB.prepare('SELECT id,scopes,client,created_by FROM agents WHERE id=? AND tenant_id=? AND disabled_at IS NULL').bind(args.recipient_agent_id,actor.tenant_id).first();
   if(!target)throw Error('Recipient not enrolled in this tenant');
-  // Scopes are a JSON array issued by the operator. Fail closed on malformed stored grants.
-  let receiverScopes;
-  try{receiverScopes=JSON.parse(target.scopes)}catch{throw Error('RECIPIENT_SCOPE_INVALID')}
-  if(!Array.isArray(receiverScopes)||!receiverScopes.includes('message:read'))throw Error('RECIPIENT_SCOPE_DENIED: recipient cannot read messages');
+  if(target.client==='operator-ui'){
+    // The verified human operator receives replies through the signed workspace,
+    // NOT through the token-scoped agent inbox. Do not grant message:read to an
+    // ordinary agent or blindly trust a user-controlled "operator-ui" label.
+    const owner=target.created_by;
+    if(actor.tenant_id!=='shards-internal'||typeof owner!=='string'||
+      !/^[a-f0-9]{64}$/.test(owner)||target.id!=='operator_'+owner.slice(0,32))
+      throw Error('RECIPIENT_SCOPE_DENIED: invalid operator principal');
+    let account;
+    try{account=await env.EDGE_DB.prepare('SELECT deleted_at FROM operator_accounts WHERE id=?').bind(owner).first()}
+    catch{throw Error('OPERATOR_INBOX_UNAVAILABLE')}
+    if(account?.deleted_at)throw Error('RECIPIENT_SCOPE_DENIED: operator account deleted');
+  }else{
+    // Scopes are a JSON array issued by the operator. Fail closed on malformed stored grants.
+    let receiverScopes;
+    try{receiverScopes=JSON.parse(target.scopes)}catch{throw Error('RECIPIENT_SCOPE_INVALID')}
+    if(!Array.isArray(receiverScopes)||!receiverScopes.includes('message:read'))
+      throw Error('RECIPIENT_SCOPE_DENIED: recipient cannot read messages');
+  }
   const query='SELECT id,body,recipient_id FROM agent_messages WHERE tenant_id=? AND sender_id=? AND request_key=?';
   const prior=await env.EDGE_DB.prepare(query).bind(actor.tenant_id,actor.id,args.request_id).first();
   if(prior){if(prior.body!==args.body||prior.recipient_id!==args.recipient_agent_id)throw Error('Idempotency key conflict');return result({id:prior.id,idempotent:true,delivered:true})}
