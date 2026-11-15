@@ -15,6 +15,17 @@ jobs:
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
+      - name: Use pinned, reproducible Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: deployment/cloudflare/.node-version
+      - name: Assert exact test runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = "v22.16.0"
+          node --version
+      - name: Test authoritative Worker deployment verifier (offline fixtures)
+        run: node --test deployment/cloudflare/verify_release_deployment.test.mjs
       - name: Parse Worker and embedded client JavaScript
         run: |
           set -euo pipefail
