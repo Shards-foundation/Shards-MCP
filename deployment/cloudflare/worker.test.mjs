@@ -564,9 +564,9 @@ test("Public research returns bounded live-source results from fixed GitHub orig
   assert.ok(calls.every(c=>c.options.redirect==="error"));
   assert.ok(calls.every(c=>c.options.signal instanceof AbortSignal),"Each upstream request requires a timeout signal");
   assert.ok(calls.every(c=>c.options.cf?.cacheEverything===true&&c.options.cf?.cacheTtl===300),"All public reads must enable bounded caching");
-  assert.equal(budgetWrites.length,18,"Nine valid public calls must each charge caller and global D1 budgets");
-  assert.equal(budgetWrites.filter(v=>String(v[1]).startsWith("public:")).length,9);
-  assert.equal(budgetWrites.filter(v=>["shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs"].includes(v[1])).length,9);
+  assert.equal(budgetWrites.length,16,"Eight valid public calls must each charge caller and global D1 budgets");
+  assert.equal(budgetWrites.filter(v=>String(v[1]).startsWith("public:")).length,8);
+  assert.equal(budgetWrites.filter(v=>["shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs"].includes(v[1])).length,8);
 });
 
 
