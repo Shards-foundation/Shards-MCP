@@ -19,6 +19,8 @@ function fakeCloudflare({deployments=[deployment],domains=[domain],status=200,su
     assert.equal(options.redirect,"error");
     assert.ok(options.signal instanceof AbortSignal);
     const result=url.includes("/deployments?")?{deployments}:url.includes("/domains?")?domains:null;
+    const prefix="https://api.cloudflare.com/client/v4/accounts/"+accountId+"/workers/";
+    assert.ok(String(url).startsWith(prefix),"Cloudflare calls must use exactly the approved account");
     if(result===null)throw Error("Unlisted API URL: "+url);
     return new Response(JSON.stringify({success,result}),{status});
   };
@@ -33,8 +35,8 @@ test("Active version is independently verified, not just a well-shaped UUID",asy
   assert.equal(actual.traffic_percent,100);
   assert.equal(actual.domain_id,domainId);
   assert.equal(mock.calls.length,2);
-  assert.ok(mock.calls[0].url.includes("/scripts/shards-mcp-edge/deployments?per_page=10"));
-  assert.ok(mock.calls[1].url.includes("/domains?hostname=mcp.shardsinc.co.uk"));
+  assert.equal(mock.calls[0].url,"https://api.cloudflare.com/client/v4/accounts/"+accountId+"/workers/scripts/shards-mcp-edge/deployments?per_page=10");
+  assert.equal(mock.calls[1].url,"https://api.cloudflare.com/client/v4/accounts/"+accountId+"/workers/domains?hostname=mcp.shardsinc.co.uk");
 });
 test("A supplied but stale UUID is rejected even if it has correct syntax",async()=>{
   const stale={...deployment,versions:[{version_id:"ff6379db-06fc-4053-87b0-c06010bb2cdb",percentage:100}]};
