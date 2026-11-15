@@ -75,7 +75,26 @@ async function authenticate(request,env,operation='mcp_request'){
  try{await env.EDGE_DB.prepare("INSERT INTO agent_connection_activity(agent_id,first_authenticated_at,last_authenticated_at,last_operation) SELECT a.id,?,?,? FROM access_tokens t JOIN agents a ON a.id=t.agent_id WHERE t.token_sha256=? AND t.revoked_at IS NULL AND t.expires_at>? AND a.disabled_at IS NULL ON CONFLICT(agent_id) DO UPDATE SET last_authenticated_at=excluded.last_authenticated_at,last_operation=excluded.last_operation").bind(now,now,operation,hash,now).run()}catch(e){}
  return actor;
 }
-async function audit(env,actor,action,id,status){try{await env.EDGE_DB.prepare("INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) VALUES(?,?,?,?,?,?,?)").bind(crypto.randomUUID(),actor.tenant_id,actor.id,action,id||null,status,new Date().toISOString()).run()}catch(e){}}
+// Every protected mutation and its audit event must commit in the same D1 transaction.
+function auditForMatchingRow(env,actor,action,table,where,values){
+  // 'table' and 'where' are hardcoded call-site constants, never model/user arguments.
+  if(!['agent_messages','agent_tasks'].includes(table))throw Error('Unsupported audited row type');
+  const sql='INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) VALUES(?,(SELECT tenant_id FROM '+table+' WHERE '+where+'),?,?,(SELECT id FROM '+table+' WHERE '+where+'),?,?)';
+  return env.EDGE_DB.prepare(sql).bind(crypto.randomUUID(),...values,actor.id,action,...values,'recorded',new Date().toISOString());
+}
+function auditForTransition(env,actor,action,taskId){
+  // If the immediately preceding UPDATE changes zero rows, the NOT NULL tenant
+  // constraint aborts the batch. Thus no successful audit-less transition is possible.
+  return env.EDGE_DB.prepare("INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) VALUES(?,CASE WHEN changes()=1 THEN ? ELSE NULL END,?,?,?,?,?)")
+    .bind(crypto.randomUUID(),actor.tenant_id,actor.id,action,taskId,'accepted',new Date().toISOString());
+}
+async function auditedMutation(env,mutation,auditStatement){
+  if(typeof env.EDGE_DB?.batch!=='function')throw Error('Atomic D1 batch is unavailable');
+  const rows=await env.EDGE_DB.batch([mutation,auditStatement]);
+  if(!Array.isArray(rows)||rows.length!==2||rows.some(r=>r?.success===false)||rows[1]?.meta?.changes!==1)
+    throw Error('Atomic mutation/audit result not confirmed');
+  return rows[0];
+}
 async function budget(env,operation,max){const day=new Date().toISOString().slice(0,10);try{const r=await env.EDGE_DB.prepare('INSERT INTO route_budgets(window_key,operation,used) VALUES(?,?,1) ON CONFLICT(window_key,operation) DO UPDATE SET used=used+1 WHERE used<?').bind(day,operation,max).run();return r.meta?.changes===1}catch(e){return false}}
 function validateDNS(input){const domain=String(input.domain||'').toLowerCase().trim().replace(/\.$/,'');const type=input.type||'A';if(!/^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)||!['A','AAAA','TXT','MX','CAA'].includes(type))throw Error('Valid public domain and supported DNS record type required');return {domain,type}}
 async function getDNS(input){const {domain,type}=validateDNS(input);const u='https://cloudflare-dns.com/dns-query?name='+encodeURIComponent(domain)+'&type='+type;const r=await fetch(u,{headers:{accept:'application/dns-json'},redirect:'manual',signal:AbortSignal.timeout(6000)});if(!r.ok)throw Error('Upstream DNS unavailable');const text=await r.text();if(text.length>30000)throw Error('DNS result too large');const j=JSON.parse(text);return {provider:'Cloudflare DoH',domain,type,status:j.Status,records:(j.Answer||[]).slice(0,20).map(x=>({type:x.type,value:String(x.data||'').slice(0,800),ttl:x.TTL})),warning:'Passive DNS only; no vulnerability scan or site fetch.'}}
@@ -163,12 +182,61 @@ if(name==='shards_systems_catalog')return result({projects:[{name:'Shards-MCP (P
 if(name==='shards_dns_lookup')return result(await getDNS(args));
 if(name==='shards_agent_identity')return result({id:actor.id,tenant:actor.tenant_id,name:actor.name,client:actor.client,scopes:[...actor.scopeSet]});
 if(name==='shards_agents_list'){const r=await env.EDGE_DB.prepare('SELECT id,name,client,created_at FROM agents WHERE tenant_id=? AND disabled_at IS NULL ORDER BY created_at DESC LIMIT 60').bind(actor.tenant_id).all();return result({agents:r.results||[]})}
-if(name==='shards_message_send'){if(!idPattern.test(args.recipient_agent_id)||typeof args.body!=='string'||!args.body.trim()||args.body.length>2000||!reqId(args.request_id))throw Error('Invalid recipient, message or idempotency key');const target=await env.EDGE_DB.prepare('SELECT id FROM agents WHERE id=? AND tenant_id=? AND disabled_at IS NULL').bind(args.recipient_agent_id,actor.tenant_id).first();if(!target)throw Error('Recipient not enrolled in this tenant');const existing=await env.EDGE_DB.prepare('SELECT id,body,recipient_id FROM agent_messages WHERE tenant_id=? AND sender_id=? AND request_key=?').bind(actor.tenant_id,actor.id,args.request_id).first();if(existing){if(existing.body!==args.body||existing.recipient_id!==args.recipient_agent_id)throw Error('Idempotency key conflict');return result({id:existing.id,idempotent:true,delivered:true})}const id=crypto.randomUUID(),now=new Date().toISOString();await env.EDGE_DB.prepare('INSERT OR IGNORE INTO agent_messages(id,tenant_id,sender_id,recipient_id,body,created_at,request_key) VALUES(?,?,?,?,?,?,?)').bind(id,actor.tenant_id,actor.id,args.recipient_agent_id,args.body,now,args.request_id).run();const row=await env.EDGE_DB.prepare('SELECT id,body,recipient_id FROM agent_messages WHERE tenant_id=? AND sender_id=? AND request_key=?').bind(actor.tenant_id,actor.id,args.request_id).first();if(!row||row.body!==args.body||row.recipient_id!==args.recipient_agent_id)throw Error('Idempotency key conflict after concurrent insert');await audit(env,actor,name,row.id,row.id===id?'accepted':'idempotent');return result({id:row.id,delivered:true,idempotent:row.id!==id})}
+if(name==='shards_message_send'){
+  if(!idPattern.test(args.recipient_agent_id)||typeof args.body!=='string'||!args.body.trim()||args.body.length>2000||!reqId(args.request_id))throw Error('Invalid recipient, message or idempotency key');
+  const target=await env.EDGE_DB.prepare('SELECT id FROM agents WHERE id=? AND tenant_id=? AND disabled_at IS NULL').bind(args.recipient_agent_id,actor.tenant_id).first();
+  if(!target)throw Error('Recipient not enrolled in this tenant');
+  const query='SELECT id,body,recipient_id FROM agent_messages WHERE tenant_id=? AND sender_id=? AND request_key=?';
+  const prior=await env.EDGE_DB.prepare(query).bind(actor.tenant_id,actor.id,args.request_id).first();
+  if(prior){if(prior.body!==args.body||prior.recipient_id!==args.recipient_agent_id)throw Error('Idempotency key conflict');return result({id:prior.id,idempotent:true,delivered:true})}
+  const id=crypto.randomUUID(),now=new Date().toISOString();
+  const mutation=env.EDGE_DB.prepare('INSERT OR IGNORE INTO agent_messages(id,tenant_id,sender_id,recipient_id,body,created_at,request_key) VALUES(?,?,?,?,?,?,?)')
+    .bind(id,actor.tenant_id,actor.id,args.recipient_agent_id,args.body,now,args.request_id);
+  const where='tenant_id=? AND sender_id=? AND request_key=? AND body=? AND recipient_id=?';
+  const auditRow=auditForMatchingRow(env,actor,name,'agent_messages',where,[actor.tenant_id,actor.id,args.request_id,args.body,args.recipient_agent_id]);
+  await auditedMutation(env,mutation,auditRow);
+  const row=await env.EDGE_DB.prepare(query).bind(actor.tenant_id,actor.id,args.request_id).first();
+  if(!row||row.body!==args.body||row.recipient_id!==args.recipient_agent_id)throw Error('Idempotency key conflict after concurrent insert');
+  return result({id:row.id,delivered:true,idempotent:row.id!==id});
+}
 if(name==='shards_message_inbox'){const r=await env.EDGE_DB.prepare('SELECT id,sender_id,body,created_at FROM agent_messages WHERE tenant_id=? AND recipient_id=? ORDER BY created_at DESC LIMIT 20').bind(actor.tenant_id,actor.id).all();return result({messages:r.results||[]})}
-if(name==='shards_task_create'){if(!idPattern.test(args.assignee_agent_id)||typeof args.title!=='string'||args.title.length>150||!args.title.trim()||!reqId(args.request_id)||!args.input||typeof args.input!=='object'||Array.isArray(args.input)||JSON.stringify(args.input).length>3500)throw Error('Invalid assignee, title, task input or idempotency key');const target=await env.EDGE_DB.prepare("SELECT id FROM agents WHERE id=? AND tenant_id=? AND disabled_at IS NULL AND client!='operator-ui'").bind(args.assignee_agent_id,actor.tenant_id).first();if(!target)throw Error('Assignee not an active agent runtime');const prior=await env.EDGE_DB.prepare('SELECT * FROM agent_tasks WHERE tenant_id=? AND creator_id=? AND request_key=?').bind(actor.tenant_id,actor.id,args.request_id).first();const body=JSON.stringify(args.input);if(prior){if(prior.input_json!==body||prior.title!==args.title||prior.assignee_id!==args.assignee_agent_id)throw Error('Task idempotency key conflict');return result({id:prior.id,state:prior.state,idempotent:true})}const id=crypto.randomUUID();await env.EDGE_DB.prepare('INSERT OR IGNORE INTO agent_tasks(id,tenant_id,creator_id,assignee_id,title,input_json,state,created_at,request_key) VALUES(?,?,?,?,?,?,?,?,?)').bind(id,actor.tenant_id,actor.id,args.assignee_agent_id,args.title,body,'queued',new Date().toISOString(),args.request_id).run();const row=await env.EDGE_DB.prepare('SELECT id,state,title,input_json,assignee_id FROM agent_tasks WHERE tenant_id=? AND creator_id=? AND request_key=?').bind(actor.tenant_id,actor.id,args.request_id).first();if(!row||row.title!==args.title||row.input_json!==body||row.assignee_id!==args.assignee_agent_id)throw Error('Task idempotency conflict after concurrent insert');await audit(env,actor,name,row.id,row.id===id?'accepted':'idempotent');return result({id:row.id,state:row.state,idempotent:row.id!==id})}
+if(name==='shards_task_create'){
+  if(!idPattern.test(args.assignee_agent_id)||typeof args.title!=='string'||args.title.length>150||!args.title.trim()||!reqId(args.request_id)||!args.input||typeof args.input!=='object'||Array.isArray(args.input)||JSON.stringify(args.input).length>3500)throw Error('Invalid assignee, title, task input or idempotency key');
+  const target=await env.EDGE_DB.prepare("SELECT id FROM agents WHERE id=? AND tenant_id=? AND disabled_at IS NULL AND client!='operator-ui'").bind(args.assignee_agent_id,actor.tenant_id).first();
+  if(!target)throw Error('Assignee not an active agent runtime');
+  const query='SELECT id,state,title,input_json,assignee_id FROM agent_tasks WHERE tenant_id=? AND creator_id=? AND request_key=?';
+  const prior=await env.EDGE_DB.prepare(query).bind(actor.tenant_id,actor.id,args.request_id).first();
+  const input=JSON.stringify(args.input);
+  if(prior){if(prior.title!==args.title||prior.input_json!==input||prior.assignee_id!==args.assignee_agent_id)throw Error('Task idempotency key conflict');return result({id:prior.id,state:prior.state,idempotent:true})}
+  const id=crypto.randomUUID();
+  const mutation=env.EDGE_DB.prepare('INSERT OR IGNORE INTO agent_tasks(id,tenant_id,creator_id,assignee_id,title,input_json,state,created_at,request_key) VALUES(?,?,?,?,?,?,?,?,?)')
+    .bind(id,actor.tenant_id,actor.id,args.assignee_agent_id,args.title,input,'queued',new Date().toISOString(),args.request_id);
+  const where='tenant_id=? AND creator_id=? AND request_key=? AND title=? AND input_json=? AND assignee_id=?';
+  const auditRow=auditForMatchingRow(env,actor,name,'agent_tasks',where,[actor.tenant_id,actor.id,args.request_id,args.title,input,args.assignee_agent_id]);
+  await auditedMutation(env,mutation,auditRow);
+  const row=await env.EDGE_DB.prepare(query).bind(actor.tenant_id,actor.id,args.request_id).first();
+  if(!row||row.title!==args.title||row.input_json!==input||row.assignee_id!==args.assignee_agent_id)throw Error('Task idempotency conflict after concurrent insert');
+  return result({id:row.id,state:row.state,idempotent:row.id!==id});
+}
 if(name==='shards_task_inbox'){const r=await env.EDGE_DB.prepare('SELECT id,title,input_json,state,creator_id,created_at,claimed_at,completed_at,result_json FROM agent_tasks WHERE tenant_id=? AND assignee_id=? ORDER BY created_at DESC LIMIT 30').bind(actor.tenant_id,actor.id).all();return result({tasks:(r.results||[]).map(t=>({...t,input:JSON.parse(t.input_json),result:t.result_json?JSON.parse(t.result_json):null,input_json:undefined,result_json:undefined}))})}
-if(name==='shards_task_claim'){if(!/^[0-9a-f-]{36}$/.test(args.task_id))throw Error('Invalid task ID');const row=await env.EDGE_DB.prepare("UPDATE agent_tasks SET state='claimed',claimed_at=? WHERE id=? AND tenant_id=? AND assignee_id=? AND state='queued' RETURNING id,title,input_json,state").bind(new Date().toISOString(),args.task_id,actor.tenant_id,actor.id).first();if(!row)throw Error('Task unavailable, already claimed or not assigned');await audit(env,actor,name,row.id,'accepted');return result({id:row.id,title:row.title,input:JSON.parse(row.input_json),state:row.state})}
-if(name==='shards_task_complete'){if(!/^[0-9a-f-]{36}$/.test(args.task_id)||!args.result||typeof args.result!=='object'||Array.isArray(args.result)||JSON.stringify(args.result).length>3500)throw Error('Invalid task ID or result');const row=await env.EDGE_DB.prepare("UPDATE agent_tasks SET state='completed',completed_at=?,result_json=? WHERE id=? AND tenant_id=? AND assignee_id=? AND state='claimed' RETURNING id,state").bind(new Date().toISOString(),JSON.stringify(args.result),args.task_id,actor.tenant_id,actor.id).first();if(!row)throw Error('Task not claimed by this agent');await audit(env,actor,name,row.id,'accepted');return result({id:row.id,state:row.state})}
+if(name==='shards_task_claim'){
+  if(!/^[0-9a-f-]{36}$/.test(args.task_id))throw Error('Invalid task ID');
+  const mutation=env.EDGE_DB.prepare("UPDATE agent_tasks SET state='claimed',claimed_at=? WHERE id=? AND tenant_id=? AND assignee_id=? AND state='queued' RETURNING id,title,input_json,state")
+    .bind(new Date().toISOString(),args.task_id,actor.tenant_id,actor.id);
+  const out=await auditedMutation(env,mutation,auditForTransition(env,actor,name,args.task_id));
+  const row=out.results?.[0];
+  if(!row)throw Error('Task unavailable, already claimed or not assigned');
+  return result({id:row.id,title:row.title,input:JSON.parse(row.input_json),state:row.state});
+}
+if(name==='shards_task_complete'){
+  if(!/^[0-9a-f-]{36}$/.test(args.task_id)||!args.result||typeof args.result!=='object'||Array.isArray(args.result)||JSON.stringify(args.result).length>3500)throw Error('Invalid task ID or result');
+  const mutation=env.EDGE_DB.prepare("UPDATE agent_tasks SET state='completed',completed_at=?,result_json=? WHERE id=? AND tenant_id=? AND assignee_id=? AND state='claimed' RETURNING id,state")
+    .bind(new Date().toISOString(),JSON.stringify(args.result),args.task_id,actor.tenant_id,actor.id);
+  const out=await auditedMutation(env,mutation,auditForTransition(env,actor,name,args.task_id));
+  const row=out.results?.[0];
+  if(!row)throw Error('Task not claimed by this agent');
+  return result({id:row.id,state:row.state});
+}
 if(name==='shards_audit_tail'){const r=await env.EDGE_DB.prepare('SELECT action,object_id,status,created_at FROM audit_events WHERE tenant_id=? AND agent_id=? ORDER BY created_at DESC LIMIT 20').bind(actor.tenant_id,actor.id).all();return result({events:r.results||[]})}
 return errorResult('Tool not implemented')}catch(e){return errorResult('DENIED: '+(e.message||'Operation failed'))}}
 async function mcp(request,env,signedIdentity=null){const origin=request.headers.get('origin');if(origin&&origin!==ORIGIN)return pub({error:'Invalid Origin'},403);if(request.method!=='POST')return plain('MCP supports POST JSON-RPC; GET SSE not implemented',405,'text/plain; charset=utf-8',{allow:'POST'});if(!request.headers.get('content-type')?.toLowerCase().startsWith('application/json'))return pub({error:'Content-Type application/json required'},415);const len=Number(request.headers.get('content-length')||0);if(len>16000)return pub({error:'Payload too large'},413);let req;try{const raw=await request.text();if(raw.length>16000)throw Error('Request oversized');req=JSON.parse(raw);if(Array.isArray(req)||typeof req!=='object'||req.jsonrpc!=='2.0'||typeof req.method!=='string'||req.method.length>80)throw Error('Malformed JSON-RPC')}catch(e){return pub(rpcError(null,-32700,'Invalid JSON-RPC request'),400)}
