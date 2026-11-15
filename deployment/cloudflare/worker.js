@@ -84,9 +84,25 @@ async function publicSource(url,maxChars){
   if(!url.startsWith('https://raw.githubusercontent.com/Shards-foundation/')&&!url.startsWith('https://api.github.com/repos/Shards-foundation/'))throw Error('Source not allowed');
   const response=await fetch(url,{headers:{accept:'application/json, text/plain;q=0.9','user-agent':'shards-mcp-edge'},redirect:'error',signal:AbortSignal.timeout(7000),cf:{cacheEverything:true,cacheTtl:300}});
   if(!response.ok)throw Error('Public source unavailable (HTTP '+response.status+')');
+  const byteLimit=Math.min(2400000,maxChars*3);
   const length=Number(response.headers.get('content-length')||0);
-  if(length>maxChars*3)throw Error('Public source too large');
-  const body=await response.text();
+  if(length>byteLimit)throw Error('Public source too large');
+  if(!response.body||typeof response.body.getReader!=='function')throw Error('Streaming public source unavailable');
+  const reader=response.body.getReader(),chunks=[];
+  let bytes=0;
+  try{
+    while(true){
+      const {done,value}=await reader.read();
+      if(done)break;
+      bytes+=value.byteLength;
+      if(bytes>byteLimit){await reader.cancel();throw Error('Public source too large')}
+      chunks.push(value);
+    }
+  }finally{reader.releaseLock()}
+  const buffer=new Uint8Array(bytes);
+  let offset=0;
+  for(const chunk of chunks){buffer.set(chunk,offset);offset+=chunk.byteLength}
+  const body=new TextDecoder('utf-8',{fatal:true}).decode(buffer);
   if(body.length>maxChars)throw Error('Public source exceeds bounded read limit');
   return body;
 }
@@ -117,7 +133,7 @@ async function publicResearchTool(name,args){
   }
   if(name==='shards_open_prs'){
     const url='https://api.github.com/repos/Shards-foundation/'+args.repository+'/pulls?state=open&per_page=10';
-    const arr=JSON.parse(await publicSource(url,75000));
+    const arr=JSON.parse(await publicSource(url,1200000));
     if(!Array.isArray(arr))throw Error('Unexpected public pull request response');
     return {repository:args.repository,pull_requests:arr.slice(0,10).map(p=>({number:p.number,title:String(p.title||'').slice(0,180),url:p.html_url,updated_at:p.updated_at,draft:Boolean(p.draft)})),warning:'Live public GitHub read-only metadata; no PR operation performed.'};
   }
