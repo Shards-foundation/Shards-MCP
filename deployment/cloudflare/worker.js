@@ -90,10 +90,21 @@ function auditForTransition(env,actor,action,taskId){
 }
 async function auditedMutation(env,mutation,auditStatement){
   if(typeof env.EDGE_DB?.batch!=='function')throw Error('Atomic D1 batch is unavailable');
-  const rows=await env.EDGE_DB.batch([mutation,auditStatement]);
+  let rows;
+  try{rows=await env.EDGE_DB.batch([mutation,auditStatement])}
+  catch(e){throw Error('Atomic mutation or audit unavailable')}
   if(!Array.isArray(rows)||rows.length!==2||rows.some(r=>r?.success===false)||rows[1]?.meta?.changes!==1)
-    throw Error('Atomic mutation/audit result not confirmed');
+    throw Error('Atomic mutation or audit unconfirmed');
   return rows[0];
+}
+async function classifyTaskWriteFailure(env,actor,taskId,expectedState,denialMessage){
+  // Retry/error classification is scoped by verified tenant AND assigned agent.
+  // A DB read failure never becomes a fabricated "task not found" conclusion.
+  let current;
+  try{current=await env.EDGE_DB.prepare('SELECT state FROM agent_tasks WHERE id=? AND tenant_id=? AND assignee_id=?')
+    .bind(taskId,actor.tenant_id,actor.id).first()}
+  catch(e){return Error('Atomic mutation or audit unavailable')}
+  return !current||current.state!==expectedState?Error(denialMessage):Error('Atomic mutation or audit unavailable');
 }
 async function budget(env,operation,max){const day=new Date().toISOString().slice(0,10);try{const r=await env.EDGE_DB.prepare('INSERT INTO route_budgets(window_key,operation,used) VALUES(?,?,1) ON CONFLICT(window_key,operation) DO UPDATE SET used=used+1 WHERE used<?').bind(day,operation,max).run();return r.meta?.changes===1}catch(e){return false}}
 function validateDNS(input){const domain=String(input.domain||'').toLowerCase().trim().replace(/\.$/,'');const type=input.type||'A';if(!/^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)||!['A','AAAA','TXT','MX','CAA'].includes(type))throw Error('Valid public domain and supported DNS record type required');return {domain,type}}
@@ -223,7 +234,9 @@ if(name==='shards_task_claim'){
   if(!/^[0-9a-f-]{36}$/.test(args.task_id))throw Error('Invalid task ID');
   const mutation=env.EDGE_DB.prepare("UPDATE agent_tasks SET state='claimed',claimed_at=? WHERE id=? AND tenant_id=? AND assignee_id=? AND state='queued' RETURNING id,title,input_json,state")
     .bind(new Date().toISOString(),args.task_id,actor.tenant_id,actor.id);
-  const out=await auditedMutation(env,mutation,auditForTransition(env,actor,name,args.task_id));
+  let out;
+  try{out=await auditedMutation(env,mutation,auditForTransition(env,actor,name,args.task_id))}
+  catch(e){throw await classifyTaskWriteFailure(env,actor,args.task_id,'queued','Task unavailable, already claimed or not assigned')}
   const row=out.results?.[0];
   if(!row)throw Error('Task unavailable, already claimed or not assigned');
   return result({id:row.id,title:row.title,input:JSON.parse(row.input_json),state:row.state});
@@ -232,7 +245,9 @@ if(name==='shards_task_complete'){
   if(!/^[0-9a-f-]{36}$/.test(args.task_id)||!args.result||typeof args.result!=='object'||Array.isArray(args.result)||JSON.stringify(args.result).length>3500)throw Error('Invalid task ID or result');
   const mutation=env.EDGE_DB.prepare("UPDATE agent_tasks SET state='completed',completed_at=?,result_json=? WHERE id=? AND tenant_id=? AND assignee_id=? AND state='claimed' RETURNING id,state")
     .bind(new Date().toISOString(),JSON.stringify(args.result),args.task_id,actor.tenant_id,actor.id);
-  const out=await auditedMutation(env,mutation,auditForTransition(env,actor,name,args.task_id));
+  let out;
+  try{out=await auditedMutation(env,mutation,auditForTransition(env,actor,name,args.task_id))}
+  catch(e){throw await classifyTaskWriteFailure(env,actor,args.task_id,'claimed','Task not claimed by this agent')}
   const row=out.results?.[0];
   if(!row)throw Error('Task not claimed by this agent');
   return result({id:row.id,state:row.state});
