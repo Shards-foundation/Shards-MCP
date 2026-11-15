@@ -28,6 +28,10 @@ The edge currently supports:
 - verified Cloudflare Access operator identity, scoped credentials, expiry and revocation
 - simple daily operation budgets and fixed-target passive DNS
 
+## Operator account and credential settings
+
+The operator-only account settings page provides profile/avatar, system/dark/light/high-contrast themes, read-only API and CLI keys, SSH public key storage and local account deletion. Password, provider login and MFA controls are **provider-managed**, not simulated. See [Account Settings](SETTINGS.md) for exact API contracts, D1 migration, deletion boundaries and release gates.
+
 ## Cloudflare configuration
 
 The live deployment is in the existing Shards-inc Cloudflare account. Keep control of hostname and zone in your Cloudflare dashboard, not in an agent's prompt.
@@ -189,6 +193,6 @@ Shards-MCP Edge now has a Slack-style **direct-conversation view of real D1 data
 
 ### Acceptance and rollback
 
-Run `node --check deployment/cloudflare/worker.js`, `node --test deployment/cloudflare/worker.test.mjs`, and `node --test deployment/cloudflare/workspace.test.mjs` as **separate commands**, as done in the passing Edge MCP live acceptance workflow. The source-only isolated tests do not certify a real signed browser session. GitHub's edge workflow also checks the official signed MCP SDK path. After a versioned deployment with **strict inheritance** of `EDGE_DB`, `ACCESS_TEAM`, `ACCESS_AUD`, `CONNECT_ACCESS_AUD`, verify the protected workspace redirects anonymous visitors and that the signed operator sees the live agent directory; send a genuinely authorised message and inspect its persisted MCP inbox before claiming a fully tested live send. Do **not** insert fake demo messages into production as a substitute for live evidence.
+Run `node --check deployment/cloudflare/worker.js`, `node --test deployment/cloudflare/worker.test.mjs`, `node --test deployment/cloudflare/workspace.test.mjs`, and `node --test deployment/cloudflare/settings.test.mjs` as **separate commands**, as done in the passing Edge MCP live acceptance workflow. The source-only isolated tests do not certify a real signed browser session. GitHub's edge workflow also checks the official signed MCP SDK path. After a versioned deployment with **strict inheritance** of `EDGE_DB`, `ACCESS_TEAM`, `ACCESS_AUD`, `CONNECT_ACCESS_AUD`, verify the protected workspace redirects anonymous visitors and that the signed operator sees the live agent directory; send a genuinely authorised message and inspect its persisted MCP inbox before claiming a fully tested live send. Do **not** insert fake demo messages into production as a substitute for live evidence.
 
-Rollback by restoring the pinned prior Worker version. The implementation uses existing D1 tables; no schema migration or token rotation is required. A previously stored operator message should remain durable after rollback, but the workspace UI and operator-composer route will disappear.
+For an account-settings Worker upgrade, back up the production EU D1 database and apply `deployment/cloudflare/migrations/0002_operator_settings.sql` **before** deployment. Verify `EDGE_DB`, `ACCESS_TEAM`, `ACCESS_AUD` and `CONNECT_ACCESS_AUD` map to the expected resources. Rollback restores the pinned prior Worker version without a further migration or token rotation; retain additive operator tables. A previously stored operator message should remain durable after rollback, but the workspace UI and operator-composer route will disappear.

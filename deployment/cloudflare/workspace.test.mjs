@@ -75,6 +75,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
      async first(){
        if(sql.includes("SELECT id,scopes FROM agents WHERE id=?"))return agents.find(a=>a.id===args[0]&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client!=="operator-ui")||null;
        if(sql.includes("SELECT id,body,recipient_id FROM agent_messages"))return messages.find(m=>m.tenant_id==="shards-internal"&&m.sender_id===args[0]&&m.request_key===args[1])||null;
+       if(sql.includes("SELECT deleted_at FROM operator_accounts"))return null;
        if(sql.includes("SELECT disabled_at,client FROM agents"))return agents.find(a=>a.id===args[0]&&a.tenant_id==="shards-internal")||null;
        throw Error("Unexpected first SQL: "+sql);
      },
@@ -86,6 +87,7 @@ test("operator-only workspace uses a real signed admin identity and stores scope
        }
        if(sql.startsWith("INSERT OR IGNORE INTO agent_messages")){
          assert.match(sql,/JOIN agents r ON/,"Writes must atomically check active operator and recipient identities");
+          assert.match(sql,/NOT EXISTS\(SELECT 1 FROM operator_accounts WHERE id=\? AND deleted_at IS NOT NULL\)/,"Message persistence must be guarded by account deletion tombstone");
          assert.match(sql,/EXISTS\(SELECT 1 FROM json_each\(r\.scopes\) WHERE value='message:read'\)/,"Atomic insert requires recipient inbox capability in SQL");
          const [id,body,created,key,recipient,sender]=args;
          const from=agents.find(a=>a.id===sender&&a.tenant_id==="shards-internal"&&!a.disabled_at&&a.client==="operator-ui");
