@@ -111,7 +111,7 @@ test("Message write and its audit share one D1 transaction; audit failure leaves
   const args={recipient_agent_id:recipient,body:"synthetic test",request_id:reqId};
   const denied=await runTool("shards_message_send",args,actor,env,request);
   assert.equal(denied.isError,true);
-  assert.match(denied.content[0].text,/Atomic mutation or audit unavailable/);
+  assert.match(denied.content[0].text,/^UNAVAILABLE: Atomic mutation or audit unavailable/);
   assert.doesNotMatch(denied.content[0].text,/INJECTED_AUDIT_D1_FAILURE|audit_events|D1_ERROR/);
   assert.equal(env.state.messages.length,0);
   assert.equal(env.state.audits.length,0);
@@ -180,7 +180,7 @@ test("Task claim audit failure cannot transition queued state",async()=>{
   const fail=makeDB({auditFailure:true,task:seededTask()});
   const denied=await runTool("shards_task_claim",{task_id:taskId},actor,fail,request);
   assert.equal(denied.isError,true);
-  assert.match(denied.content[0].text,/Atomic mutation or audit unavailable/);
+  assert.match(denied.content[0].text,/^UNAVAILABLE: Atomic mutation or audit unavailable/);
   assert.doesNotMatch(denied.content[0].text,/already claimed|not assigned|NOT NULL|D1_ERROR/);
   assert.equal(fail.state.tasks[0].state,"queued");
   assert.equal(fail.state.audits.length,0);
@@ -194,6 +194,7 @@ test("Task claim audit failure cannot transition queued state",async()=>{
   const lostRace=await runTool("shards_task_claim",{task_id:taskId},actor,ok,request);
   assert.equal(lostRace.isError,true);
   assert.match(lostRace.content[0].text,/Task unavailable, already claimed or not assigned/);
+  assert.match(lostRace.content[0].text,/^DENIED:/);
   assert.doesNotMatch(lostRace.content[0].text,/NOT NULL|D1_ERROR|audit_events/);
 });
 test("Task completion audit failure cannot transition claimed state",async()=>{
@@ -202,7 +203,7 @@ test("Task completion audit failure cannot transition claimed state",async()=>{
   const fail=makeDB({auditFailure:true,task:claimed});
   const denied=await runTool("shards_task_complete",args,actor,fail,request);
   assert.equal(denied.isError,true);
-  assert.match(denied.content[0].text,/Atomic mutation or audit unavailable/);
+  assert.match(denied.content[0].text,/^UNAVAILABLE: Atomic mutation or audit unavailable/);
   assert.doesNotMatch(denied.content[0].text,/not claimed|not assigned|NOT NULL|D1_ERROR/);
   assert.equal(fail.state.tasks[0].state,"claimed");
   assert.equal(fail.state.audits.length,0);
@@ -215,6 +216,7 @@ test("Task completion audit failure cannot transition claimed state",async()=>{
   const replay=await runTool("shards_task_complete",args,actor,ok,request);
   assert.equal(replay.isError,true);
   assert.match(replay.content[0].text,/Task not claimed by this agent/);
+  assert.match(replay.content[0].text,/^DENIED:/);
   assert.doesNotMatch(replay.content[0].text,/NOT NULL|D1_ERROR|audit_events/);
 });
 test("Write tools fail closed when the database lacks transactional batch",async()=>{
