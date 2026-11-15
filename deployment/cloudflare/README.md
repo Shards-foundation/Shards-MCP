@@ -192,3 +192,29 @@ Shards-MCP Edge now has a Slack-style **direct-conversation view of real D1 data
 Run `node --check deployment/cloudflare/worker.js`, `node --test deployment/cloudflare/worker.test.mjs`, and `node --test deployment/cloudflare/workspace.test.mjs` as **separate commands**, as done in the passing Edge MCP live acceptance workflow. The source-only isolated tests do not certify a real signed browser session. GitHub's edge workflow also checks the official signed MCP SDK path. After a versioned deployment with **strict inheritance** of `EDGE_DB`, `ACCESS_TEAM`, `ACCESS_AUD`, `CONNECT_ACCESS_AUD`, verify the protected workspace redirects anonymous visitors and that the signed operator sees the live agent directory; send a genuinely authorised message and inspect its persisted MCP inbox before claiming a fully tested live send. Do **not** insert fake demo messages into production as a substitute for live evidence.
 
 Rollback by restoring the pinned prior Worker version. The implementation uses existing D1 tables; no schema migration or token rotation is required. A previously stored operator message should remain durable after rollback, but the workspace UI and operator-composer route will disappear.
+
+
+## Reproducible Worker tests and final version-bound release gate
+
+**Pinned test runtime:** Node.js `22.16.0` (`deployment/cloudflare/.node-version`). Install/use that exact release to reproduce GitHub-hosted test results:
+
+```sh
+nvm install 22.16.0
+nvm use 22.16.0
+node --version
+node --test --test-reporter=tap deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs
+node --test deployment/cloudflare/verify_release_deployment.test.mjs
+# The workflow additionally runs signed workspace and official MCP SDK interoperability:
+node --test deployment/cloudflare/workspace.test.mjs
+npm install --prefix deployment/cloudflare --no-save --no-package-lock --ignore-scripts --audit=false --fund=false @modelcontextprotocol/sdk@1 zod@4
+node --test deployment/cloudflare/sdk.test.mjs
+python3 deployment/cloudflare/schema_migrations_test.py -v
+```
+
+`node --test` must report **zero failed and zero cancelled tests**. The browser's stalled-MCP regression awaits a deliberately pending promise until `AbortSignal.timeout()` fires. Node's abort timer is unref'd; therefore the test must start its referenced 1.5-second failure watchdog **before** awaiting the button handler. An unresolved test is a failure, not a pass. GitHub Actions enforces the full TAP summary using this pinned Node version: the Worker + audit combined suite must have **at least 27 tests**, every reported test must pass, and both failed and cancelled counts must equal zero. The additional workspace, SDK, release-verifier and SQLite migration test commands above reproduce the other Edge acceptance steps. Installing the official MCP SDK and Zod in the SDK step requires npm access but no paid service.
+
+**Post-deployment verification:** The separate `.github/workflows/edge-production-release-gate.yml` workflow (manually invoked only *after* an approved release) takes a `deployed_worker_version` UUID. It does **not** trust that UUID as evidence by itself. The workflow calls the read-only Cloudflare Workers Deployments API to check the actual latest `shards-mcp-edge` deployment is assigned to that exact version with 100% traffic. It separately checks Cloudflare's Worker Custom Domains API for `mcp.shardsinc.co.uk` mapped uniquely to the enabled production service. Both checks run before the live MCP tests; the deployment and route IDs are checked a second time afterward to catch a concurrent release. Only then are the exact seven public tools and nine protected tool declarations accepted. An undeployed three-tool site must FAIL the post-deployment workflow.
+
+**One-time CI authentication prerequisite:** A repository administrator must configure the GitHub Actions secret `SHARDS_CF_WORKERS_READ_TOKEN` with a narrowly scoped Cloudflare API token providing *read-only* access to Workers deployments and custom-domain routing for the existing account. Do not commit the credential, reuse an operator/agent token, or grant Worker/D1 write access merely to satisfy this gate. If the secret is missing, the verification fails closed. The existing account ID in the workflow is not a credential. The workflow does not change deployments, traffic percentages, domains, D1 or Access policies.
+
+**Evidence limitation:** Cloudflare deployment UUID verification identifies the running deployment, but does not independently prove that its uploaded source bytes equal the reviewed Git commit. Source-artifact hashes, D1 migration evidence, rollback capability and authenticated multi-agent E2E checks remain separate release approvals. The source-only PR's permissive three-or-seven-tool smoke tests are intentionally **not** the final release gate.

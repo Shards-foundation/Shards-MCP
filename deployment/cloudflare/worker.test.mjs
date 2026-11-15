@@ -281,7 +281,21 @@ test("A stalled MCP call is actually aborted on timeout rather than left pending
       });
     },
   });
-  await page.click("protocolRun");
+  // The button handler awaits the fetch and the fetch waits for
+  // AbortSignal.timeout(20). Node's AbortSignal timeout is unref'd.
+  // Start a referenced watchdog BEFORE awaiting the handler; otherwise
+  // Node can exit with cancelledByParent while the click promise is pending.
+  let watchdog;
+  try{
+    await Promise.race([
+      page.click("protocolRun"),
+      new Promise((_,reject)=>{
+        watchdog=setTimeout(()=>reject(Error("MCP abort failed to settle within 1500ms")),1500);
+      }),
+    ]);
+  }finally{
+    clearTimeout(watchdog);
+  }
   assert.ok(observedSignal, "Expected an in-flight MCP fetch");
   assert.equal(observedSignal.aborted,true, "MCP fetch signal must be aborted by the timeout");
   assert.match(page.element("outcome").textContent,/^FAIL/);
