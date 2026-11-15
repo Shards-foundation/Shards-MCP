@@ -1,0 +1,68 @@
+name: Shards MCP post-deployment release gate
+# This workflow is deliberately NOT part of source-only PR CI. Invoke after
+# deploying a reviewed, pinned Worker version; three-tool production MUST fail.
+on:
+  workflow_dispatch:
+    inputs:
+      deployed_worker_version:
+        description: "Actual deployed Cloudflare Worker version UUID (required evidence)"
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  live-seven-tool-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Validate release evidence and exact seven-tool discovery
+        env:
+          DEPLOYED_WORKER_VERSION: ${{ inputs.deployed_worker_version }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOYED_WORKER_VERSION" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || { echo "Missing version evidence"; exit 1; }
+          curl --fail --silent --show-error --retry 2 https://mcp.shardsinc.co.uk/api/status -o /tmp/mcp-status.json
+          curl --fail --silent --show-error --retry 2 -X POST https://mcp.shardsinc.co.uk/mcp \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            --data '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' -o /tmp/mcp-tools.json
+          node <<'NODE'
+          const status=require('/tmp/mcp-status.json');
+          const response=require('/tmp/mcp-tools.json');
+          const publicNames=['shards_gateway_status','shards_systems_catalog','shards_dns_lookup','shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'].sort();
+          const privateNames=['shards_agent_identity','shards_agents_list','shards_message_send','shards_message_inbox','shards_task_create','shards_task_inbox','shards_task_claim','shards_task_complete','shards_audit_tail'].sort();
+          const eql=(a,b)=>JSON.stringify([...a].sort())===JSON.stringify([...b].sort());
+          const declared=status.tools||[];
+          if(status.db!=='connected')throw Error('Production D1 not connected');
+          if(!eql(declared.filter(t=>t.public).map(t=>t.name),publicNames))throw Error('API status public tools not exactly seven');
+          if(!eql(declared.filter(t=>!t.public).map(t=>t.name),privateNames))throw Error('API status protected tools not exactly nine');
+          if(!eql((response.result?.tools||[]).map(t=>t.name),publicNames))throw Error('Unauthenticated discovery not exactly seven public tools');
+          console.log('PASS: seven exact public names, nine exact private names, no anonymous privileged discovery');
+          NODE
+      - name: Check four real public operations and private-tool denial
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const url='https://mcp.shardsinc.co.uk/mcp';
+          async function call(name,args){
+            const res=await fetch(url,{method:'POST',headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:name,method:'tools/call',params:{name,arguments:args}}),signal:AbortSignal.timeout(10000),redirect:'error'});
+            if(!res.ok)throw Error(name+' transport failed '+res.status);
+            return (await res.json()).result;
+          }
+          const tests=[
+            ['shards_skill_search',{query:'security',limit:2}],
+            ['shards_skill_read',{slug:'shards-sec-vibecoding-gate'}],
+            ['shards_repo_document',{repository:'Shards-MCP',document:'README.md'}],
+            ['shards_open_prs',{repository:'Shards-MCP'}]
+          ];
+          (async()=>{
+            for(const [name,args] of tests){
+              const out=await call(name,args);
+              if(out?.isError!==false || !out?.structuredContent)throw Error(name+' did not return live structured data');
+              console.log('PASS '+name);
+            }
+            const blocked=await call('shards_agent_identity',{});
+            if(blocked?.isError!==true||!blocked.content?.[0]?.text?.includes('AUTH_REQUIRED'))throw Error('Private tool exposed anonymously');
+            console.log('PASS private tool denial; release verification complete');
+          })().catch(err=>{console.error(err);process.exitCode=1});
+          NODE
