@@ -544,6 +544,16 @@ test("Public research returns bounded live-source results from fixed GitHub orig
   assert.equal(mixed.matched,2,"Imported skill with same search term must be filtered by default");
   const imports=await call("shards_skill_search",{query:"third-party",first_party_only:false});
   assert.equal(imports.skills[0].readable_by_shards_skill_read,false);
+  // Discovery of imported catalogue metadata must not authorise reading imported instructions.
+  const chargedBeforeDeniedRead=budgetWrites.length, fetchedBeforeDeniedRead=calls.length;
+  const blockedImport=await edge.fetch(post("tools/call",{
+    name:"shards_skill_read",arguments:{slug:"third-party-import"}
+  }),env);
+  const blockedBody=await blockedImport.json();
+  assert.equal(blockedBody.result.isError,true,"An imported skill must not be readable");
+  assert.match(blockedBody.result.content[0].text,/Invalid public research arguments/);
+  assert.equal(budgetWrites.length,chargedBeforeDeniedRead,"Denied import read must not charge D1 quota");
+  assert.equal(calls.length,fetchedBeforeDeniedRead,"Denied import read must not fetch SKILL.md");
   const longResult=await call("shards_skill_search",{query:"aaaa"});
   assert.equal(longResult.skills[0].slug,longSlug);
   assert.equal(longResult.skills[0].readable_by_shards_skill_read,true);
