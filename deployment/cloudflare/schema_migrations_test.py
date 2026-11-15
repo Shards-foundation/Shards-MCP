@@ -118,7 +118,10 @@ class ReconciledD1SQL(unittest.TestCase):
         upgraded.close()
         fresh.close()
 
-    def test_skill_schema_rejects_invalid_origin_digest_name_and_unicode_length(self):
+    def test_source_reconciled_skill_schema_keeps_existing_constraints(self):
+        # Mirrors the *deployed* pre-hardening table. Stronger checks must be
+        # applied through a separately reviewed forward D1 migration, not
+        # silently inserted into an idempotent CREATE TABLE IF NOT EXISTS.
         db = db_from_schema(FULL_SCHEMA)
         owner = "a" * 64
         db.execute(
@@ -139,15 +142,18 @@ class ReconciledD1SQL(unittest.TestCase):
         create_skill("valid-github")
         create_skill("valid-upload", source_type="upload", source_url=None)
         for bad_id, overrides in {
-            "blank-name": {"name": "   "},
-            "padded-short-name": {"name": "  A  "},
-            "empty-origin": {"source_url": ""},
-            "invalid-digest": {"digest": "z" * 64},
-            "nonhex-digest": {"digest": "a" * 63 + "!"},
-            "short-unicode": {"content": "# " + "😀" * 8},
+            "too-short-name": {"name": "A"},
+            "missing-github-origin": {"source_url": None},
+            "invalid-source-type": {"source_type": "external"},
+            "upload-with-origin": {"source_type": "upload"},
+            "short-content": {"content": "# short"},
         }.items():
             with self.subTest(case=bad_id), self.assertRaises(sqlite3.IntegrityError):
-                create_skill(bad_id, **overrides)
+                if bad_id == "upload-with-origin":
+                    create_skill(bad_id, source_type="upload",
+                                 source_url="https://example.com")
+                else:
+                    create_skill(bad_id, **overrides)
         self.assertEqual(
             db.execute("SELECT COUNT(*) FROM operator_skills").fetchone()[0], 2
         )
