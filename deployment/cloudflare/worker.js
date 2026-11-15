@@ -91,7 +91,7 @@ async function publicSource(url,maxChars){
   return body;
 }
 async function skillIndex(){
-  const j=JSON.parse(await publicSource(SHARDS_SKILL_INDEX,100000));
+  const j=JSON.parse(await publicSource(SHARDS_SKILL_INDEX,240000));
   if(!j||!Array.isArray(j.skill_paths)||j.skill_paths.length>1500||!j.skill_paths.every(p=>typeof p==='string'&&/^skills\/[a-z0-9-]{2,100}$/.test(p)))throw Error('Invalid remote skill catalogue');
   return j;
 }
