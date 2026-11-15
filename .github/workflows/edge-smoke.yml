@@ -31,8 +31,24 @@ jobs:
           }
           console.log('Worker and all 8 client setup modules parse correctly');
           NODE
-      - name: Isolated edge protocol and quota regression tests
-        run: node --test deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs
+      - name: Isolated pre-deployment edge regression — no cancelled tests
+        run: |
+          set -euo pipefail
+          node --test --test-reporter=tap deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs | tee /tmp/shards-edge-tests.tap
+          node <<'NODE'
+          const fs = require('node:fs');
+          const tap = fs.readFileSync('/tmp/shards-edge-tests.tap','utf8');
+          const metric = name => {
+            const match = tap.match(new RegExp('^# '+name+' (\\\\d+)$','m'));
+            if (!match) throw Error('Missing TAP summary field: '+name);
+            return Number(match[1]);
+          };
+          const tests=metric('tests'),passed=metric('pass'),failed=metric('fail'),cancelled=metric('cancelled');
+          if (tests < 27 || passed !== tests || failed !== 0 || cancelled !== 0) {
+            throw Error('Worker regression incomplete: '+JSON.stringify({tests,passed,failed,cancelled}));
+          }
+          console.log('Strict Worker regressions PASS: '+tests+' passed, zero failed or cancelled.');
+          NODE
       - name: SQLite schema migration parity and fail-closed audit transactions
         run: python3 deployment/cloudflare/schema_migrations_test.py -v
       - name: Signed operator workspace and real messaging regression
