@@ -282,6 +282,16 @@ test("A stalled MCP call is actually aborted on timeout rather than left pending
     },
   });
   await page.click("protocolRun");
+  // AbortSignal.timeout() uses an unref'd timer in Node, which cannot keep the
+  // event loop alive by itself. Without a referenced wait, Node's test runner
+  // can report this test as "cancelledByParent" and cancel subsequent tests.
+  // Poll with a referenced timer and a finite deadline so both a stalled abort
+  // and an early runtime shutdown become deterministic failures.
+  const deadline=Date.now()+1200;
+  while(Date.now()<deadline &&
+        (!observedSignal?.aborted || page.element("protocolRun").disabled)){
+    await new Promise(resolve=>setTimeout(resolve,10));
+  }
   assert.ok(observedSignal, "Expected an in-flight MCP fetch");
   assert.equal(observedSignal.aborted,true, "MCP fetch signal must be aborted by the timeout");
   assert.match(page.element("outcome").textContent,/^FAIL/);
