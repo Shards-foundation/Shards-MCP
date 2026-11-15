@@ -39,7 +39,7 @@ jobs:
           const fs = require('node:fs');
           const tap = fs.readFileSync('/tmp/shards-edge-tests.tap','utf8');
           const metric = name => {
-            const match = tap.match(new RegExp('^# '+name+' (\\\\d+)$','m'));
+            const match = tap.match(new RegExp('^# '+name+' ([0-9]+)$','m'));
             if (!match) throw Error('Missing TAP summary field: '+name);
             return Number(match[1]);
           };
