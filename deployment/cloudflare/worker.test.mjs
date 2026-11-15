@@ -137,7 +137,8 @@ test("Lab diagnostics do not require credentials; protected MCP tools still fail
   const discovery = await worker.fetch(post("tools/list"), {});
   const listed = (await discovery.json()).result.tools.map(x => x.name);
   assert.deepEqual(Array.from(listed), [
-    "shards_gateway_status", "shards_systems_catalog", "shards_dns_lookup"
+    "shards_gateway_status", "shards_systems_catalog", "shards_dns_lookup",
+    "shards_skill_search", "shards_skill_read", "shards_repo_document", "shards_open_prs"
   ]);
   const forbidden = await worker.fetch(post("tools/call", {name:"shards_task_create", arguments:{}}), {});
   const body = await forbidden.json();
@@ -313,7 +314,7 @@ test("Managed OAuth endpoint fails closed without configuration or signed Access
   const fake=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":"invalid.jwt.token"}}),configured);
   assert.equal(fake.status,401);
   const oldPublic=await worker.fetch(post("tools/list"),configured);
-  assert.equal((await oldPublic.json()).result.tools.length,3);
+  assert.equal((await oldPublic.json()).result.tools.length,7);
 });
 
 test("Separate signed Cloudflare identity can discover only public and session tools", async () => {
@@ -363,7 +364,8 @@ test("Separate signed Cloudflare identity can discover only public and session t
     const list=await worker.fetch(signedPost("tools/list",{},good),env);
     const visible=(await list.json()).result.tools.map(x=>x.name);
     assert.deepEqual(Array.from(visible),[
-      "shards_gateway_status","shards_systems_catalog","shards_dns_lookup","shards_user_identity"
+      "shards_gateway_status","shards_systems_catalog","shards_dns_lookup",
+      "shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs","shards_user_identity"
     ]);
     const identity=await worker.fetch(signedPost("tools/call",{name:"shards_user_identity",arguments:{}},good),env);
     const own=(await identity.json()).result.structuredContent;
@@ -483,4 +485,119 @@ test("Unauthenticated connect origin exposes discoverable metadata without grant
   assert.match(r.headers.get("www-authenticate"),/realm="shards-mcp-connect"/);
   assert.match(r.headers.get("www-authenticate"),/resource_metadata="https:\/\/mcp\.shardsinc\.co\.uk\/\.well-known\/cloudflare-access-protected-resource\/connect"/);
   assert.deepEqual(await r.json(),{error:"Cloudflare Access authentication required"},"The 401 response is a generic challenge, not a user-profile disclosure");
+});
+
+
+test("Public research tools are discoverable, and private task tools remain hidden", async () => {
+  const response=await worker.fetch(post("tools/list"),{});
+  const names=(await response.json()).result.tools.map(t=>t.name);
+  for(const name of ["shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs"])assert.ok(names.includes(name),name);
+  assert.equal(names.length,7);
+  assert.equal(names.includes("shards_task_create"),false);
+});
+
+test("Public research rejects traversal, arbitrary repos and malformed searches before budgets or network", async () => {
+  const invalid=[
+    {name:"shards_skill_read",arguments:{slug:"../private"}},
+    {name:"shards_skill_read",arguments:{slug:"shards-../SECRET"}},
+    {name:"shards_skill_search",arguments:{query:""}},
+    {name:"shards_skill_search",arguments:{query:"security",limit:100}},
+    {name:"shards_repo_document",arguments:{repository:"other-org/private",document:"README.md"}},
+    {name:"shards_repo_document",arguments:{repository:"Shards-MCP",document:"../../.env"}},
+    {name:"shards_open_prs",arguments:{repository:"somebody-else"}}
+  ];
+  let dbHits=0;
+  const env={EDGE_DB:{prepare(){dbHits++;throw Error("Malformed arguments must not consume D1 quota");}}};
+  for(const params of invalid){
+    const response=await worker.fetch(post("tools/call",params),env);
+    const data=await response.json();
+    assert.equal(data.result.isError,true,params.name);
+    assert.match(data.result.content[0].text,/Invalid public research arguments/);
+  }
+  assert.equal(dbHits,0);
+});
+
+test("Public research returns bounded live-source results from fixed GitHub origins", async () => {
+  const calls=[],budgetWrites=[];
+  const longSlug="shards-"+"a".repeat(93);
+  const index={version:"test",skill_paths:["skills/shards-sec-vibecoding-gate","skills/shards-agent-onboarding","skills/third-party-import","skills/third-party-vibecoding","skills/"+longSlug]};
+  const mockFetch=async (url,options)=>{
+    calls.push({url:String(url),options});
+    const headers={"content-type":"application/json"};
+    if(String(url).endsWith("/catalogue/catalogue.json"))return new Response(JSON.stringify(index),{status:200,headers});
+    if(String(url).endsWith("/skills/shards-sec-vibecoding-gate/SKILL.md"))return new Response("# Real instructions, not executed",{status:200,headers:{"content-type":"text/plain"}});
+    if(String(url).endsWith("/skills/"+longSlug+"/SKILL.md"))return new Response("# Readable long first-party slug\n"+"x".repeat(24000),{status:200,headers:{"content-type":"text/plain"}});
+    if(String(url).endsWith("/Shards-MCP/main/AGENTS.md"))return new Response("# Agent rules",{status:200,headers:{"content-type":"text/plain"}});
+    if(String(url).includes("/pulls?"))return new Response(JSON.stringify(Array.from({length:11},(_,i)=>({number:42+i,title:"Add tests "+i,body:"long-review-description".repeat(1200),html_url:"https://github.com/Shards-foundation/Shards-MCP/pull/"+(42+i),updated_at:"2026-11-15T00:00:00Z",draft:false}))),{status:200,headers});
+    throw Error("Unexpected upstream URL: "+url);
+  };
+  const fake={Request,Response,Headers,URL,TextEncoder,TextDecoder,crypto:webcrypto,AbortSignal,atob,fetch:mockFetch};
+  vm.runInNewContext(src.replace("export default {", "globalThis.__edge = {"),fake,{filename:"worker.js"});
+  const edge=fake.__edge;
+  const env={EDGE_DB:{prepare(sql){assert.match(sql,/route_budgets/);return {bind(...values){budgetWrites.push(values);return {run:async()=>({meta:{changes:1}})};}};}}};
+  async function call(name,args){const r=await edge.fetch(post("tools/call",{name,arguments:args}),env);const j=await r.json();assert.equal(j.result.isError,false,JSON.stringify(j.result));return j.result.structuredContent;}
+  const results=await call("shards_skill_search",{query:"vibecoding"});
+  assert.equal(results.matched,1);
+  assert.equal(results.skills[0].slug,"shards-sec-vibecoding-gate");
+  assert.equal(results.skills[0].readable_by_shards_skill_read,true);
+  const mixed=await call("shards_skill_search",{query:"vibecoding",first_party_only:false});
+  assert.equal(mixed.matched,2,"Imported skill with same search term must be filtered by default");
+  const imports=await call("shards_skill_search",{query:"third-party",first_party_only:false});
+  assert.equal(imports.skills[0].readable_by_shards_skill_read,false);
+  // Discovery of imported catalogue metadata must not authorise reading imported instructions.
+  const chargedBeforeDeniedRead=budgetWrites.length, fetchedBeforeDeniedRead=calls.length;
+  const blockedImport=await edge.fetch(post("tools/call",{
+    name:"shards_skill_read",arguments:{slug:"third-party-import"}
+  }),env);
+  const blockedBody=await blockedImport.json();
+  assert.equal(blockedBody.result.isError,true,"An imported skill must not be readable");
+  assert.match(blockedBody.result.content[0].text,/Invalid public research arguments/);
+  assert.equal(budgetWrites.length,chargedBeforeDeniedRead,"Denied import read must not charge D1 quota");
+  assert.equal(calls.length,fetchedBeforeDeniedRead,"Denied import read must not fetch SKILL.md");
+  const longResult=await call("shards_skill_search",{query:"aaaa"});
+  assert.equal(longResult.skills[0].slug,longSlug);
+  assert.equal(longResult.skills[0].readable_by_shards_skill_read,true);
+  const longRead=await call("shards_skill_read",{slug:longSlug});
+  assert.match(longRead.content,/Readable long/);
+  assert.equal(longRead.content.length,20000);
+  assert.equal(longRead.truncated,true);
+  const read=await call("shards_skill_read",{slug:"shards-sec-vibecoding-gate"});
+  assert.match(read.content,/Real instructions/);
+  assert.equal(read.truncated,false);
+  const doc=await call("shards_repo_document",{repository:"Shards-MCP",document:"AGENTS.md"});
+  assert.equal(doc.content,"# Agent rules");
+  const prs=await call("shards_open_prs",{repository:"Shards-MCP"});
+  assert.equal(prs.pull_requests[0].number,42);
+  assert.equal(prs.pull_requests.length,10,"GitHub responses with eleven PRs must truncate to ten metadata entries");
+  assert.equal('body' in prs.pull_requests[0],false,"PR bodies must never be returned");
+  assert.ok(calls.every(c=>c.url.startsWith("https://raw.githubusercontent.com/Shards-foundation/")||c.url.startsWith("https://api.github.com/repos/Shards-foundation/")));
+  assert.ok(calls.every(c=>c.options.redirect==="error"));
+  assert.ok(calls.every(c=>c.options.signal instanceof AbortSignal),"Each upstream request requires a timeout signal");
+  assert.ok(calls.every(c=>c.options.cf?.cacheEverything===true&&c.options.cf?.cacheTtl===300),"All public reads must enable bounded caching");
+  assert.equal(budgetWrites.length,16,"Eight valid public calls must each charge caller and global D1 budgets");
+  assert.equal(budgetWrites.filter(v=>String(v[1]).startsWith("public:")).length,8);
+  assert.equal(budgetWrites.filter(v=>["shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs"].includes(v[1])).length,8);
+});
+
+
+test("Public read streaming limit cancels an oversized source with no content-length", async () => {
+  let cancelled=false,requested=false;
+  const stream=new ReadableStream({
+    start(controller){controller.enqueue(new Uint8Array(400000));},
+    cancel(){cancelled=true;}
+  });
+  const mockFetch=async (url)=>{
+    requested=true;
+    assert.equal(String(url),"https://raw.githubusercontent.com/Shards-foundation/Shards-MCP/main/README.md");
+    return new Response(stream,{status:200,headers:{"content-type":"text/plain"}});
+  };
+  const fake={Request,Response,Headers,URL,TextEncoder,TextDecoder,crypto:webcrypto,AbortSignal,atob,fetch:mockFetch};
+  vm.runInNewContext(src.replace("export default {", "globalThis.__edge = {"),fake,{filename:"worker.js"});
+  const env={EDGE_DB:{prepare(){return {bind(){return {run:async()=>({meta:{changes:1}})}}};}}};
+  const result=await fake.__edge.fetch(post("tools/call",{name:"shards_repo_document",arguments:{repository:"Shards-MCP"}}),env);
+  const json=await result.json();
+  assert.equal(requested,true);
+  assert.equal(json.result.isError,true);
+  assert.match(json.result.content[0].text,/Public source too large/);
+  assert.equal(cancelled,true,"Reader must cancel when the byte limit is crossed");
 });
