@@ -118,6 +118,41 @@ class ReconciledD1SQL(unittest.TestCase):
         upgraded.close()
         fresh.close()
 
+    def test_skill_schema_rejects_invalid_origin_digest_name_and_unicode_length(self):
+        db = db_from_schema(FULL_SCHEMA)
+        owner = "a" * 64
+        db.execute(
+            "INSERT INTO operator_accounts(id,created_at,updated_at) VALUES(?,?,?)",
+            (owner, "2026-11-15", "2026-11-15"),
+        )
+
+        def create_skill(skill_id, name="Valid skill", source_type="github",
+                         source_url="https://github.com/Shards-foundation/shards-skills",
+                         digest="a" * 64, content="# Test\\n" + "x" * 25):
+            db.execute(
+                "INSERT INTO operator_skills(id,owner_id,name,description,category,source_type,"
+                "source_url,content,content_sha256,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (skill_id, owner, name, "Description", "agents", source_type,
+                 source_url, content, digest, "2026-11-15"),
+            )
+
+        create_skill("valid-github")
+        create_skill("valid-upload", source_type="upload", source_url=None)
+        for bad_id, overrides in {
+            "blank-name": {"name": "   "},
+            "padded-short-name": {"name": "  A  "},
+            "empty-origin": {"source_url": ""},
+            "invalid-digest": {"digest": "z" * 64},
+            "nonhex-digest": {"digest": "a" * 63 + "!"},
+            "short-unicode": {"content": "# " + "😀" * 8},
+        }.items():
+            with self.subTest(case=bad_id), self.assertRaises(sqlite3.IntegrityError):
+                create_skill(bad_id, **overrides)
+        self.assertEqual(
+            db.execute("SELECT COUNT(*) FROM operator_skills").fetchone()[0], 2
+        )
+        db.close()
+
     def test_successful_task_transition_also_writes_audit(self):
         db = db_from_schema(FULL_SCHEMA)
         insert_queued_task(db)
