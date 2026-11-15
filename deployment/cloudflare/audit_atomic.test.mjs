@@ -18,7 +18,7 @@ const recipient="agent_recipient_00001";
 const taskId="11111111-1111-4111-8111-111111111111";
 const reqId="req-audit-0001";
 
-function makeDB({auditFailure=false,task=null,recipientScopes=['message:read','task:claim'],recipientActive=true,recipientClient='agent',parallelKind=null}={}){
+function makeDB({auditFailure=false,task=null,recipientScopes=['message:read','task:claim'],recipientActive=true,recipientClient='agent',recipientCreator='a'.repeat(64),operatorDeleted=false,parallelKind=null}={}){
   const state={messages:[],tasks:task?[structuredClone(task)]:[],audits:[],batches:[],standaloneMutations:0,attemptedEffects:0,barrierReads:0};
   let releaseBarrier;
   const barrier=new Promise(resolve=>{releaseBarrier=resolve;});
@@ -44,7 +44,12 @@ function makeDB({auditFailure=false,task=null,recipientScopes=['message:read','t
             assert.match(sql,/disabled_at IS NULL/,"Recipient/assignee lookup must require active principal");
             if(!recipientActive)return null;
             if(sql.includes("client!='operator-ui'")&&recipientClient==="operator-ui")return null;
-            return {id:params[0],scopes:recipientScopes==="INVALID_JSON"?"{broken":JSON.stringify(recipientScopes)};
+            return {id:params[0],scopes:recipientScopes==="INVALID_JSON"?"{broken":JSON.stringify(recipientScopes),
+              client:recipientClient,created_by:recipientCreator};
+          }
+          if(sql.startsWith("SELECT deleted_at FROM operator_accounts WHERE id=?")){
+            assert.equal(params[0],recipientCreator);
+            return operatorDeleted?{deleted_at:"2026-11-15T15:00:00Z"}:null;
           }
           if(sql.includes("FROM agent_messages")){
             const row=state.messages.find(m=>m.tenant_id===params[0]&&m.sender_id===params[1]&&m.request_key===params[2])||null;
@@ -162,6 +167,26 @@ test("Cannot send a message to a recipient without message:read",async()=>{
   assert.equal(denied.isError,true);
   assert.equal(disabled.state.batches.length,0);
 });
+test("Agent may reply to the canonical, active human-operator workspace principal",async()=>{
+  const owner="a".repeat(64),operatorId="operator_"+owner.slice(0,32);
+  const args={recipient_agent_id:operatorId,body:"Reply to human operator",request_id:reqId};
+  const env=makeDB({recipientClient:"operator-ui",recipientCreator:owner,recipientScopes:[]});
+  const accepted=await runTool("shards_message_send",args,actor,env,request);
+  assert.equal(accepted.isError,false,"Operator signed workspace is a valid alternative inbox");
+  assert.equal(env.state.messages.length,1);
+  assert.equal(env.state.messages[0].recipient_id,operatorId);
+  assert.equal(env.state.audits.length,1);
+  const wrongOwner=makeDB({recipientClient:"operator-ui",recipientCreator:"b".repeat(64),recipientScopes:[]});
+  const spoofed=await runTool("shards_message_send",args,actor,wrongOwner,request);
+  assert.equal(spoofed.isError,true,"User-labelled operator principal must not bypass scope checks");
+  assert.match(spoofed.content[0].text,/RECIPIENT_SCOPE_DENIED/);
+  assert.equal(wrongOwner.state.batches.length,0);
+  const tombstone=makeDB({recipientClient:"operator-ui",recipientCreator:owner,operatorDeleted:true});
+  const revoked=await runTool("shards_message_send",args,actor,tombstone,request);
+  assert.equal(revoked.isError,true,"Deleted operator cannot receive private replies");
+  assert.equal(tombstone.state.batches.length,0);
+});
+
 test("Cannot create a task for an assignee lacking task:claim",async()=>{
   const args={assignee_agent_id:recipient,title:"Synthetic task",input:{review:"only"},request_id:reqId};
   for(const scopes of [[],["task:read"],["message:read"],"INVALID_JSON",null]){
