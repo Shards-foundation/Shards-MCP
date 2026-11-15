@@ -518,15 +518,15 @@ test("Public research rejects traversal, arbitrary repos and malformed searches 
 });
 
 test("Public research returns bounded live-source results from fixed GitHub origins", async () => {
-  const calls=[];
+  const calls=[],budgetWrites=[];
   const longSlug="shards-"+"a".repeat(93);
-  const index={version:"test",skill_paths:["skills/shards-sec-vibecoding-gate","skills/shards-agent-onboarding","skills/third-party-import","skills/"+longSlug]};
+  const index={version:"test",skill_paths:["skills/shards-sec-vibecoding-gate","skills/shards-agent-onboarding","skills/third-party-import","skills/third-party-vibecoding","skills/"+longSlug]};
   const mockFetch=async (url,options)=>{
     calls.push({url:String(url),options});
     const headers={"content-type":"application/json"};
     if(String(url).endsWith("/catalogue/catalogue.json"))return new Response(JSON.stringify(index),{status:200,headers});
     if(String(url).endsWith("/skills/shards-sec-vibecoding-gate/SKILL.md"))return new Response("# Real instructions, not executed",{status:200,headers:{"content-type":"text/plain"}});
-    if(String(url).endsWith("/skills/"+longSlug+"/SKILL.md"))return new Response("# Readable long first-party slug",{status:200,headers:{"content-type":"text/plain"}});
+    if(String(url).endsWith("/skills/"+longSlug+"/SKILL.md"))return new Response("# Readable long first-party slug\n"+"x".repeat(24000),{status:200,headers:{"content-type":"text/plain"}});
     if(String(url).endsWith("/Shards-MCP/main/AGENTS.md"))return new Response("# Agent rules",{status:200,headers:{"content-type":"text/plain"}});
     if(String(url).includes("/pulls?"))return new Response(JSON.stringify(Array.from({length:11},(_,i)=>({number:42+i,title:"Add tests "+i,body:"long-review-description".repeat(1200),html_url:"https://github.com/Shards-foundation/Shards-MCP/pull/"+(42+i),updated_at:"2026-11-15T00:00:00Z",draft:false}))),{status:200,headers});
     throw Error("Unexpected upstream URL: "+url);
@@ -534,12 +534,14 @@ test("Public research returns bounded live-source results from fixed GitHub orig
   const fake={Request,Response,Headers,URL,TextEncoder,TextDecoder,crypto:webcrypto,AbortSignal,atob,fetch:mockFetch};
   vm.runInNewContext(src.replace("export default {", "globalThis.__edge = {"),fake,{filename:"worker.js"});
   const edge=fake.__edge;
-  const env={EDGE_DB:{prepare(){return {bind(){return {run:async()=>({meta:{changes:1}})}}};}}};
+  const env={EDGE_DB:{prepare(sql){assert.match(sql,/route_budgets/);return {bind(...values){budgetWrites.push(values);return {run:async()=>({meta:{changes:1}})};}};}}};
   async function call(name,args){const r=await edge.fetch(post("tools/call",{name,arguments:args}),env);const j=await r.json();assert.equal(j.result.isError,false,JSON.stringify(j.result));return j.result.structuredContent;}
   const results=await call("shards_skill_search",{query:"vibecoding"});
   assert.equal(results.matched,1);
   assert.equal(results.skills[0].slug,"shards-sec-vibecoding-gate");
   assert.equal(results.skills[0].readable_by_shards_skill_read,true);
+  const mixed=await call("shards_skill_search",{query:"vibecoding",first_party_only:false});
+  assert.equal(mixed.matched,2,"Imported skill with same search term must be filtered by default");
   const imports=await call("shards_skill_search",{query:"third-party",first_party_only:false});
   assert.equal(imports.skills[0].readable_by_shards_skill_read,false);
   const longResult=await call("shards_skill_search",{query:"aaaa"});
@@ -547,8 +549,11 @@ test("Public research returns bounded live-source results from fixed GitHub orig
   assert.equal(longResult.skills[0].readable_by_shards_skill_read,true);
   const longRead=await call("shards_skill_read",{slug:longSlug});
   assert.match(longRead.content,/Readable long/);
+  assert.equal(longRead.content.length,20000);
+  assert.equal(longRead.truncated,true);
   const read=await call("shards_skill_read",{slug:"shards-sec-vibecoding-gate"});
   assert.match(read.content,/Real instructions/);
+  assert.equal(read.truncated,false);
   const doc=await call("shards_repo_document",{repository:"Shards-MCP",document:"AGENTS.md"});
   assert.equal(doc.content,"# Agent rules");
   const prs=await call("shards_open_prs",{repository:"Shards-MCP"});
@@ -557,6 +562,11 @@ test("Public research returns bounded live-source results from fixed GitHub orig
   assert.equal('body' in prs.pull_requests[0],false,"PR bodies must never be returned");
   assert.ok(calls.every(c=>c.url.startsWith("https://raw.githubusercontent.com/Shards-foundation/")||c.url.startsWith("https://api.github.com/repos/Shards-foundation/")));
   assert.ok(calls.every(c=>c.options.redirect==="error"));
+  assert.ok(calls.every(c=>c.options.signal instanceof AbortSignal),"Each upstream request requires a timeout signal");
+  assert.ok(calls.every(c=>c.options.cf?.cacheEverything===true&&c.options.cf?.cacheTtl===300),"All public reads must enable bounded caching");
+  assert.equal(budgetWrites.length,18,"Nine valid public calls must each charge caller and global D1 budgets");
+  assert.equal(budgetWrites.filter(v=>String(v[1]).startsWith("public:")).length,9);
+  assert.equal(budgetWrites.filter(v=>["shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs"].includes(v[1])).length,9);
 });
 
 
