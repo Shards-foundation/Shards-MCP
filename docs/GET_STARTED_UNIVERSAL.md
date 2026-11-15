@@ -141,6 +141,7 @@ The edge does not execute tasks, relay other providers' private APIs or move mon
 
 - Protected methods always require valid scoped identity, even when discoverable to anonymous MCP clients. D1 queries derive tenant and agent IDs exclusively from the validated bearer credential.
 - No arbitrary URL fetching: DNS tools use a fixed Cloudflare DNS-over-HTTPS endpoint, strict domain/type validation and response size limits.
+- Proposed public skill/repository tools use allowlisted Shards Foundation GitHub public origins only; redirects are denied, reads have a seven-second timeout, streaming response-size bounds and per-caller/global quotas. `shards_skill_read` returns a bounded 20,000-character preview and a `truncated` flag; imported third-party catalogue results are metadata-only.
 - Token values are never stored in plaintext in D1. Keys expire in 30 days and can be revoked.
 - This initial edge prototype enforces global and per-agent daily quotas but has **no independent per-IP WAF rules, zero-trust posture requirements or automated retention cron** yet.
 - Task claims do not have leasing, reconciliation of external effects, dual approval, signed audit anchor, or multi-host worker execution. The edge must not be marketed as a production-certified autonomous agent controller.
