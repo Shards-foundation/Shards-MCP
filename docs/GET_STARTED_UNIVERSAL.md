@@ -14,6 +14,12 @@ Public tools:
 - `shards_gateway_status` — real deployed edge service metadata.
 - `shards_systems_catalog` — real Shards R&D project and service URLs.
 - `shards_dns_lookup` — passive DNS via Cloudflare DoH for validated public domain names.
+- `shards_skill_search` — lexical discovery of first-party Shards Skills from the published catalogue; no scripts run.
+- `shards_skill_read` — read an exact first-party Shards skill instruction file from the public repository.
+- `shards_repo_document` — read an approved public Shards repository's README, AGENTS or SECURITY document.
+- `shards_open_prs` — list up to ten live public GitHub pull requests for approved Shards repositories.
+
+The four additional research tools remain **source-only until deployed**. They read fixed public GitHub origins and are not GitHub write permissions, private repository access, skill installation or agent authentication.
 
 ### Claude Desktop / Claude.ai
 
@@ -95,7 +101,7 @@ curl -sS https://mcp.shardsinc.co.uk/mcp \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"example","version":"1.0"}}}'
 ```
 
-Then call `tools/list`, then `tools/call` with `name` `shards_gateway_status`. The gateway exposes **12 tools total**, 3 public and 9 credential-protected.
+Then call `tools/list`, then `tools/call` with `name` `shards_gateway_status`. The proposed source supports **16 tools total**, 7 public and 9 credential-protected. The currently deployed Worker still exposes 3 public tools until the reviewed change is rolled out. MCP `tools/list` is authoritative.
 
 ## Operator-issued agent identity — real authentication
 
