@@ -79,8 +79,10 @@ async function authenticate(request,env,operation='mcp_request'){
 function auditForMatchingRow(env,actor,action,table,where,values){
   // 'table' and 'where' are hardcoded call-site constants, never model/user arguments.
   if(!['agent_messages','agent_tasks'].includes(table))throw Error('Unsupported audited row type');
-  const sql='INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) VALUES(?,(SELECT tenant_id FROM '+table+' WHERE '+where+'),?,?,(SELECT id FROM '+table+' WHERE '+where+'),?,?)';
-  return env.EDGE_DB.prepare(sql).bind(crypto.randomUUID(),...values,actor.id,action,...values,'recorded',new Date().toISOString());
+  // D1 batch statements share one SQLite connection; changes() refers to the
+  // preceding INSERT OR IGNORE. Only the first successful insertion emits an audit.
+  const sql='INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) SELECT ?,tenant_id,?,?,id,?,? FROM '+table+' WHERE '+where+' AND changes()=1';
+  return env.EDGE_DB.prepare(sql).bind(crypto.randomUUID(),actor.id,action,...values,'recorded',new Date().toISOString());
 }
 function auditForTransition(env,actor,action,taskId){
   // If the immediately preceding UPDATE changes zero rows, the NOT NULL tenant
@@ -88,14 +90,17 @@ function auditForTransition(env,actor,action,taskId){
   return env.EDGE_DB.prepare("INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) VALUES(?,CASE WHEN changes()=1 THEN ? ELSE NULL END,?,?,?,?,?)")
     .bind(crypto.randomUUID(),actor.tenant_id,actor.id,action,taskId,'accepted',new Date().toISOString());
 }
-async function auditedMutation(env,mutation,auditStatement){
+async function auditedMutation(env,mutation,auditStatement,allowIdempotentNoop=false){
   if(typeof env.EDGE_DB?.batch!=='function')throw Error('Atomic D1 batch is unavailable');
   let rows;
   try{rows=await env.EDGE_DB.batch([mutation,auditStatement])}
   catch(e){throw Error('Atomic mutation or audit unavailable')}
-  if(!Array.isArray(rows)||rows.length!==2||rows.some(r=>r?.success===false)||rows[1]?.meta?.changes!==1)
+  if(!Array.isArray(rows)||rows.length!==2||rows.some(r=>r?.success===false))
     throw Error('Atomic mutation or audit unconfirmed');
-  return rows[0];
+  const effectChanges=rows[0]?.meta?.changes,auditChanges=rows[1]?.meta?.changes;
+  if(effectChanges===1&&auditChanges===1)return rows[0];
+  if(allowIdempotentNoop&&effectChanges===0&&auditChanges===0)return rows[0];
+  throw Error('Atomic mutation or audit unconfirmed');
 }
 async function requireTaskState(env,actor,taskId,expectedState,denialMessage){
   // Perform a scoped precondition read for a deterministic ownership/state denial.
@@ -210,7 +215,7 @@ if(name==='shards_message_send'){
     .bind(id,actor.tenant_id,actor.id,args.recipient_agent_id,args.body,now,args.request_id);
   const where='tenant_id=? AND sender_id=? AND request_key=? AND body=? AND recipient_id=?';
   const auditRow=auditForMatchingRow(env,actor,name,'agent_messages',where,[actor.tenant_id,actor.id,args.request_id,args.body,args.recipient_agent_id]);
-  await auditedMutation(env,mutation,auditRow);
+  await auditedMutation(env,mutation,auditRow,true);
   const row=await env.EDGE_DB.prepare(query).bind(actor.tenant_id,actor.id,args.request_id).first();
   if(!row||row.body!==args.body||row.recipient_id!==args.recipient_agent_id)throw Error('Idempotency key conflict after concurrent insert');
   return result({id:row.id,delivered:true,idempotent:row.id!==id});
@@ -233,7 +238,7 @@ if(name==='shards_task_create'){
     .bind(id,actor.tenant_id,actor.id,args.assignee_agent_id,args.title,input,'queued',new Date().toISOString(),args.request_id);
   const where='tenant_id=? AND creator_id=? AND request_key=? AND title=? AND input_json=? AND assignee_id=?';
   const auditRow=auditForMatchingRow(env,actor,name,'agent_tasks',where,[actor.tenant_id,actor.id,args.request_id,args.title,input,args.assignee_agent_id]);
-  await auditedMutation(env,mutation,auditRow);
+  await auditedMutation(env,mutation,auditRow,true);
   const row=await env.EDGE_DB.prepare(query).bind(actor.tenant_id,actor.id,args.request_id).first();
   if(!row||row.title!==args.title||row.input_json!==input||row.assignee_id!==args.assignee_agent_id)throw Error('Task idempotency conflict after concurrent insert');
   return result({id:row.id,state:row.state,idempotent:row.id!==id});
