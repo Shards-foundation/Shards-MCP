@@ -18,7 +18,7 @@ const recipient="agent_recipient_00001";
 const taskId="11111111-1111-4111-8111-111111111111";
 const reqId="req-audit-0001";
 
-function makeDB({auditFailure=false,task=null}={}){
+function makeDB({auditFailure=false,task=null,recipientScopes=['message:read','task:claim'],recipientActive=true,recipientClient='agent'}={}){
   const state={messages:[],tasks:task?[structuredClone(task)]:[],audits:[],batches:[],standaloneMutations:0};
   const database={
     prepare(sql){return {bind(...params){
@@ -30,7 +30,13 @@ function makeDB({auditFailure=false,task=null}={}){
           throw Error("Protected writes must be batched");
         },
         async first(){
-          if(sql.startsWith("SELECT id FROM agents"))return {id:params[0]};
+          if(sql.startsWith("SELECT id,scopes FROM agents")){
+            assert.match(sql,/tenant_id=\?/,"Recipient/assignee lookup must be tenant-scoped");
+            assert.match(sql,/disabled_at IS NULL/,"Recipient/assignee lookup must require active principal");
+            if(!recipientActive)return null;
+            if(sql.includes("client!='operator-ui'")&&recipientClient==="operator-ui")return null;
+            return {id:params[0],scopes:recipientScopes==="INVALID_JSON"?"{broken":JSON.stringify(recipientScopes)};
+          }
           if(sql.includes("FROM agent_messages")){
             return state.messages.find(m=>m.tenant_id===params[0]&&m.sender_id===params[1]&&m.request_key===params[2])||null;
           }
@@ -117,6 +123,37 @@ test("Message write and its audit share one D1 transaction; audit failure leaves
   assert.equal(conflict.isError,true);
   assert.equal(ok.state.messages.length,1);
 });
+test("Cannot send a message to a recipient without message:read",async()=>{
+  const args={recipient_agent_id:recipient,body:"synthetic test",request_id:reqId};
+  for(const scopes of [[],["task:claim"],["message:send"],"INVALID_JSON",null]){
+    const env=makeDB({recipientScopes:scopes});
+    const denied=await runTool("shards_message_send",args,actor,env,request);
+    assert.equal(denied.isError,true,"Recipient scopes "+JSON.stringify(scopes));
+    assert.match(denied.content[0].text,/RECIPIENT_SCOPE_(DENIED|INVALID)/);
+    assert.equal(env.state.batches.length,0,"Denied recipient must never start a write");
+    assert.equal(env.state.messages.length,0);
+    assert.equal(env.state.audits.length,0);
+  }
+  const disabled=makeDB({recipientActive:false});
+  const denied=await runTool("shards_message_send",args,actor,disabled,request);
+  assert.equal(denied.isError,true);
+  assert.equal(disabled.state.batches.length,0);
+});
+test("Cannot create a task for an assignee lacking task:claim",async()=>{
+  const args={assignee_agent_id:recipient,title:"Synthetic task",input:{review:"only"},request_id:reqId};
+  for(const scopes of [[],["task:read"],["message:read"],"INVALID_JSON",null]){
+    const env=makeDB({recipientScopes:scopes});
+    const denied=await runTool("shards_task_create",args,actor,env,request);
+    assert.equal(denied.isError,true,"Assignee scopes "+JSON.stringify(scopes));
+    assert.match(denied.content[0].text,/ASSIGNEE_SCOPE_(DENIED|INVALID)/);
+    assert.equal(env.state.batches.length,0,"Unclaimable task must not be queued");
+    assert.equal(env.state.tasks.length,0);
+    assert.equal(env.state.audits.length,0);
+  }
+  const operator=makeDB({recipientClient:"operator-ui"});
+  assert.equal((await runTool("shards_task_create",args,actor,operator,request)).isError,true);
+  assert.equal(operator.state.batches.length,0);
+});
 test("Task create audit rollback and idempotent replay",async()=>{
   const args={assignee_agent_id:recipient,title:"Synthetic task",input:{review:"only"},request_id:reqId};
   const fail=makeDB({auditFailure:true});
@@ -134,6 +171,8 @@ test("Task claim audit failure cannot transition queued state",async()=>{
   const fail=makeDB({auditFailure:true,task:seededTask()});
   const denied=await runTool("shards_task_claim",{task_id:taskId},actor,fail,request);
   assert.equal(denied.isError,true);
+  assert.match(denied.content[0].text,/Atomic mutation or audit unavailable/);
+  assert.doesNotMatch(denied.content[0].text,/already claimed|not assigned|NOT NULL|D1_ERROR/);
   assert.equal(fail.state.tasks[0].state,"queued");
   assert.equal(fail.state.audits.length,0);
   const ok=makeDB({task:seededTask()});
@@ -151,7 +190,10 @@ test("Task completion audit failure cannot transition claimed state",async()=>{
   const claimed={...seededTask(),state:"claimed"};
   const args={task_id:taskId,result:{done:true}};
   const fail=makeDB({auditFailure:true,task:claimed});
-  assert.equal((await runTool("shards_task_complete",args,actor,fail,request)).isError,true);
+  const denied=await runTool("shards_task_complete",args,actor,fail,request);
+  assert.equal(denied.isError,true);
+  assert.match(denied.content[0].text,/Atomic mutation or audit unavailable/);
+  assert.doesNotMatch(denied.content[0].text,/not claimed|not assigned|NOT NULL|D1_ERROR/);
   assert.equal(fail.state.tasks[0].state,"claimed");
   assert.equal(fail.state.audits.length,0);
   const ok=makeDB({task:claimed});
