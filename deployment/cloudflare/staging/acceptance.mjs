@@ -15,7 +15,7 @@ export async function accept({base,faultBase,fixtures,approval,fetchImpl=fetch,r
     catch(e){results.push({case:name,status:e instanceof GateBlocked?'BLOCKED':'FAIL',evidence:e instanceof GateFailure?e.message:e instanceof GateBlocked?e.message:'UNEXPECTED_RESPONSE_OR_HARNESS_ERROR'});}
   };
   const request=async(origin,url,options={})=>{
-    let response;try{response=await fetchImpl(origin+url,{...options,redirect:'manual',signal:AbortSignal.timeout(8000)});}catch{throw new GateBlocked();}
+    let response;try{response=await fetchImpl(origin+url,{...options,redirect:'manual',signal:AbortSignal.timeout(8000)});}catch{throw new GateBlocked('TRANSPORT_UNAVAILABLE');}
     const reader=response.body?.getReader();let text='',size=0;
     if(reader){const decoder=new TextDecoder();while(true){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>32000){await reader.cancel();throw new GateFailure('RESPONSE_LIMIT');}text+=decoder.decode(part.value,{stream:true});}text+=decoder.decode();}
     let body;try{body=JSON.parse(text);}catch{}

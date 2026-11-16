@@ -114,3 +114,19 @@ test('builder CLI requires explicit approval and writes disabled configs with ex
     assert.deepEqual(fs.readdirSync(path.join(dir,'main')),['worker.js']);assert.deepEqual(fs.readdirSync(path.join(dir,'fault')),['worker.js']);
   }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+test('network and timeout failures preserve TRANSPORT_UNAVAILABLE without leaking diagnostics',async()=>{
+  for(const kind of ['network','timeout']){
+    const f=fixtures(),a=localApproval();let requests=0;
+    const diagnostic='sensitive diagnostic '+f.agents[0].token;
+    const error=kind==='network'?new Error(diagnostic):new DOMException(diagnostic,'TimeoutError');
+    const report=await accept({approval:a,base:a.workers[0].origin,fixtures:f,localRuntime:true,fetchImpl:async()=>{requests++;throw error;}});
+    assert.equal(requests,1);
+    const blocked=report.results.find(r=>r.case==='supplementary worker manifest');
+    assert.equal(blocked?.status==='BLOCKED',true);
+    assert.equal(blocked?.evidence==='TRANSPORT_UNAVAILABLE',true,'Expected the static transport reason code');
+    const receipt=JSON.stringify(report);
+    assert.equal(receipt.includes(error.message),false);
+    assert.equal(f.agents.some(a=>receipt.includes(a.token)),false);
+  }
+});

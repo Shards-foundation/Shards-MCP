@@ -96,8 +96,55 @@ PR; expected artifact digests can be reproduced with the local builder.
 
 This is **FAIL deployed-artifact identity**, not permission to adopt the observed
 hash or redeploy. Both versions, disabled URLs and resources remain unchanged.
-Investigate the exact uploaded bytes independently in a separate authorized review.
-No hosted bearer requests or D1 mutations were performed here.
+The read-only comparison below identifies the divergence; no hosted bearer request,
+D1 mutation, hash approval change or deployment was performed.
+
+
+### Independent artifact comparison at reviewed head e509fb4
+
+The exact builder modules were checked against reviewed commit
+`e509fb4d04ed54eca838c008d2992fa77555d15e` before generating expected bytes for
+the protected approved target. Cloudflare's authenticated script-download API
+supplied the deployed multipart payloads. Active deployment/version and binding
+metadata matched the approved profile and stayed unchanged before/after download;
+both public URLs and previews remained disabled. No Worker manifest endpoint was
+used as identity evidence.
+
+| Byte comparison | Main | Fault |
+| --- | --- | --- |
+| Expected bytes | 226,065 | 226,154 |
+| Downloaded module bytes | 226,050 | 226,139 |
+| First divergent byte (zero-based) | 225,500 | 225,565 |
+| First divergent builder/module line (one-based) | 860 | 860 |
+| First expected / observed byte | space / `c` | space / `c` |
+| Observed edit groups in wrapper | 8 | 9 |
+
+The first divergence is the second indentation space before `const u`: the builder
+has two spaces, the deployed wrapper has one. Later wrapper statements have been
+joined onto one line, and the final newline is missing. Every observed edit is
+whitespace in the appended staging wrapper; the preceding transformed candidate
+source and manifest bytes are identical. Wrapper lexical token streams also match.
+A separate Python MIME parser reproduced the same extracted bytes as the strict
+Node parser, ruling out multipart framing as the observed difference.
+
+Likely cause: an upload built from a separately reconstructed/reformatted wrapper,
+rather than the builder's exact output file. Whole-module esbuild rewriting is not
+supported by this comparison because the candidate-code prefix is unchanged. The
+uploader's actual procedure was not observed, so that procedural cause remains an
+inference. No semantic or deployment approval follows from token equality.
+
+Raw downloads, full diffs, identities and hash receipts stay in protected, ignored
+`work/` files. The approved hashes and strict byte comparison are unchanged:
+**FAIL deployed-artifact identity** remains the hosted outcome.
+
+### Transport BLOCKED evidence correction
+
+A fetch rejection now throws `GateBlocked('TRANSPORT_UNAVAILABLE')`, preserving the
+static reason through the existing receipt recorder. A regression injects both a
+network error and timeout, requires exact BLOCKED evidence, verifies that the run
+stops after the failed manifest request, and checks that raw diagnostics and
+synthetic tokens are absent from the report. It failed with empty evidence against
+e509fb4 and passes with the correction.
 
 ## Exact local commands
 
@@ -219,10 +266,10 @@ required; no merge/deploy decision follows from this gate.
 
 ### Correction verification receipt
 
-Node 22.16.0, clean `npm ci` using the committed lock: **21 staging tests PASS**,
+Node 22.16.0, clean `npm ci` using the committed lock: **22 staging tests PASS**,
 zero failed/cancelled/skipped. This includes the six independently killed SQL
 mutations, exact denial rejection, independent API identity/race tests, protected
-fixture ignore, builder CLI, pin failure and transport-limit tests. The local
+fixture ignore, builder CLI, pin failure, transport-limit and network/timeout evidence tests. The local
 boundary matrix has 11 PASS and three explicitly BLOCKED hosted/transport rows
 before and after revocation; those are not promoted to hosted PASS.
 
