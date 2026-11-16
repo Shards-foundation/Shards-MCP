@@ -615,3 +615,43 @@ test("Public read streaming limit cancels an oversized source with no content-le
   assert.match(json.result.content[0].text,/Public source too large/);
   assert.equal(cancelled,true,"Reader must cancel when the byte limit is crossed");
 });
+
+test("supplied invalid credentials cannot downgrade handshake or discovery to anonymous", async () => {
+  const env={EDGE_DB:{prepare(sql){return {bind(){return {first:async()=>null}}}}}};
+  for(const authorization of ["", "Basic invalid", "Bearer invalid", "Bearer smcp_"+"a".repeat(43)]) {
+    for(const method of ["initialize","server/discover","ping","tools/list","tools/call","notifications/initialized"]) {
+      const response=await worker.fetch(post(method,{name:"shards_gateway_status"},{authorization}),env);
+      assert.equal(response.status,401);
+      assert.match(response.headers.get("www-authenticate"),/invalid_token/);
+      assert.equal(response.headers.get("cache-control"),"no-store");
+      assert.equal((await response.text()).includes(authorization || "never-present"),false);
+    }
+  }
+  const anonymous=await worker.fetch(post("tools/list"),{});
+  assert.equal(anonymous.status,200);
+  assert.equal((await anonymous.json()).result.tools.length,7);
+});
+
+test("bearer discovery is scoped, refreshed per request, and storage failure denies", async () => {
+  let active=true,reads=0;
+  const actor={id:"fixture-agent",tenant_id:"fixture-tenant",name:"fixture",client:"test",scopes:'["agent:identity"]'};
+  const env={EDGE_DB:{prepare(sql){return {bind(){return {
+    async first(){reads++;assert.match(sql,/revoked_at IS NULL/);assert.match(sql,/expires_at>\?/);assert.match(sql,/disabled_at IS NULL/);return active?actor:null},
+    async run(){return {meta:{changes:1}}}
+  }}}}}};
+  const headers={authorization:"Bearer smcp_"+"b".repeat(43)};
+  for(let i=0;i<2;i++){
+    const response=await worker.fetch(post("tools/list",{},headers),env);
+    const names=(await response.json()).result.tools.map(x=>x.name);
+    assert.ok(names.includes("shards_agent_identity"));
+    assert.ok(!names.includes("shards_message_send"));
+    assert.ok(!names.includes("shards_agents_list"));
+  }
+  assert.equal(reads,2);
+  active=false;
+  assert.equal((await worker.fetch(post("tools/list",{},headers),env)).status,401);
+  const broken={EDGE_DB:{prepare(){throw Error("sensitive internal storage details")}}};
+  const unavailable=await worker.fetch(post("tools/list",{},headers),broken);
+  assert.equal(unavailable.status,503);
+  assert.doesNotMatch(await unavailable.text(),/sensitive|fixture|smcp_/);
+});

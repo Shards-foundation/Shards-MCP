@@ -153,3 +153,5 @@ The edge does not execute tasks, relay other providers' private APIs or move mon
 Signed key provisioning/revocation E2E; two-user and cross-tenant negative tests; concurrency under duplicate message/task IDs; rolling key rotation; encryption/retention policy; Cloudflare WAF and provider quotas; real OAuth resource metadata, registration, PKCE and refresh-token flows for ChatGPT and other clients; published privacy and commercial terms; review of Cloudflare Access policy and session expiry; E2E Python upstream integration/bridging; independent security certification.
 
 Do not claim any of those complete based solely on the public read-only HTTP smoke tests.
+
+See [native MCP authentication audit and persistence gates](native-mcp-integration.md) for the bounded implementation, OAuth design and unverified Cloud acceptance.
