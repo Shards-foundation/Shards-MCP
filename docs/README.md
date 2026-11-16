@@ -36,3 +36,5 @@ Shards-MCP is a self-hosted, single-organisation gateway. The Python package, op
 5. Unsupported A2A/MCP optional capabilities, multi-tenancy, hosted OAuth sign-in and external-effect recovery must not appear as supported features.
 
 When documentation changes, use [the documentation review procedure](../GOVERNANCE.md). Links and examples are checked by `python scripts/docs_check.py` in CI.
+
+See [native MCP authentication audit and persistence gates](native-mcp-integration.md) for the bounded implementation, OAuth design and unverified Cloud acceptance.

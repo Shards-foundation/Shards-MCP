@@ -102,9 +102,15 @@ jobs:
           curl -fsS -X POST "$URL" -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"shards_agent_identity","arguments":{}}}' -o /tmp/anon.json
           node -e "const j=require('/tmp/anon.json');if(j.result.isError!==true||!j.result.content[0].text.includes('AUTH_REQUIRED'))process.exit(1)"
-          curl -fsS -X POST "$URL" -H 'Content-Type: application/json' -H 'Authorization: Bearer smcp_invalid_unauthorized_token_123456789' \
-            --data '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"shards_task_create","arguments":{}}}' -o /tmp/badtoken.json
-          node -e "const j=require('/tmp/badtoken.json');if(j.result.isError!==true)process.exit(1)"
+          # Accept the deployed legacy MCP error or the reviewed HTTP 401 behavior.
+          # Local Worker tests require 401; this read-only probe does not deploy it.
+          code=$(curl -sS -w '%{http_code}' -X POST "$URL" -H 'Content-Type: application/json' -H 'Authorization: Bearer smcp_invalid_unauthorized_token_123456789' \
+            --data '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"shards_task_create","arguments":{}}}' -o /tmp/badtoken.json)
+          case "$code" in
+            401) ;;
+            200) node -e "const j=require('/tmp/badtoken.json');if(j.result?.isError!==true)process.exit(1)" ;;
+            *) exit 1 ;;
+          esac
           code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL" -H 'Content-Type: application/json' \
             -H 'Origin: https://untrusted.example' --data '{"jsonrpc":"2.0","id":4,"method":"tools/list"}')
           test "$code" = 403

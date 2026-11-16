@@ -291,14 +291,21 @@ async function mcp(request,env,signedIdentity=null){const origin=request.headers
 const id=('id' in req)?req.id:null;
 const version=request.headers.get('MCP-Protocol-Version')||'2025-11-25';if(!['2025-11-25','2025-06-18','2026-07-28'].includes(version))return pub(rpcError(id,-32600,'Unsupported MCP protocol version'),400);
 if(version==='2026-07-28'){const method=request.headers.get('Mcp-Method');if(method&&method!==req.method)return pub(rpcError(id,-32600,'Mcp-Method header mismatch'),400);if(req.method==='tools/call'){const name=request.headers.get('Mcp-Name');if(name&&name!==req.params?.name)return pub(rpcError(id,-32600,'Mcp-Name header mismatch'),400)}}
+// A supplied credential must never silently become an anonymous connection.
+// Authenticate once per request so handshake and discovery share the same principal.
+let bearerActor=null;
+if(!signedIdentity&&request.headers.has('authorization')){
+ try{bearerActor=await authenticate(request,env,req.method)}catch(e){return pub({error:'Authentication storage unavailable'},503,{'cache-control':'no-store'})}
+ if(!bearerActor)return pub({error:'Invalid or expired agent credential'},401,{'www-authenticate':'Bearer realm="shards-mcp", error="invalid_token"','cache-control':'no-store'});
+}
 if(req.method==='notifications/initialized'||req.method.startsWith('notifications/'))return plain('',202);
 if(req.method==='initialize'){const asked=req.params?.protocolVersion;const negotiated=['2025-11-25','2025-06-18'].includes(asked)?asked:'2025-11-25';return pub(rpc(id,{protocolVersion:negotiated,capabilities:{tools:{listChanged:false}},serverInfo:{name:'shards-mcp-edge',version:VERSION}}),200,{'mcp-protocol-version':negotiated})}
 if(req.method==='server/discover')return pub(rpc(id,{protocolVersion:'2026-07-28',serverInfo:{name:'shards-mcp-edge',version:VERSION},capabilities:{tools:{listChanged:false}}}),200,{'mcp-protocol-version':'2026-07-28'});
 if(req.method==='ping')return pub(rpc(id,{}));
-if(req.method==='tools/list'){if(signedIdentity){return pub(rpc(id,{tools:[...tools.filter(t=>t.public).map(({name,description,inputSchema,annotations})=>({name,description,inputSchema,annotations})),{name:'shards_user_identity',description:'Return only the caller identity verified by Cloudflare Access. Does not grant internal agent scopes.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,openWorldHint:false}}]}));}const actor=await authenticate(request,env,req.method);const visible=tools.filter(t=>t.public||(actor&&actor.scopeSet.has(t.scope)));return pub(rpc(id,{tools:visible.map(({name,description,inputSchema,annotations,public:pub})=>({name,description:description+(pub?'':' Requires an operator-issued scoped bearer key.'),inputSchema,annotations}))}));}
+if(req.method==='tools/list'){if(signedIdentity){return pub(rpc(id,{tools:[...tools.filter(t=>t.public).map(({name,description,inputSchema,annotations})=>({name,description,inputSchema,annotations})),{name:'shards_user_identity',description:'Return only the caller identity verified by Cloudflare Access. Does not grant internal agent scopes.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,openWorldHint:false}}]}));}const actor=bearerActor;const visible=tools.filter(t=>t.public||(actor&&actor.scopeSet.has(t.scope)));return pub(rpc(id,{tools:visible.map(({name,description,inputSchema,annotations,public:pub})=>({name,description:description+(pub?'':' Requires an operator-issued scoped bearer key.'),inputSchema,annotations}))}));}
 if(req.method==='resources/list')return pub(rpc(id,{resources:[]}));
 if(req.method==='prompts/list')return pub(rpc(id,{prompts:[]}));
-if(req.method==='tools/call'){const tname=req.params?.name;if(typeof tname!=='string')return pub(rpcError(id,-32602,'Tool name required'));if(signedIdentity){if(tname==='shards_user_identity'){const params=req.params&&Object.prototype.hasOwnProperty.call(req.params,'arguments')?req.params.arguments:{};if(typeof params!=='object'||params===null||Array.isArray(params)||Object.keys(params).length)return pub(rpc(id,errorResult('Unexpected tool arguments')));return pub(rpc(id,result({authenticated:true,provider:'cloudflare_access',subject_fingerprint:(await digest(signedIdentity.sub)).slice(0,20),email:typeof signedIdentity.email==='string'?signedIdentity.email:null,privileged_scopes:[]})))}if(!tools.some(t=>t.name===tname&&t.public))return pub(rpc(id,errorResult('PERMISSION_DENIED: Social login has no internal agent privileges')));return pub(rpc(id,await runTool(tname,req.params?.arguments||{},null,env,request)))}const actor=await authenticate(request,env,req.method);const r=await runTool(tname,req.params?.arguments||{},actor,env,request);return pub(rpc(id,r))}
+if(req.method==='tools/call'){const tname=req.params?.name;if(typeof tname!=='string')return pub(rpcError(id,-32602,'Tool name required'));if(signedIdentity){if(tname==='shards_user_identity'){const params=req.params&&Object.prototype.hasOwnProperty.call(req.params,'arguments')?req.params.arguments:{};if(typeof params!=='object'||params===null||Array.isArray(params)||Object.keys(params).length)return pub(rpc(id,errorResult('Unexpected tool arguments')));return pub(rpc(id,result({authenticated:true,provider:'cloudflare_access',subject_fingerprint:(await digest(signedIdentity.sub)).slice(0,20),email:typeof signedIdentity.email==='string'?signedIdentity.email:null,privileged_scopes:[]})))}if(!tools.some(t=>t.name===tname&&t.public))return pub(rpc(id,errorResult('PERMISSION_DENIED: Social login has no internal agent privileges')));return pub(rpc(id,await runTool(tname,req.params?.arguments||{},null,env,request)))}const actor=bearerActor;const r=await runTool(tname,req.params?.arguments||{},actor,env,request);return pub(rpc(id,r))}
 return pub(rpcError(id,-32601,'Method not found'))}
 // Operator workspace reuses the existing tenant, inbox and audit schema.
 // A human operator is a distinct non-token principal, never an impersonated AI agent.
@@ -814,26 +821,25 @@ if(u.pathname==='/connect/profile'&&request.method==='GET'){const identity=escap
 if(u.pathname==='/connect/profile')return plain('Profile supports GET only',405,'text/plain; charset=utf-8',{allow:'GET'});
 return plain('MCP supports POST JSON-RPC; streaming GET unavailable',405,'text/plain; charset=utf-8',{allow:'POST'});
 }
+// /mcp uses operator-issued bearer keys, not the /connect Access authority.
+// Stop both resource-metadata fallback and legacy authorization-server discovery.
+if((request.method==='GET'||request.method==='HEAD')&&[
+  '/.well-known/oauth-protected-resource',
+  '/.well-known/oauth-protected-resource/mcp',
+  '/.well-known/oauth-authorization-server'
+].includes(u.pathname))return plain('Not Found',404,'text/plain; charset=utf-8',{'cache-control':'no-store'});
 if(request.method==='GET'&&(
   u.pathname==='/.well-known/cloudflare-access-protected-resource/connect'||
-  u.pathname==='/.well-known/oauth-protected-resource/connect'||
-  u.pathname==='/.well-known/oauth-protected-resource'||
-  u.pathname==='/.well-known/oauth-authorization-server'
+  u.pathname==='/.well-known/oauth-protected-resource/connect'
 )){
   const issuer=oauthIssuer(env);
   if(!issuer)return pub({error:'OAuth discovery unavailable'},503,{'cache-control':'no-store'});
-  if(u.pathname==='/.well-known/oauth-protected-resource/connect'||u.pathname==='/.well-known/cloudflare-access-protected-resource/connect'){
-    const metadata={resource:ORIGIN+'/connect',authorization_servers:[issuer],bearer_methods_supported:['header']};
-    if(u.pathname.startsWith('/.well-known/cloudflare-access-protected-resource/')){
-      metadata.protected=true;
-      metadata.team_domain=env.ACCESS_TEAM+'.cloudflareaccess.com';
-    }
-    return pub(metadata,200,{'cache-control':'public, max-age=120','access-control-allow-origin':'*'});
+  const metadata={resource:ORIGIN+'/connect',authorization_servers:[issuer],bearer_methods_supported:['header']};
+  if(u.pathname.startsWith('/.well-known/cloudflare-access-protected-resource/')){
+    metadata.protected=true;
+    metadata.team_domain=env.ACCESS_TEAM+'.cloudflareaccess.com';
   }
-  if(u.pathname==='/.well-known/oauth-protected-resource'){
-    return new Response(null,{status:302,headers:{...HEADERS,location:ORIGIN+'/.well-known/oauth-protected-resource/connect','cache-control':'no-store','access-control-allow-origin':'*'}});
-  }
-  return new Response(null,{status:302,headers:{...HEADERS,location:issuer+'/.well-known/oauth-authorization-server','cache-control':'no-store','access-control-allow-origin':'*'}});
+  return pub(metadata,200,{'cache-control':'public, max-age=120','access-control-allow-origin':'*'});
 }
 if(u.pathname==='/v1/account/whoami'&&request.method==='GET')return accountTokenWhoAmI(request,env);
 if(u.pathname==='/manage/api/skills'||u.pathname.startsWith('/manage/api/skills/'))return skillsAPI(request,env,u);
