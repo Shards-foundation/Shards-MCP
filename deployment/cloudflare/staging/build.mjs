@@ -7,7 +7,7 @@ import {validateApproval} from './policy.mjs';
 export * from './artifact.mjs';
 export async function configuration(approval,{fault=false}={}){
   validateApproval(approval);
-  return {name:NAME+(fault?'-fault':''),main:fault?'storage-failure.js':'worker.js',compatibility_date:'2025-06-18',
+  return {name:NAME+(fault?'-fault':''),main:fault?'fault/worker.js':'main/worker.js',compatibility_date:'2025-06-18',no_bundle:true,
     account_id:approval.account_id,workers_dev:false,preview_urls:false,routes:[],
     vars:{STAGING_ACCEPTANCE:SOURCE},observability:{enabled:false},
     ...(fault?{}:{d1_databases:[{binding:'EDGE_DB',database_name:approval.database_name,database_id:approval.database_id}]})};
@@ -25,7 +25,9 @@ if(process.argv[1]===fileURLToPath(import.meta.url)){
     const normalConfig=await configuration(approval),faultConfig=await configuration(approval,{fault:true});
     const main=artifact(subdomain),fault=artifact(subdomain,{fault:true});
     fs.mkdirSync(out,{recursive:true,mode:0o700});
-    for(const [name,body] of Object.entries({'worker.js':main.script,'storage-failure.js':fault.script,
+    fs.mkdirSync(path.join(out,'main'),{recursive:true,mode:0o700});
+    fs.mkdirSync(path.join(out,'fault'),{recursive:true,mode:0o700});
+    for(const [name,body] of Object.entries({'main/worker.js':main.script,'fault/worker.js':fault.script,
       'schema.sql':pinned('deployment/cloudflare/schema.sql'),'wrangler.json':JSON.stringify(normalConfig,null,2),
       'wrangler-fault.json':JSON.stringify(faultConfig,null,2),'manifest.json':JSON.stringify({...main.manifest,artifact_sha256:hash(main.script),fault_artifact_sha256:hash(fault.script)},null,2)})){
       fs.writeFileSync(path.join(out,name),body,{mode:0o600});

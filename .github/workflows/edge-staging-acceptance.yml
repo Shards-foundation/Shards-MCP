@@ -31,8 +31,8 @@ jobs:
       - name: Build pinned artifacts without deployment
         run: |
           node deployment/cloudflare/staging/build.mjs --out work/pr46-staging-ci --approval deployment/cloudflare/staging/local-target.example.json
-          node --check work/pr46-staging-ci/worker.js
-          node --check work/pr46-staging-ci/storage-failure.js
+          node --check work/pr46-staging-ci/main/worker.js
+          node --check work/pr46-staging-ci/fault/worker.js
       - name: Existing Worker and audit regression
         run: node --test deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs deployment/cloudflare/workspace.test.mjs deployment/cloudflare/verify_release_deployment.test.mjs
       - name: Schema and documentation checks

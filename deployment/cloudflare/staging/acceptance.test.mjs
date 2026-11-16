@@ -17,8 +17,8 @@ test('exact approval is mandatory; approved same-account Free staging remains su
   await assert.rejects(configuration());
   await assert.rejects(configuration({...a,account_id:undefined}));
   await assert.rejects(configuration({...a,database_id:'00000000-0000-0000-0000-000000000000'}));
-  const c=await configuration(a);assert.equal(c.account_id,a.account_id);assert.equal(c.workers_dev,false);assert.deepEqual(c.routes,[]);
-  assert.equal(c.d1_databases[0].database_id,a.database_id);assert.equal((await configuration(a,{fault:true})).d1_databases,undefined);
+  const c=await configuration(a);assert.equal(c.account_id,a.account_id);assert.equal(c.workers_dev,false);assert.equal(c.no_bundle,true);assert.equal(c.main,'main/worker.js');assert.deepEqual(c.routes,[]);
+  assert.equal(c.d1_databases[0].database_id,a.database_id);const fault=await configuration(a,{fault:true});assert.equal(fault.d1_databases,undefined);assert.equal(fault.main,'fault/worker.js');assert.equal(fault.no_bundle,true);assert.equal(path.basename(fault.main),a.workers[1].module_name);
 });
 
 test('real workerd/D1 matrix and parallel post-revocation denial; hosted identity stays BLOCKED locally',async()=>{
@@ -107,6 +107,10 @@ test('builder CLI requires explicit approval and writes disabled configs with ex
     assert.throws(()=>execFileSync(process.execPath,['deployment/cloudflare/staging/build.mjs','--out',dir],{cwd:ROOT,stdio:'pipe'}));
     execFileSync(process.execPath,['deployment/cloudflare/staging/build.mjs','--out',dir,'--approval','deployment/cloudflare/staging/local-target.example.json'],{cwd:ROOT,stdio:'pipe'});
     const c=JSON.parse(fs.readFileSync(path.join(dir,'wrangler.json')));assert.equal(c.workers_dev,false);assert.equal(c.account_id,'1'.repeat(32));
-    assert.equal(fs.readFileSync(path.join(dir,'worker.js'),'utf8'),artifact('local').script);
+    assert.equal(c.no_bundle,true);
+    assert.equal(fs.readFileSync(path.join(dir,'main/worker.js'),'utf8'),artifact('local').script);
+    assert.equal(fs.readFileSync(path.join(dir,'fault/worker.js'),'utf8'),artifact('local',{fault:true}).script);
+    const fault=JSON.parse(fs.readFileSync(path.join(dir,'wrangler-fault.json')));assert.equal(fault.no_bundle,true);assert.equal(path.basename(fault.main),'worker.js');
+    assert.deepEqual(fs.readdirSync(path.join(dir,'main')),['worker.js']);assert.deepEqual(fs.readdirSync(path.join(dir,'fault')),['worker.js']);
   }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });

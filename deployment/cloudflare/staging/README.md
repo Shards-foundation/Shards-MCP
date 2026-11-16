@@ -48,7 +48,15 @@ into a protected local profile and have the operator independently approve the
 exact real identities. The builder requires explicit approval, emits `account_id`,
 disabled workers.dev/previews and no routes, and does not infer a trusted account
 or hostname from a regex. The hosted CLI requires the profile to be owner-only.
-Alternate accounts likewise require a separately reviewed exact profile.
+Alternate accounts likewise require a separately reviewed exact profile. Generated
+configs set `no_bundle: true`; main and fault entries are `main/worker.js` and
+`fault/worker.js`. Both upload a module named `worker.js` without esbuild rewriting
+the reviewed bytes. Each entry has its own directory so Wrangler cannot collect
+the root schema SQL as an extra text module. Tests assert each module directory,
+entry basename and exact artifact bytes. Wrangler 4.163.0 local dry-runs (empty API
+credentials, isolated configuration) produced one `worker.js` for each Worker,
+byte-identical to the reviewed artifact. No upload/deployment occurred. This
+fixes future upload reproducibility, not the existing hosted digest mismatch.
 
 Shared-account request/D1 quotas are **not separate-account isolation**. That stronger
 guarantee remains BLOCKED. The earlier billing-subscriptions API returned 403 and
@@ -100,8 +108,8 @@ node --version
 npm ci --prefix deployment/cloudflare/staging --ignore-scripts --audit=false --fund=false
 npm test --prefix deployment/cloudflare/staging
 node deployment/cloudflare/staging/build.mjs --out work/pr47-stage --approval deployment/cloudflare/staging/local-target.example.json
-node --check work/pr47-stage/worker.js
-node --check work/pr47-stage/storage-failure.js
+node --check work/pr47-stage/main/worker.js
+node --check work/pr47-stage/fault/worker.js
 node --test deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs deployment/cloudflare/workspace.test.mjs deployment/cloudflare/verify_release_deployment.test.mjs
 python deployment/cloudflare/schema_migrations_test.py -v
 python scripts/docs_check.py
