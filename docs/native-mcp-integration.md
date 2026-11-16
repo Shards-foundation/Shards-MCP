@@ -40,8 +40,40 @@ confuse two distinct identity boundaries.
 
 Concurrent open PRs observed: #36 (portal denial checks), #40 (Python verifier
 policy), #35 (operator settings). This change does not incorporate those branches.
-The existing `/connect` resource metadata and issuer redirect are discovery hints,
-not proof of PKCE, refresh, client compatibility or private scopes.
+The path-specific `/connect` resource metadata names its Access issuer; it is a
+discovery hint, not proof of PKCE, refresh, client compatibility or private scopes.
+
+## Independent security review correction
+
+Gitar finding on reviewed commit
+`2f7f2ccbd922fd5b75265b2fb694fe8f9fdf3019`:
+[review comment](https://github.com/Shards-foundation/Shards-MCP/pull/46#discussion_r4589942128).
+The new `/mcp` HTTP 401 correctly rejected invalid keys, but the fallback from
+`/.well-known/oauth-protected-resource/mcp` to root metadata followed a redirect
+into `/connect`'s Cloudflare Access authority. The new negative regression failed
+against that commit with root HTTP 302 instead of 404. This was an authentication
+authority-confusion defect, not evidence that an Access token granted agent scope.
+
+The correction returns non-cacheable HTTP 404 without redirects or issuer metadata
+at root protected-resource metadata and the `/mcp` protected-resource path,
+independently of Access configuration. It also removes the root
+`/.well-known/oauth-authorization-server` redirect: the installed official SDK
+falls back there when resource metadata is unavailable, so leaving that alias
+would still lead `/mcp` clients to Access. No OAuth functionality is added.
+
+Both path-specific `/connect` metadata routes, their CORS/cache behavior, the
+Access challenge and signed Access validation remain intact. Clients must use
+`/connect`'s resource-specific metadata to find its issuer; root discovery no
+longer aliases it. Official SDK tests cover normal `/connect` resource discovery,
+the metadata URL from its 401 challenge, and authenticated identity/tool access.
+The `/mcp` challenge, invalid-bearer 401, storage-failure 503, anonymous public
+discovery, scoped bearer access and per-request revocation checks are unchanged.
+
+Primary correction workflow: security-review; supporting: client-integration.
+Scope is Worker metadata routing, regression tests and this document; rollback is
+a revert with no schema or provider change. All fixtures use synthetic identities.
+No credentials, Access policies or production deployments were changed. Native
+OAuth persistence and fresh-task acceptance remain **BLOCKED** as described below.
 
 ## OAuth 2.1 design for independent review
 
@@ -133,19 +165,20 @@ client/issuer staging acceptance remain required before claiming persistence.
 
 ### Local verification receipt
 
-Runtime: Python 3.12.14 and Node 24.22.1 (local; not the full CI matrix).
+Runtime: Python 3.12.14; Node 22.16.0 (CI-pinned) and 24.22.1. Official SDKs:
+Python MCP 2.0.0 and TypeScript MCP 1.32.2. Local checks are not the full CI matrix.
 Commands executed from the repository:
 
 | Command | Result |
 | --- | --- |
 | `.venv/bin/python -m unittest discover -s tests -v` | PASS: 208 tests, including OAuth and official Python SDK paths |
-| `node --test deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs deployment/cloudflare/workspace.test.mjs` | PASS: 35 tests, zero skipped |
-| `node --test deployment/cloudflare/sdk.test.mjs` | PASS: official MCP TypeScript SDK v1, signed Access identity, 1 test |
+| `node --test deployment/cloudflare/*.test.mjs` | PASS: 47 tests on both Node runtimes, including 2 official SDK cases, deployment verifier, Worker/Access/audit/workspace; zero failed/cancelled/skipped |
 | `python deployment/cloudflare/schema_migrations_test.py -v` | PASS: 6 SQLite schema/audit tests |
 | `node --check deployment/cloudflare/worker.js` | PASS |
 | `python -m compileall -q src tests scripts` | PASS |
 | `python scripts/skillctl.py validate` | PASS |
 | `python scripts/docs_check.py` | PASS |
+| `.venv/bin/python scripts/demo_local.py` | PASS: temporary database, valid audit, no external actions |
 
 The live smoke workflow accepts both the deployed legacy tool-error denial and
 new HTTP 401 denial, without deploying either. Offline Worker tests require the

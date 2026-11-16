@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { webcrypto } from "node:crypto";
+import { discoverOAuthProtectedResourceMetadata, discoverOAuthServerInfo } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
@@ -56,4 +57,44 @@ test("official MCP TypeScript SDK v1 exchanges real protocol messages with a sig
     assert.match(denied.content[0].text,/PERMISSION_DENIED/);
     assert.ok(requests.filter(x=>x.method==="POST"&&x.path==="/connect").length>=4);
   }finally{await client.close();}
+});
+
+
+test("official SDK 401 discovery stops at /mcp metadata absence while /connect remains path-bound", async () => {
+  const sandbox={Request,Response,Headers,URL,TextEncoder,TextDecoder,atob,crypto:webcrypto,AbortSignal,
+    fetch:async()=>{throw Error("Discovery must not contact an external issuer");}};
+  vm.runInNewContext(source.replace("export default {","globalThis.__edge = {"),sandbox,{filename:"worker.js"});
+  const env={ACCESS_TEAM:"sdk",ACCESS_AUD:"operator-aud",CONNECT_ACCESS_AUD:"connect-aud"};
+  const root="https://mcp.shardsinc.co.uk";
+  const requests=[];
+  const localFetch=async(input,init)=>{
+    const request=new Request(input,init);
+    assert.equal(new URL(request.url).origin,root,"No fallback can reach the Access issuer");
+    requests.push(new URL(request.url).pathname);
+    const response=await sandbox.__edge.fetch(request,env);
+    assert.equal(response.headers.get("location"),null,"Discovery cannot redirect to another authority");
+    return response;
+  };
+  const denied=await localFetch(root+"/mcp",{method:"POST",headers:{
+    "content-type":"application/json",authorization:"Bearer invalid"},
+    body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list",params:{}})});
+  assert.equal(denied.status,401);
+  assert.doesNotMatch(denied.headers.get("www-authenticate"),/resource_metadata|connect|cloudflareaccess/);
+  requests.length=0;
+  await assert.rejects(discoverOAuthProtectedResourceMetadata(root+"/mcp",{},localFetch),/does not implement/);
+  assert.deepEqual(requests,["/.well-known/oauth-protected-resource/mcp","/.well-known/oauth-protected-resource"]);
+  // SDKs with legacy fallback must not find the Access authorization server either.
+  const info=await discoverOAuthServerInfo(root+"/mcp",{fetchFn:localFetch});
+  assert.equal(info.resourceMetadata,undefined);
+  assert.equal(info.authorizationServerMetadata,undefined);
+  assert.equal(info.authorizationServerUrl,root+"/");
+  assert.ok(requests.includes("/.well-known/oauth-authorization-server"));
+  const challenge=await localFetch(root+"/connect",{method:"POST"});
+  assert.equal(challenge.status,401);
+  const resourceMetadataUrl=new URL(challenge.headers.get("www-authenticate").match(/resource_metadata="([^"]+)"/)[1]);
+  for(const opts of [{},{resourceMetadataUrl}]) {
+    const metadata=await discoverOAuthProtectedResourceMetadata(root+"/connect",opts,localFetch);
+    assert.equal(metadata.resource,root+"/connect");
+    assert.deepEqual(metadata.authorization_servers,["https://sdk.cloudflareaccess.com"]);
+  }
 });

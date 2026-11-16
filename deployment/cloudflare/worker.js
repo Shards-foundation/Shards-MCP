@@ -821,26 +821,25 @@ if(u.pathname==='/connect/profile'&&request.method==='GET'){const identity=escap
 if(u.pathname==='/connect/profile')return plain('Profile supports GET only',405,'text/plain; charset=utf-8',{allow:'GET'});
 return plain('MCP supports POST JSON-RPC; streaming GET unavailable',405,'text/plain; charset=utf-8',{allow:'POST'});
 }
+// /mcp uses operator-issued bearer keys, not the /connect Access authority.
+// Stop both resource-metadata fallback and legacy authorization-server discovery.
+if((request.method==='GET'||request.method==='HEAD')&&[
+  '/.well-known/oauth-protected-resource',
+  '/.well-known/oauth-protected-resource/mcp',
+  '/.well-known/oauth-authorization-server'
+].includes(u.pathname))return plain('Not Found',404,'text/plain; charset=utf-8',{'cache-control':'no-store'});
 if(request.method==='GET'&&(
   u.pathname==='/.well-known/cloudflare-access-protected-resource/connect'||
-  u.pathname==='/.well-known/oauth-protected-resource/connect'||
-  u.pathname==='/.well-known/oauth-protected-resource'||
-  u.pathname==='/.well-known/oauth-authorization-server'
+  u.pathname==='/.well-known/oauth-protected-resource/connect'
 )){
   const issuer=oauthIssuer(env);
   if(!issuer)return pub({error:'OAuth discovery unavailable'},503,{'cache-control':'no-store'});
-  if(u.pathname==='/.well-known/oauth-protected-resource/connect'||u.pathname==='/.well-known/cloudflare-access-protected-resource/connect'){
-    const metadata={resource:ORIGIN+'/connect',authorization_servers:[issuer],bearer_methods_supported:['header']};
-    if(u.pathname.startsWith('/.well-known/cloudflare-access-protected-resource/')){
-      metadata.protected=true;
-      metadata.team_domain=env.ACCESS_TEAM+'.cloudflareaccess.com';
-    }
-    return pub(metadata,200,{'cache-control':'public, max-age=120','access-control-allow-origin':'*'});
+  const metadata={resource:ORIGIN+'/connect',authorization_servers:[issuer],bearer_methods_supported:['header']};
+  if(u.pathname.startsWith('/.well-known/cloudflare-access-protected-resource/')){
+    metadata.protected=true;
+    metadata.team_domain=env.ACCESS_TEAM+'.cloudflareaccess.com';
   }
-  if(u.pathname==='/.well-known/oauth-protected-resource'){
-    return new Response(null,{status:302,headers:{...HEADERS,location:ORIGIN+'/.well-known/oauth-protected-resource/connect','cache-control':'no-store','access-control-allow-origin':'*'}});
-  }
-  return new Response(null,{status:302,headers:{...HEADERS,location:issuer+'/.well-known/oauth-authorization-server','cache-control':'no-store','access-control-allow-origin':'*'}});
+  return pub(metadata,200,{'cache-control':'public, max-age=120','access-control-allow-origin':'*'});
 }
 if(u.pathname==='/v1/account/whoami'&&request.method==='GET')return accountTokenWhoAmI(request,env);
 if(u.pathname==='/manage/api/skills'||u.pathname.startsWith('/manage/api/skills/'))return skillsAPI(request,env,u);

@@ -458,17 +458,6 @@ test("RFC 9728 OAuth discovery publishes the actual path-bound resource and trus
   assert.equal(cfMetadata.team_domain,"gentle-shape-bee5.cloudflareaccess.com");
   assert.deepEqual(Array.from(cfMetadata.authorization_servers),["https://gentle-shape-bee5.cloudflareaccess.com"]);
 
-
-  const fallback=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource"),env);
-  assert.equal(fallback.status,302);
-  assert.equal(fallback.headers.get("access-control-allow-origin"),"*");
-  assert.equal(fallback.headers.get("location"),root+"/.well-known/oauth-protected-resource/connect");
-  const issuerAlias=await worker.fetch(new Request(root+"/.well-known/oauth-authorization-server"),env);
-  assert.equal(issuerAlias.status,302);
-  assert.equal(issuerAlias.headers.get("access-control-allow-origin"),"*");
-  assert.equal(issuerAlias.headers.get("location"),"https://gentle-shape-bee5.cloudflareaccess.com/.well-known/oauth-authorization-server");
-  assert.equal(issuerAlias.headers.get("cache-control"),"no-store");
-
   const missing=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),{});
   assert.equal(missing.status,503);
   const wrongAudience=await worker.fetch(new Request(root+"/.well-known/oauth-protected-resource/connect"),{...env,CONNECT_ACCESS_AUD:"operator-aud"});
@@ -499,6 +488,12 @@ test("Unauthenticated connect origin exposes discoverable metadata without grant
   assert.match(r.headers.get("www-authenticate"),/realm="shards-mcp-connect"/);
   assert.match(r.headers.get("www-authenticate"),/resource_metadata="https:\/\/mcp\.shardsinc\.co\.uk\/\.well-known\/cloudflare-access-protected-resource\/connect"/);
   assert.deepEqual(await r.json(),{error:"Cloudflare Access authentication required"},"The 401 response is a generic challenge, not a user-profile disclosure");
+  const metadataUrl=r.headers.get("www-authenticate").match(/resource_metadata="([^"]+)"/)[1];
+  const metadata=await worker.fetch(new Request(metadataUrl),env);
+  assert.equal(metadata.status,200);
+  const resource=await metadata.json();
+  assert.equal(resource.resource,"https://mcp.shardsinc.co.uk/connect");
+  assert.deepEqual(Array.from(resource.authorization_servers),["https://gentle-shape-bee5.cloudflareaccess.com"]);
 });
 
 
@@ -648,10 +643,45 @@ test("bearer discovery is scoped, refreshed per request, and storage failure den
     assert.ok(!names.includes("shards_agents_list"));
   }
   assert.equal(reads,2);
+  const identity=await worker.fetch(post("tools/call",{name:"shards_agent_identity",arguments:{}},headers),env);
+  assert.equal(identity.status,200);
+  const who=(await identity.json()).result;
+  assert.equal(who.isError,false);
+  assert.equal(who.structuredContent.id,actor.id);
+  assert.equal(who.structuredContent.tenant,actor.tenant_id);
+  assert.deepEqual(Array.from(who.structuredContent.scopes),["agent:identity"]);
+  const forbidden=await worker.fetch(post("tools/call",{name:"shards_message_send",arguments:{}},headers),env);
+  assert.equal(forbidden.status,200);
+  assert.equal((await forbidden.json()).result.isError,true);
+  assert.equal(reads,4,"Discovery and each call reauthenticate independently");
   active=false;
   assert.equal((await worker.fetch(post("tools/list",{},headers),env)).status,401);
   const broken={EDGE_DB:{prepare(){throw Error("sensitive internal storage details")}}};
   const unavailable=await worker.fetch(post("tools/list",{},headers),broken);
   assert.equal(unavailable.status,503);
   assert.doesNotMatch(await unavailable.text(),/sensitive|fixture|smcp_/);
+});
+
+
+test("/mcp 401 metadata fallback never advertises /connect or an Access issuer", async () => {
+  const configured={ACCESS_TEAM:"fixture",ACCESS_AUD:"operator-aud",CONNECT_ACCESS_AUD:"connect-aud"};
+  const root="https://mcp.shardsinc.co.uk";
+  // Absent or invalid Access configuration cannot change the bearer resource's authority.
+  for(const env of [configured,{}, {...configured,CONNECT_ACCESS_AUD:configured.ACCESS_AUD}]) {
+    const denied=await worker.fetch(post("tools/list",{},{authorization:"Bearer invalid"}),env);
+    assert.equal(denied.status,401);
+    assert.equal(denied.headers.get("www-authenticate"),'Bearer realm="shards-mcp", error="invalid_token"');
+    assert.equal(denied.headers.get("location"),null);
+    for(const path of ["/.well-known/oauth-protected-resource","/.well-known/oauth-protected-resource/mcp",
+                       "/.well-known/oauth-authorization-server"]) {
+      for(const method of ["GET","HEAD"]) {
+        const response=await worker.fetch(new Request(root+path,{method}),env);
+        assert.equal(response.status,404,method+" "+path);
+        assert.equal(response.headers.get("location"),null);
+        assert.equal(response.headers.get("www-authenticate"),null);
+        assert.equal(response.headers.get("cache-control"),"no-store");
+        assert.doesNotMatch(await response.text(),/connect|cloudflareaccess|authorization_servers/);
+      }
+    }
+  }
 });
