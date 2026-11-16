@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {ROOT} from './artifact.mjs';
 import {ensure,GateBlocked,GateFailure} from './errors.mjs';
 const C=fs.constants;
@@ -42,9 +43,13 @@ export function readProtected(file,{publicExample=false}={}){
     return bytes.subarray(0,size).toString('utf8');
   }catch(e){unavailable(e);}finally{if(fd!==undefined)fs.closeSync(fd);if(parent!==undefined)fs.closeSync(parent);}
 }
-function writeNew(fd,name,body){
+function openNew(fd,name){
   const file=fs.openSync(`/proc/self/fd/${fd}/${name}`,C.O_WRONLY|C.O_CREAT|C.O_EXCL|C.O_NOFOLLOW,0o600);
-  try{ensure(privateMode(fs.fstatSync(file)),'PROTECTED_FILE_PERMISSIONS');fs.writeFileSync(file,body);}finally{fs.closeSync(file);}
+  try{ensure(privateMode(fs.fstatSync(file)),'PROTECTED_FILE_PERMISSIONS');return file;}catch(e){fs.closeSync(file);throw e;}
+}
+function writeNew(fd,name,body){
+  const file=openNew(fd,name);
+  try{fs.writeFileSync(file,body);}finally{fs.closeSync(file);}
 }
 // Fresh directory only; existing output (including hard links) is never rewritten.
 export function writeProtectedDirectory(out,files){
@@ -64,9 +69,31 @@ export function writeProtectedDirectory(out,files){
     }
   }catch(e){unavailable(e);}finally{if(fd!==undefined)fs.closeSync(fd);if(parent!==undefined)fs.closeSync(parent);}
 }
-export function writeReceipt(file,receipt){
+// Reserve an exclusive descriptor BEFORE input reads or network activity. The
+// same descriptor is completed once; a killed process leaves an invalid empty
+// receipt, never a passing proof. A repeat run must choose a fresh filename.
+export function reserveReceipt(file){
   if(!file)throw new GateBlocked('PROTECTED_RECEIPT_REQUIRED');
-  let parent;
-  try{const p=workParent(file);parent=p.fd;writeNew(parent,path.basename(p.absolute),JSON.stringify(receipt,null,2)+'\n');}
+  let parent,fd;
+  try{const p=workParent(file);parent=p.fd;fd=openNew(parent,path.basename(p.absolute));}
   catch(e){unavailable(e);}finally{if(parent!==undefined)fs.closeSync(parent);}
+  return receipt=>{
+    ensure(fd!==undefined,'RECEIPT_ALREADY_COMPLETED');
+    try{fs.writeFileSync(fd,JSON.stringify(receipt,null,2)+'\n');}
+    catch(e){unavailable(e);}finally{fs.closeSync(fd);fd=undefined;}
+  };
+}
+export function writeReceipt(file,receipt){reserveReceipt(file)(receipt);}
+export function receiptArgument(args,{revoked=false}={}){
+  const rest=revoked?args.filter(x=>x!=='--revoked'):args;
+  if(args.filter(x=>x==='--revoked').length>(revoked?1:0)||rest.length!==2||rest[0]!=='--receipt'||!rest[1]||rest[1].startsWith('--'))throw new GateBlocked('PROTECTED_RECEIPT_REQUIRED');
+  return rest[1];
+}
+export function prepareWork(){
+  let fd;try{fd=directory(path.join(ROOT,'work'),{work:true});}
+  catch(e){unavailable(e);}finally{if(fd!==undefined)fs.closeSync(fd);}
+}
+if(process.argv[1]===fileURLToPath(import.meta.url)){
+  try{if(process.argv.length!==3||process.argv[2]!=='--init-work')throw new GateBlocked('INVALID_INIT_ARGUMENTS');prepareWork();console.log('PASS: private work directory ready');}
+  catch{console.log('BLOCKED: private work directory unavailable');process.exitCode=2;}
 }

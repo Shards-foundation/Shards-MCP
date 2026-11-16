@@ -10,7 +10,8 @@ The reviewed head's two applicable Actions workflows both concluded success;
 that did not negate any finding below.
 
 Links use the original review anchors on [PR #47](https://github.com/Shards-foundation/Shards-MCP/pull/47).
-Every unique actionable finding is VALID. No finding was dismissed because CI passed.
+Every unique actionable finding is VALID. Two additional Gitar findings from the
+first correction were reconciled in the second bounded cycle. No finding was dismissed because CI passed.
 
 | ID | Reviewer / severity / original anchor | Classification | Correction | Regression evidence | Resolution |
 | --- | --- | --- | --- | --- | --- |
@@ -26,6 +27,8 @@ Every unique actionable finding is VALID. No finding was dismissed because CI pa
 | R10 | Cubic P3 `discussion_r4591496724` | VALID | Protected exclusive receipt writer creates missing private work; CLI requires --receipt instead of unsafe shell redirection; umask documented | Receipt mode under umask 000; existing-file and symlink rejection; CLI missing-input receipt | Fixed; thread evidence/actions recorded on PR; independent re-review required |
 | R11 | Cubic P2 `discussion_r4591496603` | VALID | Pin instructions hash actual git-show bytes and compare both recorded SHA-256 values | Executed documented pin command; missing pin still BLOCKED | Fixed; thread evidence/actions recorded on PR; independent re-review required |
 | R12 | Qodo medium 2 `issuecomment-6929074382` | VALID | Optional exact operator-approved Access binding set in builder/verifier; default forbids extras; no configuration changes | `approved optional Access bindings remain exact`: correct, wrong, missing, extra and secret-type cases | Fixed; thread evidence/actions recorded on PR; independent re-review required |
+| R13 | Gitar `discussion_r4592014589`, assessed P2 | VALID | Reserve the exclusive protected receipt descriptor before any input or network activity; complete the held descriptor once | `hosted CLIs reserve valid receipt descriptors`: missing/flag/existing/outside/symlink paths produce zero network calls; valid-path control exercises interception; pathname swap cannot redirect completion | Fixed in cycle 2; thread evidence/actions on PR; independent re-review required |
+| R14 | Gitar `discussion_r4592014746`, assessed P3 | VALID | Descriptor-based --init-work creates or verifies private work before documented npm cache creation, including default umask 022 | `documented private work initialization precedes npm cache creation`: fresh root becomes 0700; repeated init succeeds; public existing root is refused | Fixed in cycle 2; thread evidence/actions on PR; independent re-review required |
 
 CodeAnt's risk summary repeats R2. Summaries/promotional comments contain no further
 remediation. Sourcery reports its free review budget exhausted; no upgrade is
@@ -61,6 +64,9 @@ cache by prepending its bin directory to PATH. No runtime or lockfile was upgrad
 
 ```sh
 node --version
+# Before npm/cache creation, safely create or verify private work (no credentials).
+node deployment/cloudflare/staging/protected-file.mjs --init-work
+umask 077
 npm ci --cache "$PWD/work/npm-cache" --prefix deployment/cloudflare/staging --ignore-scripts --audit=false --fund=false
 npm test --prefix deployment/cloudflare/staging
 node --test deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs deployment/cloudflare/workspace.test.mjs deployment/cloudflare/verify_release_deployment.test.mjs deployment/cloudflare/sdk.test.mjs
@@ -98,7 +104,7 @@ copy and synthetic files were removed after recording a protected local receipt.
 The committed regressions now exercise these boundaries and the three documentation
 corrections. Hosted evidence and approved artifact hashes were not changed.
 
-Final local results: **36/36 staging tests PASS**, including 14 new security tests
+Cycle 2 final local results: **38/38 staging tests PASS**, including 16 new security tests
 and six killed SQL predicate mutations; **47/47 Worker/SDK**, **208/208 Python**,
 **6/6 schema**, **6/6 documentation-contract**, **10/10 skills** and **10/10 native
 skill-install** tests PASS. The latter three are subsets of the Python suite, not
@@ -108,3 +114,12 @@ no external actions, and preflight is READY_LOCAL when the virtualenv bin is on
 PATH. The unverified hosted release template correctly returns NO_GO. The local
 acceptance boundary table retains 11 PASS and three BLOCKED rows in each before/
 after run; these rows are not hosted results. Exact-head CI is reported on the PR.
+
+Cycle 1 exact-head CI at `43f3887cf9cff9439b4e7173fb5ab3e166c7ff59` passed all
+four applicable workflows, including Python 3.11–3.15. Gitar then identified R13
+and R14, both accepted and corrected in cycle 2. The receipt is now reserved before
+input/network work; invalid receipt arguments cannot initiate even a Cloudflare
+read. Initializing work uses only Node built-ins and precedes dependency/cache
+creation, rejecting unsafe existing roots without chmod. Full local staging and
+regression checks were repeated after the corrections; final-head CI and fresh
+automated review are reported in the PR. This task stops after at most three cycles.

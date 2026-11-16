@@ -3,7 +3,7 @@ import {SOURCE,hash} from './build.mjs';
 import {validateApproval,ensure,GateBlocked,GateFailure} from './policy.mjs';
 const API='https://api.cloudflare.com/client/v4';
 import {responseBytes} from './response-body.mjs';
-import {readProtected,writeReceipt} from './protected-file.mjs';
+import {readProtected,reserveReceipt,receiptArgument} from './protected-file.mjs';
 export {readProtected} from './protected-file.mjs';
 export function cloudflareReader(token,fetchImpl=fetch){
   if(typeof token!=='string'||!token.trim())throw new GateBlocked('CLOUDFLARE_READ_CREDENTIAL_REQUIRED');
@@ -85,9 +85,9 @@ export async function verifyDeployment(approval,{read,requireReachable=true}={})
   return {account_id:a.account_id,database_id:a.database_id,approval_sha256:hash(JSON.stringify(a)),workers};
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
-  let report;
-  try{if(!process.argv.includes('--receipt'))throw new GateBlocked('PROTECTED_RECEIPT_REQUIRED');const a=JSON.parse(readProtected(process.env.STAGING_APPROVAL_FILE));const proof=await verifyDeployment(a,{requireReachable:false});report={status:'PASS',evidence:proof};}
+  let complete,report;
+  try{complete=reserveReceipt(receiptArgument(process.argv.slice(2)));const a=JSON.parse(readProtected(process.env.STAGING_APPROVAL_FILE));const proof=await verifyDeployment(a,{requireReachable:false});report={status:'PASS',evidence:proof};}
   catch(e){report={status:e instanceof GateBlocked?'BLOCKED':'FAIL',evidence:e instanceof GateBlocked||e instanceof GateFailure?e.message:'VERIFIER_RUNTIME_UNAVAILABLE'};process.exitCode=e instanceof GateBlocked?2:1;}
-  try{writeReceipt(process.argv.includes('--receipt')?process.argv[process.argv.indexOf('--receipt')+1]:undefined,report);console.log('Deployment receipt written');}
+  try{if(!complete)throw new GateBlocked('PROTECTED_RECEIPT_REQUIRED');complete(report);console.log('Deployment receipt written');}
   catch{console.log('BLOCKED: protected receipt unavailable');process.exitCode=2;}
 }

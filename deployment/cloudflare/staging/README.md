@@ -168,7 +168,10 @@ or root can still move/read private files or modify this program; this is not a
 sandbox against a compromised operator account.
 
 Hosted CLIs require `--receipt work/new-name.json`. They create exclusive 0600
-receipts through the same protected directory traversal, never print live identity
+receipts through the same protected directory traversal, **before** input reads or
+network activity. The held descriptor is completed once, so a pathname swap cannot
+redirect the evidence. An interrupted process can leave an empty receipt; treat
+that as incomplete/BLOCKED and choose a new filename. The CLIs never print live identity
 proofs to stdout, and refuse existing files or escapes. Do not redirect proof JSON
 with the shell or commit operator profiles. A missing/unreadable protected input
 is BLOCKED; an unsafe file's deliberate permission check remains FAIL.
@@ -194,6 +197,9 @@ From the existing PR #47 branch, use Node **22.16.0**:
 
 ```sh
 node --version
+# Before npm/cache creation, safely create or verify private work (no credentials).
+node deployment/cloudflare/staging/protected-file.mjs --init-work
+umask 077
 npm ci --prefix deployment/cloudflare/staging --ignore-scripts --audit=false --fund=false
 npm test --prefix deployment/cloudflare/staging
 node deployment/cloudflare/staging/build.mjs --out work/pr47-stage --approval deployment/cloudflare/staging/local-target.example.json

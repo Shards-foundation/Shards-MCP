@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import {spawnSync} from 'node:child_process';
 import {ROOT,configuration} from './build.mjs';
-import {readProtected,writeProtectedDirectory,writeReceipt} from './protected-file.mjs';
+import {readProtected,writeProtectedDirectory,writeReceipt,reserveReceipt} from './protected-file.mjs';
 import {GateBlocked,GateFailure,validateApproval} from './policy.mjs';
 import {accept} from './acceptance.mjs';
 import {cloudflareReader,moduleDigest,verifyDeployment} from './verify-deployment.mjs';
@@ -150,7 +150,10 @@ test('output ancestor replacement cannot redirect descriptor-relative writes',()
 test('receipt files are exclusive, protected and confined to work, regardless of umask',()=>{
   const dir=scratch(),old=process.umask(0);try{
     const file=path.join(dir,'receipt.json');writeReceipt(file,{status:'BLOCKED'});assert.equal(fs.statSync(file).mode&0o777,0o600);
-    assert.throws(()=>writeReceipt(file,{status:'PASS'}));fs.symlinkSync(dir,path.join(dir,'link'));assert.throws(()=>writeReceipt(path.join(dir,'link','escape.json'),{}));
+    assert.throws(()=>writeReceipt(file,{status:'PASS'}));
+    const reserved=path.join(dir,'reserved.json'),target=path.join(dir,'target.json'),complete=reserveReceipt(reserved);fs.writeFileSync(target,'unchanged',{mode:0o600});fs.renameSync(reserved,reserved+'.old');fs.symlinkSync(target,reserved);complete({status:'BLOCKED'});
+    assert.equal(fs.readFileSync(target,'utf8'),'unchanged');assert.equal(JSON.parse(readProtected(reserved+'.old')).status,'BLOCKED');assert.throws(()=>complete({status:'PASS'}));
+    fs.symlinkSync(dir,path.join(dir,'link'));assert.throws(()=>writeReceipt(path.join(dir,'link','escape.json'),{}));
     assert.throws(()=>writeReceipt(path.join(ROOT,'receipt.json'),{}));assert.ok(!fs.existsSync(path.join(ROOT,'receipt.json')));
   }finally{process.umask(old);fs.rmSync(dir,{recursive:true,force:true});}
 });
@@ -177,5 +180,37 @@ test('clean checkout work creation is private; symlinked or public work roots ar
     assert.equal(fs.existsSync(path.join(dir,'escape.json')),false);assert.equal(fs.existsSync(path.join(dir,'escape')),false);
     fs.unlinkSync(path.join(root,'work'));fs.mkdirSync(path.join(root,'work'),{mode:0o755});fs.chmodSync(path.join(root,'work'),0o755);
     assert.throws(()=>helper.writeReceipt(path.join(root,'work','receipt.json'),{}),e=>e instanceof Error&&e.message==='PROTECTED_DIRECTORY_PERMISSIONS');
+  }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test('hosted CLIs reserve valid receipt descriptors before any network activity',()=>{
+  const dir=scratch(),marker=path.join(dir,'network'),preload=path.join(dir,'preload.mjs');
+  try{
+    const approval=path.join(dir,'approval.json'),fixture=path.join(dir,'fixtures.json'),token=path.join(dir,'token');
+    fs.writeFileSync(approval,JSON.stringify(localApproval()),{mode:0o600});fs.writeFileSync(fixture,JSON.stringify(fixtures()),{mode:0o600});fs.writeFileSync(token,'synthetic-read-token',{mode:0o600});
+    fs.writeFileSync(preload,"import fs from 'node:fs';globalThis.fetch=async()=>{fs.writeFileSync("+JSON.stringify(marker)+",'requested');throw Error('synthetic private network diagnostic');};");
+    const env={STAGING_APPROVAL_FILE:approval,STAGING_FIXTURES_FILE:fixture,STAGING_CF_READ_TOKEN_FILE:token,STAGING_URL:localApproval().workers[0].origin,NODE_OPTIONS:'--import='+preload};
+    const existing=path.join(dir,'existing.json');fs.writeFileSync(existing,'unchanged',{mode:0o600});fs.symlinkSync(dir,path.join(dir,'link'));
+    const denied=[[],['--receipt'],['--receipt','--revoked'],['--receipt',existing],['--receipt',path.join(ROOT,'forbidden.json')],['--receipt',path.join(dir,'link','escape.json')]];
+    for(const script of ['acceptance.mjs','verify-deployment.mjs']){
+      for(const args of denied){const r=cli(script,args,env);assert.equal(r.status,2);assert.equal(fs.existsSync(marker),false);assert.ok(!r.stdout.includes('synthetic-read-token'));}
+      const receipt=path.join(dir,script+'.json'),r=cli(script,['--receipt',receipt],env);
+      assert.equal(r.status,2);assert.equal(fs.existsSync(marker),true,'Control proves network interception is active');fs.unlinkSync(marker);
+      const report=JSON.parse(readProtected(receipt));assert.equal(script==='acceptance.mjs'?report.results[0].status:report.status,'BLOCKED');assert.ok(!JSON.stringify(report).includes('private network diagnostic'));
+    }
+    assert.equal(fs.readFileSync(existing,'utf8'),'unchanged');assert.equal(fs.existsSync(path.join(ROOT,'forbidden.json')),false);
+  }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+test('documented private work initialization precedes npm cache creation under umask 022',()=>{
+  const dir=scratch(),root=path.join(dir,'isolated');fs.mkdirSync(root,{mode:0o700});
+  try{
+    fs.writeFileSync(path.join(root,'artifact.mjs'),'export const ROOT='+JSON.stringify(root)+';');
+    for(const file of ['protected-file.mjs','errors.mjs'])fs.copyFileSync(new URL(file,import.meta.url),path.join(root,file));
+    const preload=path.join(root,'umask.mjs');fs.writeFileSync(preload,'process.umask(0o022);');
+    const run=()=>spawnSync(process.execPath,['--import',preload,path.join(root,'protected-file.mjs'),'--init-work'],{encoding:'utf8'});
+    assert.equal(run().status,0);assert.equal(fs.statSync(path.join(root,'work')).mode&0o777,0o700);
+    assert.equal(run().status,0);fs.chmodSync(path.join(root,'work'),0o755);assert.equal(run().status,2);assert.equal(fs.statSync(path.join(root,'work')).mode&0o777,0o755);
+    for(const name of ['README.md','REVIEW-REMEDIATION.md']){const doc=fs.readFileSync(new URL(name,import.meta.url),'utf8');assert.ok(doc.indexOf('protected-file.mjs --init-work')<doc.indexOf('npm ci'));}
   }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });

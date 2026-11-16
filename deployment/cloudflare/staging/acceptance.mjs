@@ -4,7 +4,7 @@ import {stagingUrl,validateApproval,GateFailure,GateBlocked,ensure} from './poli
 import {verifyDeployment,readProtected} from './verify-deployment.mjs';
 import {checkVisibility} from './visibility.mjs';
 import {responseBytes} from './response-body.mjs';
-import {writeReceipt} from './protected-file.mjs';
+import {reserveReceipt,receiptArgument} from './protected-file.mjs';
 import {localTransport} from './harness.mjs';
 export {stagingUrl} from './policy.mjs';
 export async function accept(options){
@@ -139,13 +139,16 @@ export async function accept(options){
   return {source_commit:SOURCE,environment:localRuntime?'local-workerd':'hosted',results};
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
+  let complete,report;
   try{
-    if(!process.argv.includes('--receipt'))throw new GateBlocked('PROTECTED_RECEIPT_REQUIRED');
+    complete=reserveReceipt(receiptArgument(process.argv.slice(2),{revoked:true}));
     const f=JSON.parse(readProtected(process.env.STAGING_FIXTURES_FILE));
     const approval=JSON.parse(readProtected(process.env.STAGING_APPROVAL_FILE));
     let access;
     if(process.env.STAGING_ACCESS_FILE)access=JSON.parse(readProtected(process.env.STAGING_ACCESS_FILE));
-    const report=await accept({base:process.env.STAGING_URL,faultBase:process.env.STAGING_FAULT_URL,fixtures:f,approval,revoked:process.argv.includes('--revoked'),access});
-    writeReceipt(process.argv[process.argv.indexOf('--receipt')+1],report);console.log('Staging receipt written');process.exitCode=report.results.some(r=>r.status==='FAIL')?1:report.results.some(r=>r.status==='BLOCKED')?2:0;
-  }catch{console.error('BLOCKED: invalid staging target, protected fixture file or runtime');process.exitCode=2;}
+    report=await accept({base:process.env.STAGING_URL,faultBase:process.env.STAGING_FAULT_URL,fixtures:f,approval,revoked:process.argv.includes('--revoked'),access});
+    process.exitCode=report.results.some(r=>r.status==='FAIL')?1:report.results.some(r=>r.status==='BLOCKED')?2:0;
+  }catch(e){report={status:e instanceof GateFailure?'FAIL':'BLOCKED',evidence:e instanceof GateFailure||e instanceof GateBlocked?e.message:'INVALID_STAGING_INPUT_OR_RUNTIME'};process.exitCode=e instanceof GateFailure?1:2;}
+  try{if(!complete)throw new GateBlocked('PROTECTED_RECEIPT_REQUIRED');complete(report);console.log('Staging receipt written');}
+  catch{console.error('BLOCKED: protected receipt unavailable');process.exitCode=2;}
 }
