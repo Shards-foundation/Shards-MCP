@@ -2,6 +2,7 @@ name: PR46 isolated staging acceptance (no deployment)
 on:
   pull_request:
     paths:
+      - '.gitignore'
       - 'deployment/cloudflare/staging/**'
       - '.github/workflows/edge-staging-acceptance.yml'
   workflow_dispatch:
@@ -29,7 +30,7 @@ jobs:
         run: npm test --prefix deployment/cloudflare/staging
       - name: Build pinned artifacts without deployment
         run: |
-          node deployment/cloudflare/staging/build.mjs --out work/pr46-staging-ci --subdomain acceptance-local
+          node deployment/cloudflare/staging/build.mjs --out work/pr46-staging-ci --approval deployment/cloudflare/staging/local-target.example.json
           node --check work/pr46-staging-ci/worker.js
           node --check work/pr46-staging-ci/storage-failure.js
       - name: Existing Worker and audit regression
