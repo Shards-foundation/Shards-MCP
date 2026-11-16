@@ -14,3 +14,6 @@ build/
 
 # Local deployment and operator credentials
 /secrets/
+
+# Synthetic acceptance credentials and generated evidence
+/work/
