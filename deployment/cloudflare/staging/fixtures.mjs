@@ -1,10 +1,11 @@
 import {randomBytes,createHash} from 'node:crypto';
-import fs from 'node:fs';
+import {writeProtectedDirectory} from './protected-file.mjs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {ROOT,SOURCE} from './build.mjs';
-export function fixtures(){
-  const now=new Date(),expires=new Date(now.getTime()+3600000).toISOString();
+export function fixtures({lifetimeMinutes=120}={}){
+  if(!Number.isInteger(lifetimeMinutes)||lifetimeMinutes<30||lifetimeMinutes>240)throw Error('INVALID_FIXTURE_LIFETIME');
+  const now=new Date(),expires=new Date(now.getTime()+lifetimeMinutes*60000).toISOString();
   const roles={observer:['agent:identity'],reader:['agent:identity','agent:list','message:read','task:read'],
     foreign:['agent:identity','agent:list','message:read','task:read'],peer:['agent:identity'],revocable:['agent:identity'],expired:['agent:identity'],disabled:['agent:identity']};
   const agents=Object.entries(roles).map(([role,scopes])=>({role,id:`stage_${role}_00001`,tenant:['foreign','peer'].includes(role)?'staging-b':'staging-a',
@@ -39,11 +40,10 @@ if(process.argv[1]===fileURLToPath(import.meta.url)){
   try{
     const out=path.resolve(process.argv[2]||'');
     if(!out.startsWith(path.join(ROOT,'work')+path.sep))throw Error();
-    fs.mkdirSync(out,{recursive:true,mode:0o700});
-    const f=fixtures();
-    for(const [name,body] of Object.entries({'fixtures.json':JSON.stringify(f),'seed.sql':seedStatements(f).join(';\n')+';\n','revoke.sql':revocationSql()})){
-      fs.writeFileSync(path.join(out,name),body,{mode:0o600,flag:'wx'});
-    }
+    const args=process.argv.slice(3);
+    if(args.length&&!(args.length===2&&args[0]==='--lifetime-minutes'))throw Error();
+    const f=fixtures(args.length?{lifetimeMinutes:Number(args[1])}:{});
+    writeProtectedDirectory(out,{'fixtures.json':JSON.stringify(f),'seed.sql':seedStatements(f).join(';\n')+';\n','revoke.sql':revocationSql()});
     console.log('PASS: synthetic fixtures created in protected files; no credentials printed');
   }catch{console.error('BLOCKED: use a new directory under work; existing fixtures are never overwritten');process.exitCode=2;}
 }

@@ -6,6 +6,8 @@ import {execFileSync} from 'node:child_process';
 import {artifact,configuration,SOURCE,ROOT} from './build.mjs';
 import {fixtures,revocationSql} from './fixtures.mjs';
 import {accept,stagingUrl} from './acceptance.mjs';
+import {fakeApi} from './api-fixture.mjs';
+fs.mkdirSync(path.join(ROOT,'work'),{recursive:true,mode:0o700});
 import {GateBlocked} from './policy.mjs';
 import {checkVisibility} from './visibility.mjs';
 import {runtime,localApproval} from './harness.mjs';
@@ -26,7 +28,7 @@ test('real workerd/D1 matrix and parallel post-revocation denial; hosted identit
   try{
     for(const revoked of [false,true]){
       if(revoked)await r.db.prepare(revocationSql()).run();
-      const report=await accept({...r.options,revoked});console.log(JSON.stringify(report));
+      const report=await accept(r.localOptions({revoked}));console.log(JSON.stringify(report));
       assert.equal(report.results.length,14);
       assert.equal(report.results.filter(x=>x.status==='FAIL').length,0,'Local acceptance failure');
       assert.equal(report.results.filter(x=>x.status==='BLOCKED'&&x.evidence==='LOCAL_WORKERD_NOT_HOSTED').length,2);
@@ -50,7 +52,7 @@ for(const [tool,owner,key] of [['shards_message_inbox','recipient_id','messages'
 test('independent preflight failure or unavailable bytes stops all Worker requests',async()=>{
   for(const blocked of [false,true]){
     let requests=0;
-    const report=await accept({approval:localApproval(),base:localApproval().workers[0].origin,fixtures:fixtures(),fetchImpl:async()=>{requests++;throw Error();},verifyIdentity:async()=>{if(blocked)throw new GateBlocked('DEPLOYED_MODULE_BYTES_UNAVAILABLE');throw Error('private simulated diagnostic');}});
+    const report=await accept({approval:localApproval(),base:localApproval().workers[0].origin,fixtures:fixtures(),fetchImpl:async()=>{requests++;throw Error();},readCloudflare:async()=>{if(blocked)throw new GateBlocked('DEPLOYED_MODULE_BYTES_UNAVAILABLE');throw Error('private simulated diagnostic');}});
     assert.equal(requests,0);assert.equal(report.results[0].status,blocked?'BLOCKED':'FAIL');
     assert.equal(JSON.stringify(report).includes('private simulated diagnostic'),false);
   }
@@ -59,7 +61,7 @@ test('independent preflight failure or unavailable bytes stops all Worker reques
 test('a forged or redirected manifest cannot override verification or leak a token',async()=>{
   for(const response of [()=>Response.json({source_commit:'wrong'}),()=>new Response(null,{status:302,headers:{location:'https://unapproved.example'}})]){
     let requests=0;const f=fixtures(),a=localApproval();
-    const report=await accept({approval:a,base:a.workers[0].origin,fixtures:f,localRuntime:true,fetchImpl:async(url,options)=>{requests++;assert.equal(new Headers(options.headers).has('authorization'),false);assert.equal(options.redirect,'manual');return response();}});
+    const report=await accept({approval:a,base:a.workers[0].origin,fixtures:f,readCloudflare:fakeApi(a),fetchImpl:async(url,options)=>{requests++;assert.equal(new Headers(options.headers).has('authorization'),false);assert.equal(options.redirect,'manual');return response();}});
     assert.equal(requests,1);assert.equal(report.results.at(-1).status,'FAIL');
     assert.equal(f.agents.some(a=>JSON.stringify(report).includes(a.token)),false);
   }
@@ -68,7 +70,7 @@ test('a forged or redirected manifest cannot override verification or leak a tok
 test('wrong denial reason is a failure even with isError true and valid forbidden arguments',async()=>{
   const r=await runtime();
   try{
-    const original=r.options.fetchImpl;
+    const original=r.fetchImpl;
     const fetchImpl=async(url,opts)=>{
       const body=opts?.body?JSON.parse(opts.body):{};
       if(body.params?.name==='shards_task_create'){
@@ -77,17 +79,17 @@ test('wrong denial reason is a failure even with isError true and valid forbidde
       }
       return original(url,opts);
     };
-    const report=await accept({...r.options,fetchImpl});
+    const report=await accept({...r.options,fetchImpl,readCloudflare:fakeApi(r.options.approval)});
     assert.equal(report.results.find(x=>x.case==='/connect signed identity and no agent privilege').status,'FAIL');
     assert.equal(report.results.find(x=>x.case==='scope and tenant isolation on calls').status,'FAIL');
   }finally{await r.dispose();}
 });
 
 test('root work ignore covers exclusive synthetic token fixture files',()=>{
-  fs.mkdirSync(path.join(ROOT,'work'),{recursive:true});const dir=fs.mkdtempSync(path.join(ROOT,'work','ignore-fixture-'));
+  fs.mkdirSync(path.join(ROOT,'work'),{recursive:true,mode:0o700});const dir=fs.mkdtempSync(path.join(ROOT,'work','ignore-fixture-'));
   try{
-    execFileSync(process.execPath,['deployment/cloudflare/staging/fixtures.mjs',dir],{cwd:ROOT,stdio:'pipe'});
-    const file=path.join(dir,'fixtures.json');assert.equal(fs.statSync(file).mode&0o077,0);
+    execFileSync(process.execPath,['deployment/cloudflare/staging/fixtures.mjs',path.join(dir,'new')],{cwd:ROOT,stdio:'pipe'});
+    const file=path.join(dir,'new','fixtures.json');assert.equal(fs.statSync(file).mode&0o077,0);
     const relative=path.relative(ROOT,file);const ignored=execFileSync('git',['check-ignore','--no-index',relative],{cwd:ROOT,encoding:'utf8'}).trim();assert.equal(ignored,relative);
   }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
@@ -102,7 +104,7 @@ test('independent echo runtime confirms empty Authorization cannot be exercised 
 
 
 test('builder CLI requires explicit approval and writes disabled configs with expected artifact bytes',()=>{
-  const dir=fs.mkdtempSync(path.join(ROOT,'work','builder-proof-'));
+  const parent=fs.mkdtempSync(path.join(ROOT,'work','builder-proof-')),dir=path.join(parent,'new');
   try{
     assert.throws(()=>execFileSync(process.execPath,['deployment/cloudflare/staging/build.mjs','--out',dir],{cwd:ROOT,stdio:'pipe'}));
     execFileSync(process.execPath,['deployment/cloudflare/staging/build.mjs','--out',dir,'--approval','deployment/cloudflare/staging/local-target.example.json'],{cwd:ROOT,stdio:'pipe'});
@@ -112,7 +114,7 @@ test('builder CLI requires explicit approval and writes disabled configs with ex
     assert.equal(fs.readFileSync(path.join(dir,'fault/worker.js'),'utf8'),artifact('local',{fault:true}).script);
     const fault=JSON.parse(fs.readFileSync(path.join(dir,'wrangler-fault.json')));assert.equal(fault.no_bundle,true);assert.equal(path.basename(fault.main),'worker.js');
     assert.deepEqual(fs.readdirSync(path.join(dir,'main')),['worker.js']);assert.deepEqual(fs.readdirSync(path.join(dir,'fault')),['worker.js']);
-  }finally{fs.rmSync(dir,{recursive:true,force:true});}
+  }finally{fs.rmSync(parent,{recursive:true,force:true});}
 });
 
 test('network and timeout failures preserve TRANSPORT_UNAVAILABLE without leaking diagnostics',async()=>{
@@ -120,7 +122,7 @@ test('network and timeout failures preserve TRANSPORT_UNAVAILABLE without leakin
     const f=fixtures(),a=localApproval();let requests=0;
     const diagnostic='sensitive diagnostic '+f.agents[0].token;
     const error=kind==='network'?new Error(diagnostic):new DOMException(diagnostic,'TimeoutError');
-    const report=await accept({approval:a,base:a.workers[0].origin,fixtures:f,localRuntime:true,fetchImpl:async()=>{requests++;throw error;}});
+    const report=await accept({approval:a,base:a.workers[0].origin,fixtures:f,readCloudflare:fakeApi(a),fetchImpl:async()=>{requests++;throw error;}});
     assert.equal(requests,1);
     const blocked=report.results.find(r=>r.case==='supplementary worker manifest');
     assert.equal(blocked?.status==='BLOCKED',true);

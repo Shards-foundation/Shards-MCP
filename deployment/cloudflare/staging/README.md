@@ -146,6 +146,48 @@ stops after the failed manifest request, and checks that raw diagnostics and
 synthetic tokens are absent from the report. It failed with empty evidence against
 e509fb4 and passes with the correction.
 
+## Final review remediation
+
+See [the findings and verification matrix](REVIEW-REMEDIATION.md) for the final
+Codex, Cubic, CodeAnt and Qodo review reconciliation. Interrupted response streams
+now preserve static BLOCKED evidence; size/digest/authority assertions still fail.
+The public `localRuntime` and verifier-override switches are rejected. Only a
+transport constructed by the network-disabled local workerd harness receives the
+local exemption, through an internal object-identity registry. Copying or overriding
+its options loses that exemption and requires the full independent verifier.
+
+Protected reads traverse directories with Linux descriptor-relative `O_NOFOLLOW`,
+open the file once, validate owner/mode/type/link count/size with `fstat`, and read
+that descriptor. Bounded reads and a second stat reject detected in-place changes.
+Outputs use exclusive creation in a **new** 0700 directory under ignored `work/`;
+files are 0600. Existing directories/files, symlink ancestors and public `work/`
+are refused, not overwritten or chmodded. Choose a new output directory per run.
+The helper safely creates missing `work/` on a clean checkout. Linux with procfs is
+required; other platforms block. A malicious process with the operator's own UID
+or root can still move/read private files or modify this program; this is not a
+sandbox against a compromised operator account.
+
+Hosted CLIs require `--receipt work/new-name.json`. They create exclusive 0600
+receipts through the same protected directory traversal, never print live identity
+proofs to stdout, and refuse existing files or escapes. Do not redirect proof JSON
+with the shell or commit operator profiles. A missing/unreadable protected input
+is BLOCKED; an unsafe file's deliberate permission check remains FAIL.
+
+Fixtures default to two hours, bounded to 30–240 minutes with
+`node deployment/cloudflare/staging/fixtures.mjs work/new-fixtures --lifetime-minutes 120`.
+Complete separately authorized before/revoke/after runs within that window. The
+revocation row requires at least 30 seconds remaining both before and after its
+requests; expired/near-expiry fixtures are BLOCKED, never evidence of revocation.
+This does not authorize provisioning or changing the existing revoked credentials.
+
+Optional staging Access bindings require an explicit protected approval `access`
+object with `team`, `audience` and `connect_audience` strings. The builder and
+verifier require exactly those three approved plain-text values on the main Worker;
+the fault Worker remains marker-only. Profiles without this block still reject
+all Access bindings. No Access configuration is added to the existing profile or
+Cloudflare by this correction. Hosted Access remains BLOCKED until independently
+approved and configured; local signed identity tests use synthetic keys only.
+
 ## Exact local commands
 
 From the existing PR #47 branch, use Node **22.16.0**:
@@ -158,9 +200,9 @@ node deployment/cloudflare/staging/build.mjs --out work/pr47-stage --approval de
 node --check work/pr47-stage/main/worker.js
 node --check work/pr47-stage/fault/worker.js
 node --test deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs deployment/cloudflare/workspace.test.mjs deployment/cloudflare/verify_release_deployment.test.mjs
-python deployment/cloudflare/schema_migrations_test.py -v
-python scripts/docs_check.py
-python scripts/skillctl.py validate
+python3 deployment/cloudflare/schema_migrations_test.py -v
+python3 scripts/docs_check.py
+python3 scripts/skillctl.py validate
 ```
 
 The locked runtime is Miniflare 4.20260730.0, with undici 7.30.1 and sharp 0.35.5
@@ -189,7 +231,8 @@ API only, never the Worker; do not put a token value in argv or enable shell tra
 ```sh
 export STAGING_APPROVAL_FILE="$PWD/work/pr47-approved-target.json"
 # STAGING_CF_READ_TOKEN_FILE must point to an existing protected credential file.
-node deployment/cloudflare/staging/verify-deployment.mjs > work/pr47-deployment-proof.json
+umask 077
+node deployment/cloudflare/staging/verify-deployment.mjs --receipt work/pr47-deployment-proof.json
 ```
 
 Current mismatched bytes require FAIL; unavailable bytes/permissions require BLOCKED.
@@ -201,9 +244,9 @@ prepared runner requires a protected **version 2** fixture file and exact URLs:
 # STAGING_URL and STAGING_FAULT_URL must be the exact protected profile origins.
 # STAGING_FIXTURES_FILE: existing 0600 version-2 synthetic fixture JSON.
 # STAGING_ACCESS_FILE: optional 0600 isolated staging issuer/token, once configured.
-node deployment/cloudflare/staging/acceptance.mjs > work/pr47-before.json
+node deployment/cloudflare/staging/acceptance.mjs --receipt work/pr47-before.json
 # Only after a separately authorized, completed revocation in staging D1:
-node deployment/cloudflare/staging/acceptance.mjs --revoked > work/pr47-after.json
+node deployment/cloudflare/staging/acceptance.mjs --revoked --receipt work/pr47-after.json
 ```
 
 These commands do not change token state themselves. Identity verification occurs
@@ -223,8 +266,18 @@ ref/archive for the pin, or explicitly re-pin to a reachable immutable merge com
 Verify the source and schema bytes against the recorded SHA-256 first:
 
 ```sh
-git cat-file -e c99fa809bc17e71859466ce23b5f306ed05118ff:deployment/cloudflare/worker.js
-git cat-file -e c99fa809bc17e71859466ce23b5f306ed05118ff:deployment/cloudflare/schema.sql
+python3 - <<'PIN'
+import hashlib, subprocess
+expected = {
+    'deployment/cloudflare/worker.js': '7a19a15a01311142348307d610249e367d79eea58339098f69e210555710e3a7',
+    'deployment/cloudflare/schema.sql': '51c86764014f87b7c1abf30f9636c23d495ab0847aa3441a71013040314ffdd3',
+}
+for filename, digest in expected.items():
+    data = subprocess.check_output(['git', 'show', 'c99fa809bc17e71859466ce23b5f306ed05118ff:' + filename])
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise SystemExit('FAIL: pinned source digest mismatch')
+print('PASS: both pinned source digests match')
+PIN
 ```
 
 Worker source SHA-256: `7a19a15a01311142348307d610249e367d79eea58339098f69e210555710e3a7`.
@@ -264,7 +317,7 @@ as part of this task. No production rollback, credential rotation or restore is
 needed because production was unchanged. Independent Claude re-review is still
 required; no merge/deploy decision follows from this gate.
 
-### Correction verification receipt
+### Prior verification at reviewed head 0e3e939
 
 Node 22.16.0, clean `npm ci` using the committed lock: **22 staging tests PASS**,
 zero failed/cancelled/skipped. This includes the six independently killed SQL

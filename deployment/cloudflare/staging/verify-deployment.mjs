@@ -1,9 +1,9 @@
-import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {SOURCE,hash} from './build.mjs';
 import {validateApproval,ensure,GateBlocked,GateFailure} from './policy.mjs';
 const API='https://api.cloudflare.com/client/v4';
-import {readProtected} from './protected-file.mjs';
+import {responseBytes} from './response-body.mjs';
+import {readProtected,writeReceipt} from './protected-file.mjs';
 export {readProtected} from './protected-file.mjs';
 export function cloudflareReader(token,fetchImpl=fetch){
   if(typeof token!=='string'||!token.trim())throw new GateBlocked('CLOUDFLARE_READ_CREDENTIAL_REQUIRED');
@@ -14,14 +14,15 @@ export function cloudflareReader(token,fetchImpl=fetch){
     if(r.status===401||r.status===403)throw new GateBlocked('CLOUDFLARE_READ_PERMISSION');
     ensure(r.status<300||r.status>=400,'CLOUDFLARE_REDIRECT_DENIED');
     if(!r.ok)throw new GateBlocked('CLOUDFLARE_RESOURCE_UNAVAILABLE');
-    const reader=r.body?.getReader(),chunks=[];let size=0;
-    if(reader)while(true){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>3000000){await reader.cancel();throw new GateBlocked('CLOUDFLARE_RESPONSE_LIMIT');}chunks.push(part.value);}
-    return new Response(new Blob(chunks),{headers:r.headers});
+    const bytes=await responseBytes(r,{limit:3000000,limitError:new GateBlocked('CLOUDFLARE_RESPONSE_LIMIT'),transportCode:'CLOUDFLARE_READ_UNAVAILABLE'});
+    return new Response(bytes,{headers:r.headers});
   };
 }
 const json=async readPath=>{const r=await readPath;let j;try{j=await r.json();}catch{throw new GateBlocked('CLOUDFLARE_JSON_UNAVAILABLE');}ensure(j.success===true&&j.result,'CLOUDFLARE_ENVELOPE');return j.result;};
 function bindings(rows,a,fault){
-  ensure(Array.isArray(rows)&&rows.length===(fault?1:2),'BINDING_SET_MISMATCH');
+  const access=!fault&&a.access?{ACCESS_TEAM:a.access.team,ACCESS_AUD:a.access.audience,CONNECT_ACCESS_AUD:a.access.connect_audience}:{};
+  ensure(Array.isArray(rows)&&rows.length===(fault?1:2)+Object.keys(access).length,'BINDING_SET_MISMATCH');
+  for(const [name,text] of Object.entries(access))ensure(rows.some(b=>b.name===name&&b.type==='plain_text'&&b.text===text),'ACCESS_BINDING_MISMATCH');
   const marker=rows.find(b=>b.name==='STAGING_ACCEPTANCE');
   ensure(marker?.type==='plain_text'&&marker.text===SOURCE,'STAGING_MARKER_MISMATCH');
   if(!fault){const d=rows.find(b=>b.name==='EDGE_DB');ensure(d?.type==='d1'&&(d.id!==undefined||d.database_id!==undefined)&&(d.id===undefined||d.id===a.database_id)&&(d.database_id===undefined||d.database_id===a.database_id),'STAGING_D1_BINDING_MISMATCH');}
@@ -36,7 +37,7 @@ export async function moduleDigest(response,moduleName){
   const boundary=type.match(/boundary=(?:"([^"\r\n]+)"|([^;\s]+))/i);
   const b=boundary?.[1]||boundary?.[2];
   if(!b||b.length>70)throw new GateBlocked('DEPLOYED_MODULE_BYTES_UNAVAILABLE');
-  const data=Buffer.from(await response.arrayBuffer());
+  const data=await responseBytes(response,{limit:3000000,limitError:new GateBlocked('CLOUDFLARE_RESPONSE_LIMIT'),transportCode:'CLOUDFLARE_READ_UNAVAILABLE'});
   if(data.length>3000000)throw new GateBlocked('CLOUDFLARE_RESPONSE_LIMIT');
   const prefix=Buffer.from('--'+b+'\r\n'),delimiter=Buffer.from('\r\n--'+b);
   if(!data.subarray(0,prefix.length).equals(prefix))throw new GateBlocked('DEPLOYED_MODULE_BYTES_UNAVAILABLE');
@@ -84,6 +85,9 @@ export async function verifyDeployment(approval,{read,requireReachable=true}={})
   return {account_id:a.account_id,database_id:a.database_id,approval_sha256:hash(JSON.stringify(a)),workers};
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
-  try{const a=JSON.parse(readProtected(process.env.STAGING_APPROVAL_FILE));const proof=await verifyDeployment(a,{requireReachable:false});console.log(JSON.stringify({status:'PASS',evidence:proof}));}
-  catch(e){console.log(JSON.stringify({status:e instanceof GateBlocked?'BLOCKED':'FAIL',evidence:e instanceof GateBlocked||e instanceof GateFailure?e.message:'VERIFIER_RUNTIME_UNAVAILABLE'}));process.exitCode=e instanceof GateBlocked?2:1;}
+  let report;
+  try{if(!process.argv.includes('--receipt'))throw new GateBlocked('PROTECTED_RECEIPT_REQUIRED');const a=JSON.parse(readProtected(process.env.STAGING_APPROVAL_FILE));const proof=await verifyDeployment(a,{requireReachable:false});report={status:'PASS',evidence:proof};}
+  catch(e){report={status:e instanceof GateBlocked?'BLOCKED':'FAIL',evidence:e instanceof GateBlocked||e instanceof GateFailure?e.message:'VERIFIER_RUNTIME_UNAVAILABLE'};process.exitCode=e instanceof GateBlocked?2:1;}
+  try{writeReceipt(process.argv.includes('--receipt')?process.argv[process.argv.indexOf('--receipt')+1]:undefined,report);console.log('Deployment receipt written');}
+  catch{console.log('BLOCKED: protected receipt unavailable');process.exitCode=2;}
 }

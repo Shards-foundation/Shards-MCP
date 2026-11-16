@@ -1,14 +1,20 @@
-import fs from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {SOURCE,hash,pinned} from './build.mjs';
 import {stagingUrl,validateApproval,GateFailure,GateBlocked,ensure} from './policy.mjs';
 import {verifyDeployment,readProtected} from './verify-deployment.mjs';
 import {checkVisibility} from './visibility.mjs';
+import {responseBytes} from './response-body.mjs';
+import {writeReceipt} from './protected-file.mjs';
+import {localTransport} from './harness.mjs';
 export {stagingUrl} from './policy.mjs';
-export async function accept({base,faultBase,fixtures,approval,fetchImpl=fetch,revoked=false,access,localRuntime=false,verifyIdentity=()=>verifyDeployment(approval)}){
+export async function accept(options){
+  let {base,faultBase,fixtures,approval,fetchImpl=fetch,revoked=false,access,readCloudflare}=options;
+  const local=localTransport(options),localRuntime=!!local;
+  ensure(!options.localRuntime&&!options.verifyIdentity,'UNSUPPORTED_IDENTITY_BYPASS');
+  if(local)fetchImpl=local;
+  const verifyIdentity=()=>verifyDeployment(approval,{read:readCloudflare});
   validateApproval(approval);base=stagingUrl(base,approval);if(faultBase)faultBase=stagingUrl(faultBase,approval,true);
   ensure(fixtures.source_commit===SOURCE&&fixtures.fixture_version===2,'WRONG_FIXTURE_VERSION');
-  ensure(!localRuntime||fetchImpl!==fetch,'LOCAL_RUNTIME_TRANSPORT_REQUIRED');
   const results=[];
   const record=async(name,fn)=>{
     try{const blocked=await fn();results.push({case:name,status:blocked?'BLOCKED':'PASS',evidence:blocked||'expected boundary observed'});}
@@ -16,8 +22,7 @@ export async function accept({base,faultBase,fixtures,approval,fetchImpl=fetch,r
   };
   const request=async(origin,url,options={})=>{
     let response;try{response=await fetchImpl(origin+url,{...options,redirect:'manual',signal:AbortSignal.timeout(8000)});}catch{throw new GateBlocked('TRANSPORT_UNAVAILABLE');}
-    const reader=response.body?.getReader();let text='',size=0;
-    if(reader){const decoder=new TextDecoder();while(true){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>32000){await reader.cancel();throw new GateFailure('RESPONSE_LIMIT');}text+=decoder.decode(part.value,{stream:true});}text+=decoder.decode();}
+    const text=(await responseBytes(response,{limit:32000,limitError:new GateFailure('RESPONSE_LIMIT'),transportCode:'TRANSPORT_UNAVAILABLE'})).toString('utf8');
     let body;try{body=JSON.parse(text);}catch{}
     return {status:response.status,headers:response.headers,body,text};
   };
@@ -81,7 +86,11 @@ export async function accept({base,faultBase,fixtures,approval,fetchImpl=fetch,r
     }
   });
   await record(revoked?'revocation denies subsequent requests':'revocable bearer before revocation',async()=>{
+    // A 401 proves revocation only while this credential is otherwise valid.
+    const live=()=>{if(!(Date.parse(role('revocable').expires)>Date.now()+30000))throw new GateBlocked('REVOCABLE_FIXTURE_EXPIRING_OR_EXPIRED');};
+    live();
     const replies=await Promise.all(Array.from({length:4},()=>rpc('tools/list',{},role('revocable').token)));
+    live();
     ensure(replies.every(r=>r.status===(revoked?401:200)),'REVOCATION_STATE_MISMATCH');
   });
   await record('OAuth authority isolation',async()=>{
@@ -131,11 +140,12 @@ export async function accept({base,faultBase,fixtures,approval,fetchImpl=fetch,r
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
   try{
+    if(!process.argv.includes('--receipt'))throw new GateBlocked('PROTECTED_RECEIPT_REQUIRED');
     const f=JSON.parse(readProtected(process.env.STAGING_FIXTURES_FILE));
     const approval=JSON.parse(readProtected(process.env.STAGING_APPROVAL_FILE));
     let access;
     if(process.env.STAGING_ACCESS_FILE)access=JSON.parse(readProtected(process.env.STAGING_ACCESS_FILE));
     const report=await accept({base:process.env.STAGING_URL,faultBase:process.env.STAGING_FAULT_URL,fixtures:f,approval,revoked:process.argv.includes('--revoked'),access});
-    console.log(JSON.stringify(report,null,2));process.exitCode=report.results.some(r=>r.status==='FAIL')?1:report.results.some(r=>r.status==='BLOCKED')?2:0;
+    writeReceipt(process.argv[process.argv.indexOf('--receipt')+1],report);console.log('Staging receipt written');process.exitCode=report.results.some(r=>r.status==='FAIL')?1:report.results.some(r=>r.status==='BLOCKED')?2:0;
   }catch{console.error('BLOCKED: invalid staging target, protected fixture file or runtime');process.exitCode=2;}
 }
