@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "shards-mcp": {
+      "type": "http",
+      "url": "https://mcp.shardsinc.co.uk/mcp"
+    }
+  }
+}

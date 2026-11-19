@@ -30,6 +30,7 @@ class ReviewCoreTests(unittest.TestCase):
         b = self.g.register(self.root, "worker", "test", [], scopes)
         self.a, self.b = self.g.authenticate(a["token"]), self.g.authenticate(b["token"])
         self.id_a, self.id_b = self.a.agent_id, self.b.agent_id
+        self.g.delegation_grant(self.root, self.id_a, self.id_b)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -119,6 +120,7 @@ class ReviewCoreTests(unittest.TestCase):
         origin = self.g.register(self.root, "creator-verifier", "test", [],
                                  ["task:create", "task:verify", "task:read"])
         creator = self.g.authenticate(origin["token"])
+        self.g.delegation_grant(self.root, creator.agent_id, self.id_b)
         task = self.g.task_create(creator, self.id_b, {"action": "health"}, "creator-self")["task_id"]
         self.g.task_claim(self.b, task)
         self.g.task_complete(self.b, task, True, {"ok": True})

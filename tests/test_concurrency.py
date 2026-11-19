@@ -27,6 +27,7 @@ class ConcurrencyTests(unittest.TestCase):
         b = self.g.register(self.root, "worker", "test", [], scopes)
         self.creator = self.g.authenticate(a["token"])
         self.worker = self.g.authenticate(b["token"])
+        self.g.delegation_grant(self.root, a["agent_id"], b["agent_id"])
 
     def tearDown(self):
         self.tmp.cleanup()

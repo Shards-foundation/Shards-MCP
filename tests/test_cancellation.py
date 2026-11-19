@@ -39,6 +39,8 @@ class CancellationTests(unittest.TestCase):
             self.root, "other", "test", [],
             ["task:create", "task:read", "task:cancel"],
         )
+        self.gateway.delegation_grant(self.root, self.creator_entry["agent_id"],
+                                      self.worker_entry["agent_id"])
         self.creator = self.gateway.authenticate(self.creator_entry["token"])
         self.worker = self.gateway.authenticate(self.worker_entry["token"])
         self.other = self.gateway.authenticate(self.other_entry["token"])
@@ -176,6 +178,7 @@ class CancellationHttpTests(unittest.TestCase):
         self.worker = self.gateway.register(
             root, "worker", "test", [], ["task:read", "task:claim"],
         )
+        self.gateway.delegation_grant(root, self.sender["agent_id"], self.worker["agent_id"])
         self.a2a = A2AAdapter(self.gateway, "http://127.0.0.1:8787")
         self.http = ThreadingHTTPServer(
             ("127.0.0.1", 0), make_handler(self.gateway, set(), a2a=self.a2a)

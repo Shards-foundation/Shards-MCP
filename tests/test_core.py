@@ -22,6 +22,7 @@ class GatewayTests(unittest.TestCase):
         a = self.g.register(self.root, "agent-a", "test", ["messaging"], scope)
         b = self.g.register(self.root, "agent-b", "test", ["worker"], scope)
         self.aid, self.bid = a["agent_id"], b["agent_id"]
+        self.g.delegation_grant(self.root, self.aid, self.bid)
         self.a = self.g.authenticate(a["token"])
         self.b = self.g.authenticate(b["token"])
 

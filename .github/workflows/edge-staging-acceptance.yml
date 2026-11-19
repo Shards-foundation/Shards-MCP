@@ -1,0 +1,42 @@
+name: PR46 isolated staging acceptance (no deployment)
+on:
+  pull_request:
+    paths:
+      - '.gitignore'
+      - 'deployment/cloudflare/staging/**'
+      - '.github/workflows/edge-staging-acceptance.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  local-workerd-d1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: deployment/cloudflare/.node-version
+      - name: Verify exact candidate and runtime
+        run: |
+          test "$(node --version)" = v22.16.0
+          git cat-file -e c99fa809bc17e71859466ce23b5f306ed05118ff:deployment/cloudflare/worker.js
+      - name: Install locked local runtime (no Cloudflare credentials)
+        run: npm ci --prefix deployment/cloudflare/staging --ignore-scripts --audit=false --fund=false
+      - name: Real isolated workerd and D1 acceptance
+        run: npm test --prefix deployment/cloudflare/staging
+      - name: Build pinned artifacts without deployment
+        run: |
+          node deployment/cloudflare/staging/build.mjs --out work/pr46-staging-ci --approval deployment/cloudflare/staging/local-target.example.json
+          node --check work/pr46-staging-ci/main/worker.js
+          node --check work/pr46-staging-ci/fault/worker.js
+      - name: Existing Worker and audit regression
+        run: node --test deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs deployment/cloudflare/workspace.test.mjs deployment/cloudflare/verify_release_deployment.test.mjs
+      - name: Schema and documentation checks
+        run: |
+          python3 deployment/cloudflare/schema_migrations_test.py -v
+          python3 scripts/docs_check.py
+          python3 scripts/skillctl.py validate

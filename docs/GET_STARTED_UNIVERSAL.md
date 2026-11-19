@@ -14,10 +14,18 @@ Public tools:
 - `shards_gateway_status` — real deployed edge service metadata.
 - `shards_systems_catalog` — real Shards R&D project and service URLs.
 - `shards_dns_lookup` — passive DNS via Cloudflare DoH for validated public domain names.
+- `shards_skill_search` — lexical discovery of first-party Shards Skills from the published catalogue; no scripts run.
+- `shards_skill_read` — read an exact first-party Shards skill instruction file from the public repository.
+- `shards_repo_document` — read an approved public Shards repository's README, AGENTS or SECURITY document.
+- `shards_open_prs` — list up to ten live public GitHub pull requests for approved Shards repositories.
+
+The four additional research tools remain **source-only until deployed**. They read fixed public GitHub origins and are not GitHub write permissions, private repository access, skill installation or agent authentication.
 
 ### Claude Desktop / Claude.ai
 
-Open **Customize → Connectors → Add → Custom → Web**, name it **Shards MCP**, enter `https://mcp.shardsinc.co.uk/mcp` and select *No sign-in* for public discovery. Review the tool permissions. Claude may vary these controls by account/workspace. For protected agent messaging, request headers support must be configured with your **own scoped agent key**; do not use a root or operator token. See [Claude connectors](https://support.claude.com/en/articles/11176164-use-connectors-to-extend-claude-s-capabilities).
+Open **Customize → Connectors → Add → Custom → Web**, name it **Shards MCP**, enter `https://mcp.shardsinc.co.uk/mcp` and select *No sign-in* for public discovery. Review the tool permissions. Claude may vary these controls by account/workspace. For **nine existing protected agent tools**, the operator must first issue a distinct `smcp_...` key at the **Edge operator console** `https://mcp.shardsinc.co.uk/manage` with exactly the needed scopes. In Claude's **Add custom connector** flow, retain the same `https://mcp.shardsinc.co.uk/mcp` URL and use **Request headers** to configure **header name** `Authorization` and **header value** `Bearer <the Edge-issued scoped key>`. Choose the fixed-header/no-sign-in method rather than pretending a bearer token is OAuth. Never put the key in a prompt, screenshot, repository or shared configuration. Verify success by invoking `shards_agent_identity` in a Claude chat: it must return that exact enrolled principal and effective scopes; `shards_agents_list` is a safe second check. The key issued by the **separate Agent Hub** is not proven interchangeable with an Edge `smcp_` key.
+
+**Claude Free single-connector constraint:** to change headers on an existing custom connector, Claude's current Help Center instructs removing and re-adding that **same** connector; do not buy or create a second slot. Only the user can approve connector configuration and enter the secret in Claude's secure header field. See [Claude's current custom connector and request-header guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
 
 ### Claude Code
 
@@ -95,7 +103,7 @@ curl -sS https://mcp.shardsinc.co.uk/mcp \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"example","version":"1.0"}}}'
 ```
 
-Then call `tools/list`, then `tools/call` with `name` `shards_gateway_status`. The gateway exposes **12 tools total**, 3 public and 9 credential-protected.
+Then call `tools/list`, then `tools/call` with `name` `shards_gateway_status`. The proposed source supports **16 tools total**, 7 public and 9 credential-protected. The currently deployed Worker still exposes 3 public tools until the reviewed change is rolled out. MCP `tools/list` is authoritative.
 
 ## Operator-issued agent identity — real authentication
 
@@ -133,6 +141,7 @@ The edge does not execute tasks, relay other providers' private APIs or move mon
 
 - Protected methods always require valid scoped identity, even when discoverable to anonymous MCP clients. D1 queries derive tenant and agent IDs exclusively from the validated bearer credential.
 - No arbitrary URL fetching: DNS tools use a fixed Cloudflare DNS-over-HTTPS endpoint, strict domain/type validation and response size limits.
+- Proposed public skill/repository tools use allowlisted Shards Foundation GitHub public origins only; redirects are denied, reads have a seven-second timeout, streaming response-size bounds and per-caller/global quotas. `shards_skill_read` returns a bounded 20,000-character preview and a `truncated` flag; imported third-party catalogue results are metadata-only.
 - Token values are never stored in plaintext in D1. Keys expire in 30 days and can be revoked.
 - This initial edge prototype enforces global and per-agent daily quotas but has **no independent per-IP WAF rules, zero-trust posture requirements or automated retention cron** yet.
 - Task claims do not have leasing, reconciliation of external effects, dual approval, signed audit anchor, or multi-host worker execution. The edge must not be marketed as a production-certified autonomous agent controller.
@@ -144,3 +153,5 @@ The edge does not execute tasks, relay other providers' private APIs or move mon
 Signed key provisioning/revocation E2E; two-user and cross-tenant negative tests; concurrency under duplicate message/task IDs; rolling key rotation; encryption/retention policy; Cloudflare WAF and provider quotas; real OAuth resource metadata, registration, PKCE and refresh-token flows for ChatGPT and other clients; published privacy and commercial terms; review of Cloudflare Access policy and session expiry; E2E Python upstream integration/bridging; independent security certification.
 
 Do not claim any of those complete based solely on the public read-only HTTP smoke tests.
+
+See [native MCP authentication audit and persistence gates](native-mcp-integration.md) for the bounded implementation, OAuth design and unverified Cloud acceptance.

@@ -1,0 +1,15 @@
+{
+  "name": "shards-foundation-mcp",
+  "description": "Shards Foundation MCP integrations for Claude",
+  "owner": {
+    "name": "Shards Foundation",
+    "url": "https://github.com/Shards-foundation"
+  },
+  "plugins": [
+    {
+      "name": "shards-mcp",
+      "source": "./plugins/shards-mcp",
+      "description": "Connect to the Shards MCP gateway. Anonymous discovery is read-only; privileged agent actions require separately issued scoped credentials."
+    }
+  ]
+}

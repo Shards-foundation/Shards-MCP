@@ -16,6 +16,7 @@ Shards-MCP is a self-hosted, single-organisation gateway. The Python package, op
 | Contributor | [CONTRIBUTING.md](../CONTRIBUTING.md) | [Code of Conduct](../CODE_OF_CONDUCT.md), [support](../SUPPORT.md) |
 
 - [Portable skill installation](skills-distribution.md) — supported clients, explicit dry run, file integrity and safe recovery
+- [Cross-agent task delegation upgrade](task-delegation-allowlist.md) — **operator action required** before new agent-to-agent task assignments on upgraded Python gateways
 
 ## Reference library
 
@@ -36,6 +37,7 @@ Shards-MCP is a self-hosted, single-organisation gateway. The Python package, op
 
 When documentation changes, use [the documentation review procedure](../GOVERNANCE.md). Links and examples are checked by `python scripts/docs_check.py` in CI.
 
+See [native MCP authentication audit and persistence gates](native-mcp-integration.md) for the bounded implementation, OAuth design and unverified Cloud acceptance.
 
 ## Authority v2 design (not deployed)
 

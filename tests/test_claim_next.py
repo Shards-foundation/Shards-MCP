@@ -41,6 +41,7 @@ class ClaimNextCoreTests(unittest.TestCase):
         self.worker = self.g.authenticate(worker["token"])
         self.other = self.g.authenticate(other["token"])
         self.claim_only = self.g.authenticate(claim_only["token"])
+        self.g.delegation_grant(self.root, creator["agent_id"], worker["agent_id"])
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -171,6 +172,7 @@ class ClaimNextWireTests(unittest.TestCase):
         restricted = self.g.register(root, "claim-only-http", "tests", [], ["task:claim"])
         self.creator = self.g.authenticate(creator["token"])
         self.worker = self.g.authenticate(worker["token"])
+        self.g.delegation_grant(root, creator["agent_id"], worker["agent_id"])
         self.worker_token = worker["token"]
         self.restricted_token = restricted["token"]
         self.http = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.g, set()))

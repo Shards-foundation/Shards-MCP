@@ -84,6 +84,8 @@ class ObservabilityTests(unittest.TestCase):
             "origin", "test", [], ["task:create", "task:cancel"])
         worker = self.gateway.register(self.gateway.authenticate(self.token),
             "worker", "test", [], ["task:read", "task:claim"])
+        self.gateway.delegation_grant(self.gateway.authenticate(self.token),
+                                      origin["agent_id"], worker["agent_id"])
         creator = self.gateway.authenticate(origin["token"])
         created = self.gateway.task_create(
             creator, worker["agent_id"], {"action": "health"}, "metrics-queued"

@@ -23,7 +23,7 @@ The edge currently supports:
 - 2026-07-28 `server/discover` subset with header routing validation
 - `tools/list`, `tools/call`, `resources/list`, `prompts/list`, `ping`
 - JSON response bodies, no SSE push/subscriptions
-- 3 public read-only and 9 bearer-protected tools
+- 3 public read-only tools and 9 bearer-protected tools currently live. The reviewed research-tool change proposes 7 public tools after a separate safe rollout.
 - same-tenant agent discovery, messaging, tasks with atomic queued → claimed transition and own audit retrieval
 - verified Cloudflare Access operator identity, scoped credentials, expiry and revocation
 - simple daily operation budgets and fixed-target passive DNS
@@ -36,6 +36,7 @@ Worker bindings:
 - `EDGE_DB`: D1 database in EU; apply `schema.sql` before deployment
 - `ACCESS_TEAM`: the configured Cloudflare Access team slug, not a secret
 - `ACCESS_AUD`: exact Access application audience tag, not a secret
+- `CONNECT_ACCESS_AUD`: separate pilot MCP Access application audience tag (required for `/connect` and `/connect/profile`; must differ from `ACCESS_AUD`)
 
 A separate **self-hosted Cloudflare Access application** protects `mcp.shardsinc.co.uk/manage` and its subpaths, allowing only the existing administrator identity through the configured account IdP. The Worker also verifies each `cf-access-jwt-assertion` signature via the Access JWKS, issuer, audience, expiration, nbf and subject. Neither the JWT nor agent tokens are committed to the repository.
 
@@ -104,3 +105,116 @@ Commercial deployment status: **experimental**, no public OAuth sign-in, no reta
 ## Edge rate limits and verification
 
 Public tools are constrained by a global daily D1 budget and a lower daily budget per caller. Caller keys are SHA-256 digests of the UTC day and Cloudflare-provided client IP, never raw IPs. DNS input is validated **before** budget charging; invalid input cannot exhaust the shared DNS quota. The caller budget is a best-effort availability control, not a substitute for account quotas, edge WAF enforcement, abuse monitoring or periodic D1 budget cleanup. `node --test deployment/cloudflare/worker.test.mjs` checks protocol negotiation, early DNS validation, per-caller budget partitioning and token-display formatting using isolated local mocks. These tests do not prove private agent/token E2E or a new Worker deployment.
+
+## Public browser Live Lab
+
+The optional read-only portal at `https://mcp.shardsinc.co.uk/lab` is served directly by the **same edge Worker** and uses same-origin `POST /mcp` requests. It offers three executable browser workflows:
+
+1. MCP protocol check: `initialize`, `tools/list` and `shards_gateway_status`.
+2. Systems discovery: `shards_systems_catalog`.
+3. Passive DNS resolution: `shards_dns_lookup` for A, AAAA, MX, TXT and CAA records.
+
+The browser client has **no credential field**, no arbitrary MCP method selection and no privileged tool calls. It reports actual latency, results and errors, including budget exhaustion. No outcome is fabricated when the API, D1 storage or the upstream resolver is unavailable. A strict same-origin Content Security Policy applies.
+
+The lab does not enrol agents, run private tasks, prove host-separated agent messaging or make the separate Python runtime available. It is a limited diagnostic utility, not a production certification dashboard.
+
+Validate source before a deployment with `node --check deployment/cloudflare/worker.js` and `node --test deployment/cloudflare/worker.test.mjs`, then test the hosted page and MCP endpoint after a separately approved Worker rollout. Merging a pull request does **not** deploy the Cloudflare Worker.
+
+
+## Authenticated MCP connection (separate Cloudflare Access application)
+
+`https://mcp.shardsinc.co.uk/signin` is a public sign-in entrypoint. `https://mcp.shardsinc.co.uk/connect` is a **separate Access-protected MCP POST endpoint**. `https://mcp.shardsinc.co.uk/connect/profile` is the verified browser profile path. Neither path is an end-user database account or operator account. It must be bound to its **own** Cloudflare Access application and audience, not the existing operator-only `/manage` application.
+
+### Identity provider requirements
+
+- The account currently contains a Cloudflare identity provider. Its existing configuration restricts sign-in to Cloudflare account members. A distinct email one-time-PIN identity provider was registered for separate explicitly allowed Access applications. Both require an Access policy admitting the user; these mechanisms are **not** equivalent to public Google/GitHub/Discord login.
+- Do not show buttons for Google, GitHub, Discord, Apple, Microsoft, Meta, OpenAI, Anthropic/Claude, phone/SMS or email OTP unless an actual configured IdP and a successful callback verify them. Each external provider requires suitable developer registration/credentials; SMS also requires a legitimate delivery/abuse-control provider. OpenAI and Anthropic consumer accounts are not assumed to provide general-purpose social-login OAuth.
+- If offering public self-service sign-in later, use a **separate** public login method and explicit enrolment/privacy/abuse policy. Do not relax the existing account-member-only operator IdP or change `/manage` policies.
+- Portal sessions, Cloudflare Access application tokens and existing `smcp_*` agent tokens are separate security domains.
+
+### Cloudflare Access Managed OAuth configuration
+
+1. Keep `/mcp`, `/lab`, `/api/status` and `/signin` public. Preserve the owner-only Access app for `/manage` exactly as it is.
+2. Create a new self-hosted Cloudflare Access application securing only **`mcp.shardsinc.co.uk/connect` and `mcp.shardsinc.co.uk/connect/profile`** with the same audience. Select the actual configured IdP and an explicitly reviewed Access policy. Enable **Managed OAuth** and avoid enabling it on the operator application.
+3. Record the newly issued Access application **audience tag** in the Cloudflare Worker plain-text binding `CONNECT_ACCESS_AUD`. Retain `ACCESS_TEAM`, `ACCESS_AUD` and `EDGE_DB` unchanged. Use strict binding inheritance on Worker versions.
+4. Confirm an anonymous browser navigation to `/connect/profile` redirects to real Cloudflare Access login, while an authenticated browser receives the signed-identity page. A signed-in `GET /connect` must return MCP HTTP 405 rather than HTML.
+5. Test the MCP client at `https://mcp.shardsinc.co.uk/connect` (the Managed OAuth route). The client must support the RFC 8707 resource indicator and provider-managed PKCE flow. An unauthenticated non-browser MCP request should receive an OAuth `401` challenge from Access, not a fake success or arbitrary local browser token.
+6. After completing a real login, use `tools/list` and `shards_user_identity`. The supported authenticated tools are `shards_user_identity` plus the public read-only tools dynamically exposed on `/mcp` (**3 currently deployed; 7 proposed after this change**). This is *not* a general user account, internal tenant membership, or an agent enrolment feature. Existing private messages/tasks remain restricted to separately provisioned `smcp_*` agents.
+
+**Security boundary:** Worker code verifies the JWT signature against the fixed Cloudflare Access JWKS, expected issuer, separate audience, expiry and nbf. The new route does not accept a user-provided issuer, an unverified JWT, or an arbitrary redirect URL. The operator JWT cannot be reused as a connect JWT and vice versa.
+
+**Rollback:** Revert only the new Access app/policy and Worker deployment to the prior pinned version. Never delete the D1 database, existing Access operator app or its policies. An attempted provider login must be labelled **BLOCKED** until a real user completes the provider consent/callback; the tests cannot impersonate a Cloudflare account or prove a UI login.
+
+**Pricing/admission gate:** Cloudflare Access Free is intended for fewer than 50 users; avoid enabling unrestricted customer self-sign-up via an Access `Everyone` policy. The initial `/connect` app is a limited operator-approved pilot, not a commercial identity platform. For public customer growth, use a dedicated customer-identity platform and a migration design.
+
+
+## Path-bound OAuth discovery for `/connect`
+
+Cloudflare Access Managed OAuth is enabled on the separate application scoped to `mcp.shardsinc.co.uk/connect`, **not** the whole MCP hostname. On the prior deployment, the root `/.well-known/` endpoints returned HTTP 404 because the root hostname is intentionally public and handled by the Worker. This prevented standards-based clients from locating the issuer through the conventional resource URLs.
+
+The Worker now serves:
+
+| Public discovery route | Behaviour |
+| --- | --- |
+| `/.well-known/cloudflare-access-protected-resource/connect` | **Actual Access-advertised path** observed in the live HTTP 401 `WWW-Authenticate` header; returns canonical resource, verified issuer, and public Cloudflare protection metadata |
+| `/.well-known/oauth-protected-resource/connect` | RFC 9728 metadata: canonical resource `https://mcp.shardsinc.co.uk/connect`, configured Cloudflare Access issuer, and header-based bearer transport |
+| `/.well-known/oauth-protected-resource` | Temporary redirect to the path-bound resource metadata |
+| `/.well-known/oauth-authorization-server` | Temporary redirect to the **actual** `https://<ACCESS_TEAM>.cloudflareaccess.com/.well-known/oauth-authorization-server` metadata published by Cloudflare |
+
+The issuer is built only from the restricted Worker `ACCESS_TEAM` binding, never from query parameters or user input. The exact Access-advertised metadata path was extracted from the deployed Cloudflare Access `401` challenge by the edge acceptance workflow, not guessed from the standards fallback. GET discovery requests return 503 if the separate audience is missing, equal to the operator audience, or the team hostname configuration is invalid. Other request methods are not discovery operations and return 404. They do **not** issue OAuth tokens, advertise unsupported providers, or bypass the Cloudflare Access policies.
+
+These metadata endpoints permit anonymous cross-origin **GET** reads (`Access-Control-Allow-Origin: *`) because their contents are public. This CORS allowance applies **only to discovery metadata and redirects**; the authenticated `/connect` endpoint still rejects untrusted browser origins. Authenticated clients can retrieve only their **own verified identity** (including their Access email if provided) and the public read-only tools (3 live; 7 after rollout); no raw bearer credentials, internal agent records or privileged tool authority are exposed.
+
+An origin-bypass fallback `401` on `/connect` includes the RFC 9728 `resource_metadata` challenge URL. The actual browser/agent challenge for a Cloudflare-protected request is managed by Cloudflare Access, which may replace that header.
+
+**Live verification required after deploying this change:** fetch all three discovery routes, follow the authorization-server redirect and confirm the real issuer and S256 support; confirm `/signin` and `/lab` still load, the original public `/mcp` remains available, and unauthenticated `/connect` is blocked by Access. A successful real user OAuth authorization-code exchange and token refresh remain **BLOCKED until observed in a supported client**; discovery and JWT mock tests alone are not proof.
+
+
+## Operator collaboration workspace (pilot)
+
+**Protected operator URL:** `https://mcp.shardsinc.co.uk/manage/workspace`
+
+Shards-MCP Edge now has a Slack-style **direct-conversation view of real D1 data**, intended for an owner/operator using the **existing** Cloudflare Access `/manage` policy:
+
+- Enrolled agent directory with runtime/client labels. **Enrolled is not online**: there is no heartbeat or verified activity timestamp.
+- Recent operator/agent/agent-to-agent messages from the existing `agent_messages` records, plus real task titles/states from `agent_tasks`. Data is bounded to the **selected agent's** 200 latest direct messages / 80 tasks, queried at the database rather than filtered from a tenant-wide window. Directory membership and record access remain restricted to the existing `shards-internal` operator tenant. The initial directory intentionally returns at most 80 active principals, not an unlimited agent catalogue; pagination and multi-tenant workspaces are future release gates.
+- A message composer addressed to a separately enrolled agent. The server writes an idempotent record to the recipient's existing MCP inbox, never invokes a model, sends an external API call or claims the recipient read it. Agents must run their own processes and call `shards_message_inbox` to receive it.
+- Agent enrolment remains on `/manage`, using one-time-show 30-day scoped bearer tokens. No secret is displayed in the workspace or stored in the browser.
+
+**Operator identity and write boundary:** The first successfully authenticated operator message creates a non-token, distinct `operator-ui` sender principal in the same tenant, derived from the SHA-256 of the verified Access subject. The page cannot send as an AI principal, impersonate another tenant or perform agent task claims. The human operator is explicitly addressable for agent-to-operator messages (visible in this workspace), but is not a model runtime and cannot be assigned executable agent tasks. A transactional D1 batch commits each new operator message and its audit event atomically, with rollback if audit insertion fails. Operator POST bodies are limited to 16,000 bytes while streaming, and parsed message text to 2,000 UTF-16 code units / 8,000 UTF-8 bytes; this remains bounded even for escaped JSON and non-ASCII characters. Request IDs are bound to the selected recipient and exact message text during the current browser session. After a page reload, operators should inspect the persisted conversation before manually re-sending an ambiguous message; exactly-once delivery across lost responses and reloads is **not claimed**. The API enforces the existing operator JWT signature, audience and expiry, checks same-origin POST, validates payload/recipient, and never accepts arbitrary SQL/tenant values.
+
+**Endpoints:** `GET /manage/api/workspace` is a privileged bounded feed. `POST /manage/api/workspace/messages` stores one message. `GET /manage/workspace` and `GET /manage/workspace.js` serve static UI assets inside the operator Access application. The existing `/mcp`, `/connect` and public Lab are unchanged.
+
+**Explicit nonfeatures:** No Slack-like shared room, real-time push, typing indicator, presence heartbeat, model runtime hosting, multi-tenant self-service, third-party bot bridge, WhatsApp/Discord/Telegram/Slack integration or AI-generated reply exists in this release. The UI labels those providers **Not connected**. Adding providers needs independent platform OAuth/API credentials, consent/scope review, a running adapter, secret storage, event verification, and inbound/outbound reconciliation. Cloudflare Access login does not grant model execution or broker third-party app privileges.
+
+### Acceptance and rollback
+
+Run `node --check deployment/cloudflare/worker.js`, `node --test deployment/cloudflare/worker.test.mjs`, and `node --test deployment/cloudflare/workspace.test.mjs` as **separate commands**, as done in the passing Edge MCP live acceptance workflow. The source-only isolated tests do not certify a real signed browser session. GitHub's edge workflow also checks the official signed MCP SDK path. After a versioned deployment with **strict inheritance** of `EDGE_DB`, `ACCESS_TEAM`, `ACCESS_AUD`, `CONNECT_ACCESS_AUD`, verify the protected workspace redirects anonymous visitors and that the signed operator sees the live agent directory; send a genuinely authorised message and inspect its persisted MCP inbox before claiming a fully tested live send. Do **not** insert fake demo messages into production as a substitute for live evidence.
+
+Rollback by restoring the pinned prior Worker version. The implementation uses existing D1 tables; no schema migration or token rotation is required. A previously stored operator message should remain durable after rollback, but the workspace UI and operator-composer route will disappear.
+
+
+## Reproducible Worker tests and final version-bound release gate
+
+**Pinned test runtime:** Node.js `22.16.0` (`deployment/cloudflare/.node-version`). Install/use that exact release to reproduce GitHub-hosted test results:
+
+```sh
+nvm install 22.16.0
+nvm use 22.16.0
+node --version
+node --test --test-reporter=tap deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs
+node --test deployment/cloudflare/verify_release_deployment.test.mjs
+# The workflow additionally runs signed workspace and official MCP SDK interoperability:
+node --test deployment/cloudflare/workspace.test.mjs
+npm install --prefix deployment/cloudflare --no-save --no-package-lock --ignore-scripts --audit=false --fund=false @modelcontextprotocol/sdk@1 zod@4
+node --test deployment/cloudflare/sdk.test.mjs
+python3 deployment/cloudflare/schema_migrations_test.py -v
+```
+
+`node --test` must report **zero failed and zero cancelled tests**. The browser's stalled-MCP regression awaits a deliberately pending promise until `AbortSignal.timeout()` fires. Node's abort timer is unref'd; therefore the test must start its referenced 1.5-second failure watchdog **before** awaiting the button handler. An unresolved test is a failure, not a pass. GitHub Actions enforces the full TAP summary using this pinned Node version: the Worker + audit combined suite must have **at least 27 tests**, every reported test must pass, and both failed and cancelled counts must equal zero. The additional workspace, SDK, release-verifier and SQLite migration test commands above reproduce the other Edge acceptance steps. Installing the official MCP SDK and Zod in the SDK step requires npm access but no paid service.
+
+**Post-deployment verification:** The separate `.github/workflows/edge-production-release-gate.yml` workflow (manually invoked only *after* an approved release) takes a `deployed_worker_version` UUID. It does **not** trust that UUID as evidence by itself. The workflow calls the read-only Cloudflare Workers Deployments API to check the actual latest `shards-mcp-edge` deployment is assigned to that exact version with 100% traffic. It separately checks Cloudflare's Worker Custom Domains API for `mcp.shardsinc.co.uk` mapped uniquely to the enabled production service. Both checks run before the live MCP tests; the deployment and route IDs are checked a second time afterward to catch a concurrent release. Only then are the exact seven public tools and nine protected tool declarations accepted. An undeployed three-tool site must FAIL the post-deployment workflow.
+
+**One-time CI authentication prerequisite:** A repository administrator must configure the GitHub Actions secret `SHARDS_CF_WORKERS_READ_TOKEN` with a narrowly scoped Cloudflare API token providing *read-only* access to Workers deployments and custom-domain routing for the existing account. Do not commit the credential, reuse an operator/agent token, or grant Worker/D1 write access merely to satisfy this gate. If the secret is missing, the verification fails closed. The existing account ID in the workflow is not a credential. The workflow does not change deployments, traffic percentages, domains, D1 or Access policies.
+
+**Evidence limitation:** Cloudflare deployment UUID verification identifies the running deployment, but does not independently prove that its uploaded source bytes equal the reviewed Git commit. Source-artifact hashes, D1 migration evidence, rollback capability and authenticated multi-agent E2E checks remain separate release approvals. The source-only PR's permissive three-or-seven-tool smoke tests are intentionally **not** the final release gate.

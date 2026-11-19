@@ -21,14 +21,20 @@ Success: read-only identity displayed; no task modifications. If agent registrat
 ## Recipe B — create and process one deterministic task
 
 1. Register **creator** (`task:create` + `task:read`), **worker** (`agent:heartbeat` + `task:read` + `task:claim` + `task:update` + `checkpoint:write`) and **verifier** (`task:verify` + `task:read`) using the host CLI.
-2. The operator stores each credential in a different permission-restricted file and knows the worker's returned `agent_id`.
-3. Creator submits via authenticated REST with its own credential (example variables must be set in a protected interactive shell):
+2. The operator stores each credential in a different permission-restricted file and knows the **creator and worker** IDs returned by registration. Set `SHARDS_CREATOR_AGENT_ID` and `SHARDS_WORKER_AGENT_ID` to those exact IDs, then grant that pair through the **local operator-only** CLI before submitting work:
+ 
+```bash
+shards-mcp-admin delegation-grant --creator "$SHARDS_CREATOR_AGENT_ID" --assignee "$SHARDS_WORKER_AGENT_ID"
+shards-mcp-admin delegation-list
+```
+
+3. Creator submits via authenticated REST with its own credential (all example variables must be set in a protected interactive shell):
 
 ```bash
 curl --fail-with-body --silent --show-error \
   -H "Authorization: Bearer $SHARDS_CREATOR_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"assignee":"WORKER_AGENT_ID","payload":{"action":"echo","data":"hello"},"idempotency_key":"local-demo-001"}' \
+  -d "{\"assignee\":\"$SHARDS_WORKER_AGENT_ID\",\"payload\":{\"action\":\"echo\",\"data\":\"hello\"},\"idempotency_key\":\"local-demo-001\"}" \
   http://127.0.0.1:8787/v1/tools/task_create
 ```
 

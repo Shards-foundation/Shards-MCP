@@ -14,7 +14,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Use pinned, reproducible Node runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: deployment/cloudflare/.node-version
+      - name: Assert exact test runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = "v22.16.0"
+          node --version
+      - name: Test authoritative Worker deployment verifier (offline fixtures)
+        run: node --test deployment/cloudflare/verify_release_deployment.test.mjs
       - name: Parse Worker and embedded client JavaScript
         run: |
           set -euo pipefail
@@ -31,8 +42,35 @@ jobs:
           }
           console.log('Worker and all 8 client setup modules parse correctly');
           NODE
-      - name: Isolated edge protocol and quota regression tests
-        run: node --test deployment/cloudflare/worker.test.mjs
+      - name: Isolated pre-deployment edge regression — no cancelled tests
+        run: |
+          set -euo pipefail
+          node --test --test-reporter=tap deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs | tee /tmp/shards-edge-tests.tap
+          node <<'NODE'
+          const fs = require('node:fs');
+          const tap = fs.readFileSync('/tmp/shards-edge-tests.tap','utf8');
+          const metric = name => {
+            const match = tap.match(new RegExp('^# '+name+' ([0-9]+)$','m'));
+            if (!match) throw Error('Missing TAP summary field: '+name);
+            return Number(match[1]);
+          };
+          const tests=metric('tests'),passed=metric('pass'),failed=metric('fail'),cancelled=metric('cancelled');
+          if (tests < 27 || passed !== tests || failed !== 0 || cancelled !== 0) {
+            throw Error('Worker regression incomplete: '+JSON.stringify({tests,passed,failed,cancelled}));
+          }
+          console.log('Strict Worker regressions PASS: '+tests+' passed, zero failed or cancelled.');
+          NODE
+      - name: SQLite schema migration parity and fail-closed audit transactions
+        run: python3 deployment/cloudflare/schema_migrations_test.py -v
+      - name: Signed operator workspace and real messaging regression
+        run: node --test deployment/cloudflare/workspace.test.mjs
+      - name: Official MCP SDK v1 signed-endpoint protocol interoperability
+        run: |
+          set -euo pipefail
+          npm install --prefix deployment/cloudflare --no-save --no-package-lock --ignore-scripts --audit=false --fund=false @modelcontextprotocol/sdk@1 zod@4
+          node --test deployment/cloudflare/sdk.test.mjs
+      # Staged rollout: production still has 3 tools before this PR is deployed.
+      # After rollout, pin the live checks to 7 and verify the four added tools by name.
       - name: Verify real website and database status
         run: |
           set -euo pipefail
@@ -43,7 +81,7 @@ jobs:
           curl -fsS https://mcp.shardsinc.co.uk/app.js -o /tmp/live-client.js
           node --check /tmp/live-client.js
           curl -fsS https://mcp.shardsinc.co.uk/api/status -o /tmp/status.json
-          node -e "const v=require('/tmp/status.json');if(v.db!=='connected'||v.tools.filter(t=>t.public).length!==3||v.tools.filter(t=>!t.public).length!==9||v.authentication.oauth!=='not yet available')process.exit(1)"
+          node -e "const v=require('/tmp/status.json'),a=['shards_gateway_status','shards_systems_catalog','shards_dns_lookup'],b=[...a,'shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'],names=v.tools.filter(t=>t.public).map(t=>t.name).sort(),eq=x=>JSON.stringify(names)===JSON.stringify([...x].sort());if(v.db!=='connected'||!(eq(a)||eq(b))||v.tools.filter(t=>!t.public).length!==9||!String(v.authentication.oauth).startsWith('not yet available'))process.exit(1)"
       - name: Verify MCP initialize and tool discovery
         run: |
           set -euo pipefail
@@ -56,7 +94,7 @@ jobs:
           test "$code" = 202
           curl -fsS -X POST "$URL" -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' -o /tmp/tools.json
-          node -e "const t=require('/tmp/tools.json').result.tools;if(t.length!==3||!t.some(x=>x.name==='shards_gateway_status')||t.some(x=>x.name==='shards_message_send'))process.exit(1);console.log(t.length+' public MCP tools discovered; private tools correctly hidden')"
+          node -e "const t=require('/tmp/tools.json').result.tools,a=['shards_gateway_status','shards_systems_catalog','shards_dns_lookup'],b=[...a,'shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'],n=t.map(x=>x.name).sort(),eq=x=>JSON.stringify(n)===JSON.stringify([...x].sort());if(!(eq(a)||eq(b)))process.exit(1);console.log(t.length+' exact public MCP tools discovered; private tools hidden')"
       - name: Verify authenticated tools refuse anonymous access
         run: |
           set -euo pipefail
@@ -64,9 +102,15 @@ jobs:
           curl -fsS -X POST "$URL" -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"shards_agent_identity","arguments":{}}}' -o /tmp/anon.json
           node -e "const j=require('/tmp/anon.json');if(j.result.isError!==true||!j.result.content[0].text.includes('AUTH_REQUIRED'))process.exit(1)"
-          curl -fsS -X POST "$URL" -H 'Content-Type: application/json' -H 'Authorization: Bearer smcp_invalid_unauthorized_token_123456789' \
-            --data '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"shards_task_create","arguments":{}}}' -o /tmp/badtoken.json
-          node -e "const j=require('/tmp/badtoken.json');if(j.result.isError!==true)process.exit(1)"
+          # Accept the deployed legacy MCP error or the reviewed HTTP 401 behavior.
+          # Local Worker tests require 401; this read-only probe does not deploy it.
+          code=$(curl -sS -w '%{http_code}' -X POST "$URL" -H 'Content-Type: application/json' -H 'Authorization: Bearer smcp_invalid_unauthorized_token_123456789' \
+            --data '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"shards_task_create","arguments":{}}}' -o /tmp/badtoken.json)
+          case "$code" in
+            401) ;;
+            200) node -e "const j=require('/tmp/badtoken.json');if(j.result?.isError!==true)process.exit(1)" ;;
+            *) exit 1 ;;
+          esac
           code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$URL" -H 'Content-Type: application/json' \
             -H 'Origin: https://untrusted.example' --data '{"jsonrpc":"2.0","id":4,"method":"tools/list"}')
           test "$code" = 403
@@ -85,6 +129,33 @@ jobs:
           curl -fsS -X POST "$URL" -H 'Content-Type: application/json' -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: server/discover' \
             --data '{"jsonrpc":"2.0","id":7,"method":"server/discover","params":{}}' -o /tmp/modern.json
           node -e "const j=require('/tmp/modern.json');if(j.result.protocolVersion!=='2026-07-28')process.exit(1)"
+      - name: Verify existing Access OAuth challenge baseline (not new resource-metadata deployment)
+        run: |
+          set -euo pipefail
+          status=$(curl -sS -X POST https://mcp.shardsinc.co.uk/connect \
+            -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+            --data '{"jsonrpc":"2.0","id":90,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"oauth-ci","version":"1"}}}' \
+            -D /tmp/connect-challenge-headers -o /tmp/connect-challenge-body -w '%{http_code}')
+          echo "Unauthenticated /connect HTTP status: $status"
+          test "$status" = 401
+          grep -qi '^www-authenticate:.*bearer' /tmp/connect-challenge-headers
+          grep -qi 'resource_metadata=' /tmp/connect-challenge-headers
+          echo "Real Access challenge includes RFC 9728 resource_metadata"
+          node <<'NODE'
+          const fs=require('node:fs');
+          const headers=fs.readFileSync('/tmp/connect-challenge-headers','utf8');
+          const challenge=headers.split(/\r?\n/).find(l=>/^www-authenticate:/i.test(l))||'';
+          const metadata=/resource_metadata\s*=\s*"?([^",\s]+)/i.exec(challenge);
+          if(!metadata)throw Error('OAuth resource_metadata missing');
+          const target=new URL(metadata[1]);
+          if(target.protocol!=='https:')throw Error('OAuth discovery URL must be HTTPS');
+          if(target.hostname!=='mcp.shardsinc.co.uk'||target.pathname!=='/.well-known/cloudflare-access-protected-resource/connect'){
+            throw Error('Access challenge advertises an unexpected metadata endpoint');
+          }
+          console.log('Access-advertised metadata host:',target.hostname);
+          console.log('Access-advertised metadata path:',target.pathname);
+          console.log('Note: discovery target content requires separate post-deployment acceptance');
+          NODE
       - name: Verify operator route is not publicly accessible
         run: |
           set -euo pipefail
