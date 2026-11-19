@@ -23,6 +23,8 @@ class GatewayTests(unittest.TestCase):
         b = self.g.register(self.root, "agent-b", "test", ["worker"], scope)
         self.aid, self.bid = a["agent_id"], b["agent_id"]
         self.g.delegation_grant(self.root, self.aid, self.bid)
+        self.g.controller_set(self.root, self.aid, "origin-team")
+        self.g.controller_set(self.root, self.bid, "worker-team")
         self.a = self.g.authenticate(a["token"])
         self.b = self.g.authenticate(b["token"])
 
@@ -78,7 +80,11 @@ class GatewayTests(unittest.TestCase):
         reopened.task_renew(self.b, tid)
         self.assertEqual(reopened.task_complete(self.b, tid, True, {"ok": True})["state"], "reported")
         self.assertEqual(reopened.task_get(self.a, tid)["result"], {"ok": True})
-        self.assertEqual(reopened.task_verify(self.root, tid, True, {"checks": ["sha256"]})["state"], "succeeded")
+        reviewer = reopened.register(self.root, "workflow-reviewer", "test", [], ["task:verify"])
+        reopened.controller_set(self.root, reviewer["agent_id"], "review-team")
+        reopened.verifier_assign(self.root, tid, reviewer["agent_id"])
+        self.assertEqual(reopened.task_verify(reopened.authenticate(reviewer["token"]), tid,
+                                                True, {"checks": ["sha256"]})["state"], "succeeded")
         with self.assertRaises(GatewayError):
             reopened.task_complete(self.b, tid, True, {"ok": True})
 
@@ -188,12 +194,15 @@ class GatewayTests(unittest.TestCase):
             self.g.task_verify(self.a, tid, True, {"proof": "not an authorised reviewer"})
         reviewer = self.g.register(self.root, "reviewer", "test", ["verification"], ["task:verify", "task:read"])
         reviewer_id = self.g.authenticate(reviewer["token"])
+        self.g.controller_set(self.root, reviewer_id.agent_id, "review-team")
+        self.g.verifier_assign(self.root, tid, reviewer_id.agent_id)
         self.assertEqual(self.g.task_verify(reviewer_id, tid, True, {"proof": "verified hash"})["state"], "succeeded")
         with self.assertRaises(GatewayError):
             self.g.task_verify(self.root, tid, True, {"proof": "duplicate attestation"})
         other = self.g.task_create(self.a, self.bid, {"action": "health"}, "verify-2")["task_id"]
         self.g.task_claim(self.b, other)
         self.g.task_complete(self.b, other, True, {"status": "bad"})
+        self.g.verifier_assign(self.root, other, reviewer_id.agent_id)
         self.assertEqual(self.g.task_verify(reviewer_id, other, False, {"proof": "failed evaluation"})["state"], "failed")
 
 

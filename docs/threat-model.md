@@ -12,7 +12,7 @@
 | Privilege escalation | Scope-based tool discovery and per-request actor checks | Multi-tenant RBAC absent, operator/host compromise critical |
 | Malicious payload/prompt injection | Bounded JSON schema; deterministic reference worker | External custom agent may obey malicious text; enforce external policy/sandbox |
 | Message/task tampering | SQLite transactional mutations, idempotency, audit chain | Database owner can rewrite/re-hash; external immutable anchor required |
-| Repudiation | Actor-bound audit events and verifier attestations | Attestations are not independent real-world proof; custody of signing keys matters |
+| Repudiation | Actor-bound audit events, operator-assigned per-task reviewer and operator-labelled control domains | Labels cannot independently prove real-world ownership, external evidence authenticity or separate people; custody of signing keys matters |
 | Information disclosure | Receiver/owner filtering, redacted logs, protected token files | Plaintext task/evidence in SQLite/backups; retention and encryption gaps |
 | DoS/rate abuse | Bounded parser/connection semaphore | No robust edge quotas, WAF or per-agent rate limits |
 | SSRF/outbound abuse | Trusted JWKS URI pinned, worker URL HTTPS except loopback; no arbitrary HTTP execution | Future adapters need outbound allowlisting and DNS/rebinding tests |
@@ -23,7 +23,7 @@
 
 ## Mandatory adversarial tests
 
-Unknown/malformed JWT, issuer/audience mismatch, revoked agent, denied tool, creator/worker/verifier separation, duplicate request keys, simultaneous claim/cancel, worker crash mid-completion, expired lease reconciliation, invalid Origin/JSON, audit edit simulation, backup restore. Evidence should be per SHA in [acceptance worksheet](acceptance-evidence.md).
+Unknown/malformed JWT, issuer/audience mismatch, revoked agent, denied tool, operator-assigned reviewer and same-controller denial, creator/worker/verifier separation, duplicate request keys, simultaneous claim/cancel, worker crash mid-completion, expired lease reconciliation, invalid Origin/JSON, audit edit simulation, backup restore. Evidence should be per SHA in [acceptance worksheet](acceptance-evidence.md).
 
 ## Risk acceptance
 

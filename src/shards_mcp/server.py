@@ -77,7 +77,7 @@ TOOL_DEFS = [
      schema({"task_id": S, "lease_seconds": INT}, ("task_id",)), False),
     ("task_complete", "Record worker result; successful worker claims require independent task_verify.",
      schema({"task_id": S, "success": BOOL, "result": OBJ}, ("task_id", "success", "result")), False),
-    ("task_verify", "Independent reviewer: approve or reject a reported worker result.",
+    ("task_verify", "Only an operator-assigned active verifier in a separate configured control domain may approve or reject a reported result.",
      schema({"task_id": S, "approved": BOOL, "evidence": OBJ},
             ("task_id", "approved", "evidence")), False),
     ("verification_get", "Inspect retained verification evidence for a task.",

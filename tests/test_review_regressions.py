@@ -31,6 +31,8 @@ class ReviewCoreTests(unittest.TestCase):
         self.a, self.b = self.g.authenticate(a["token"]), self.g.authenticate(b["token"])
         self.id_a, self.id_b = self.a.agent_id, self.b.agent_id
         self.g.delegation_grant(self.root, self.id_a, self.id_b)
+        self.g.controller_set(self.root, self.id_a, "origin-team")
+        self.g.controller_set(self.root, self.id_b, "worker-team")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -65,6 +67,8 @@ class ReviewCoreTests(unittest.TestCase):
         self.g.task_complete(self.b, tid, True, {"ok": True})
         reviewer = self.g.register(self.root, "reviewer", "test", [], ["task:verify", "task:read"])
         verifier = self.g.authenticate(reviewer["token"])
+        self.g.controller_set(self.root, verifier.agent_id, "review-team")
+        self.g.verifier_assign(self.root, tid, verifier.agent_id)
         for evidence in ({}, [], 0, False, None, "", "short", {"x": None}, [None], {"": ""}, {"outer": [None, {}]}):
             with self.subTest(evidence=evidence):
                 with self.assertRaises(GatewayError):
@@ -129,6 +133,9 @@ class ReviewCoreTests(unittest.TestCase):
         self.assertEqual(denial.exception.code, "FORBIDDEN")
         independent = self.g.register(self.root, "different-verifier", "test", [],
                                       ["task:verify", "task:read"])
+        self.g.controller_set(self.root, creator.agent_id, "other-creator")
+        self.g.controller_set(self.root, independent["agent_id"], "review-team")
+        self.g.verifier_assign(self.root, task, independent["agent_id"])
         self.assertEqual(self.g.task_verify(self.g.authenticate(independent["token"]),
                                             task, True, {"summary": "checked externally"})["state"],
                          "succeeded")

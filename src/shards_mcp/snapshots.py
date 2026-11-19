@@ -62,7 +62,8 @@ def inspect_snapshot(path: str) -> dict[str, Any]:
             # Old snapshots without this table require legacy-version handling;
             # accepting them as current would silently drop delegation policy.
             required = ("agents", "messages", "tasks", "checkpoints", "events",
-                        "schedules", "verifications", "delegation_grants")
+                        "schedules", "verifications", "delegation_grants",
+                        "agent_control_domains", "verifier_assignments")
             totals = {table: int(db.execute("SELECT COUNT(*) FROM " + table).fetchone()[0])
                       for table in required}
     except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError) as exc:
