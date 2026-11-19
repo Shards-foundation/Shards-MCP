@@ -191,12 +191,14 @@ CREATE TABLE shards_v2.audit_entries (
 -- every link and atomically advances the head in the insert transaction.
 -- No runtime UPDATE/DELETE privilege is granted on audit_heads, but privilege
 -- is not the only control: a role that can write the head could otherwise drop
--- it and restart the chain at seq 1, or fork it at any point. Row shape is
--- therefore constrained independently of who holds the grant.
+-- it, restart the chain at seq 1, or fork it by rewriting the head digest.
+-- The head digest is therefore bound to a real audit entry, not just a counter.
 CREATE FUNCTION shards_v2.guard_audit_head() RETURNS trigger
-LANGUAGE plpgsql AS $body$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, shards_v2 AS $body$
 BEGIN
-  IF TG_OP='DELETE' THEN
+  -- Statement-level TRUNCATE fires with empty NEW/OLD, so deny by TG_OP
+  -- rather than by inspecting the row.
+  IF TG_OP IN ('DELETE','TRUNCATE') THEN
     RAISE EXCEPTION 'audit head cannot be removed' USING ERRCODE='42501';
   END IF;
   IF TG_OP='INSERT' THEN
@@ -211,6 +213,17 @@ BEGIN
     RAISE EXCEPTION 'audit head may only advance one sequence step'
       USING ERRCODE='23514';
   END IF;
+  -- The new head digest must be the digest of the entry just appended, so a
+  -- head writer cannot fork the chain without writing a matching entry.
+  IF NOT EXISTS (
+    SELECT 1 FROM shards_v2.audit_entries e
+     WHERE e.org_id=NEW.org_id AND e.seq=NEW.last_seq
+       AND e.entry_sha256=NEW.head_sha256
+       AND e.previous_sha256=OLD.head_sha256
+  ) THEN
+    RAISE EXCEPTION 'audit head digest does not match the appended entry'
+      USING ERRCODE='23514';
+  END IF;
   RETURN NEW;
 END
 $body$;
@@ -218,6 +231,38 @@ CREATE TRIGGER audit_head_guard BEFORE INSERT OR UPDATE OR DELETE ON shards_v2.a
 FOR EACH ROW EXECUTE FUNCTION shards_v2.guard_audit_head();
 CREATE TRIGGER audit_head_no_truncate BEFORE TRUNCATE ON shards_v2.audit_heads
 FOR EACH STATEMENT EXECUTE FUNCTION shards_v2.guard_audit_head();
+
+-- The head must advance in the same transaction as the entry that justifies
+-- it. The head digest is verified against that entry, which only exists once
+-- the row is inserted, so the advance runs AFTER INSERT.
+CREATE FUNCTION shards_v2.advance_audit_head() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, shards_v2 AS $body$
+DECLARE expected_canonical bytea;
+DECLARE expected_hash bytea;
+BEGIN
+  INSERT INTO shards_v2.audit_heads(org_id) VALUES (NEW.org_id)
+  ON CONFLICT (org_id) DO NOTHING;
+  -- Lock the head row so concurrent appends serialise on the same tenant.
+  PERFORM 1 FROM shards_v2.audit_heads WHERE org_id=NEW.org_id FOR UPDATE;
+  expected_canonical := convert_to(jsonb_build_object(
+    'version',NEW.canonical_version, 'org_id',NEW.org_id::text,
+    'seq',NEW.seq, 'actor_id',NEW.actor_id,'action',NEW.action,
+    'subject_id',NEW.subject_id,'details',NEW.details_json)::text,'UTF8');
+  SELECT head_sha256 INTO STRICT expected_hash FROM shards_v2.audit_heads
+   WHERE org_id=NEW.org_id;
+  IF NEW.previous_sha256 <> expected_hash THEN
+    RAISE EXCEPTION 'audit entry does not extend the current head'
+      USING ERRCODE='23514';
+  END IF;
+  expected_hash := sha256(expected_hash || expected_canonical);
+  UPDATE shards_v2.audit_heads SET last_seq=NEW.seq,
+       head_sha256=expected_hash,updated_at=now()
+    WHERE org_id=NEW.org_id;
+  RETURN NULL;
+END
+$body$;
+CREATE TRIGGER audit_head_advance AFTER INSERT ON shards_v2.audit_entries
+FOR EACH ROW EXECUTE FUNCTION shards_v2.advance_audit_head();
 
 CREATE FUNCTION shards_v2.guard_audit_append() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, shards_v2 AS $body$
@@ -244,9 +289,6 @@ BEGIN
     RAISE EXCEPTION 'invalid audit sequence, canonical bytes or hash link'
       USING ERRCODE='23514';
   END IF;
-  UPDATE shards_v2.audit_heads SET last_seq=NEW.seq,
-       head_sha256=expected_hash,updated_at=now()
-    WHERE org_id=NEW.org_id;
   RETURN NEW;
 END
 $body$;

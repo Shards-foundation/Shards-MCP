@@ -591,11 +591,12 @@ BEGIN
  END IF;
 END $truncate_triggers$;
 
--- The audit head must not be removable or rewindable. Without this a writer
--- could delete the head and restart the chain at seq 1, leaving two
--- independently plausible ledgers for the same tenant.
+-- The audit head must not be removable, truncatable or forkable. Without this
+-- a writer could drop the head and restart the chain at seq 1, or rewrite the
+-- head digest so later entries chain from a forged predecessor.
 DO $audit_head_guard$
 DECLARE head_seq bigint;
+DECLARE head_digest bytea;
 BEGIN
  BEGIN
   DELETE FROM shards_v2.audit_heads
@@ -603,7 +604,12 @@ BEGIN
   RAISE EXCEPTION 'FAIL: audit head deleted';
  EXCEPTION WHEN insufficient_privilege THEN NULL;
  END;
- SELECT last_seq INTO head_seq FROM shards_v2.audit_heads
+ BEGIN
+  TRUNCATE shards_v2.audit_heads;
+  RAISE EXCEPTION 'FAIL: audit head truncated';
+ EXCEPTION WHEN insufficient_privilege THEN NULL;
+ END;
+ SELECT last_seq,head_sha256 INTO head_seq,head_digest FROM shards_v2.audit_heads
   WHERE org_id='00000000-0000-4000-8000-000000000001';
  BEGIN
   UPDATE shards_v2.audit_heads SET last_seq=head_seq+5
@@ -611,8 +617,18 @@ BEGIN
   RAISE EXCEPTION 'FAIL: audit head rewound/forwarded outside an append';
  EXCEPTION WHEN check_violation THEN NULL;
  END;
+ -- Advancing the sequence by one while forging the digest must also fail: the
+ -- head digest has to match a real entry, not just move the counter.
+ BEGIN
+  UPDATE shards_v2.audit_heads SET last_seq=head_seq+1,head_sha256=sha256('forged')
+   WHERE org_id='00000000-0000-4000-8000-000000000001';
+  RAISE EXCEPTION 'FAIL: audit head digest forked without a matching entry';
+ EXCEPTION WHEN check_violation THEN NULL;
+ END;
  IF (SELECT last_seq FROM shards_v2.audit_heads
-      WHERE org_id='00000000-0000-4000-8000-000000000001') <> head_seq THEN
+      WHERE org_id='00000000-0000-4000-8000-000000000001') <> head_seq
+    OR (SELECT head_sha256 FROM shards_v2.audit_heads
+      WHERE org_id='00000000-0000-4000-8000-000000000001') <> head_digest THEN
   RAISE EXCEPTION 'FAIL: audit head moved without an append';
  END IF;
 END $audit_head_guard$;
