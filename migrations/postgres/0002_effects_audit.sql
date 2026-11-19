@@ -189,7 +189,36 @@ CREATE TABLE shards_v2.audit_entries (
 -- The application supplies the *expected* canonical record/hash. The database
 -- independently reconstructs them, serialises on the tenant head row, validates
 -- every link and atomically advances the head in the insert transaction.
--- No runtime UPDATE/DELETE privilege is granted on audit_heads.
+-- No runtime UPDATE/DELETE privilege is granted on audit_heads, but privilege
+-- is not the only control: a role that can write the head could otherwise drop
+-- it and restart the chain at seq 1, or fork it at any point. Row shape is
+-- therefore constrained independently of who holds the grant.
+CREATE FUNCTION shards_v2.guard_audit_head() RETURNS trigger
+LANGUAGE plpgsql AS $body$
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'audit head cannot be removed' USING ERRCODE='42501';
+  END IF;
+  IF TG_OP='INSERT' THEN
+    IF NEW.last_seq <> 0 OR NEW.head_sha256 <> decode(repeat('00',32),'hex') THEN
+      RAISE EXCEPTION 'audit head must start at seq 0 with an empty chain'
+        USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.org_id IS DISTINCT FROM OLD.org_id OR
+     NEW.last_seq <> OLD.last_seq + 1 THEN
+    RAISE EXCEPTION 'audit head may only advance one sequence step'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END
+$body$;
+CREATE TRIGGER audit_head_guard BEFORE INSERT OR UPDATE OR DELETE ON shards_v2.audit_heads
+FOR EACH ROW EXECUTE FUNCTION shards_v2.guard_audit_head();
+CREATE TRIGGER audit_head_no_truncate BEFORE TRUNCATE ON shards_v2.audit_heads
+FOR EACH STATEMENT EXECUTE FUNCTION shards_v2.guard_audit_head();
+
 CREATE FUNCTION shards_v2.guard_audit_append() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, shards_v2 AS $body$
 DECLARE head record;

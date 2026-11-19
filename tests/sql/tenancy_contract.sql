@@ -159,6 +159,40 @@ INSERT INTO shards_v2.verifications
   'agt_a_verifier','approved',decode(repeat('11',32),'hex'),sha256(convert_to('{"status": "checked"}'::jsonb::text,'UTF8')),'{"ci":"independent fixture"}');
 SET ROLE shards_v2_runtime;
 SELECT set_config('shards.principal_id','',true);
+
+-- Approved result must be frozen while the task is still 'reported', not only
+-- once it is terminal. Without this, a worker can replace the reviewed result
+-- after approval and still close the task.
+INSERT INTO shards_v2.tasks
+ (org_id,task_id,creator_id,worker_id,input_json,payload_sha256)
+ VALUES ('00000000-0000-4000-8000-000000000001','task_result_freeze','agt_a_creator',
+  'agt_a_worker','{"freeze":1}',sha256(convert_to('{"freeze":1}','UTF8')));
+UPDATE shards_v2.tasks SET state='running' WHERE task_id='task_result_freeze';
+UPDATE shards_v2.tasks SET state='reported',result_json='{"result":"approved"}'
+ WHERE task_id='task_result_freeze';
+SET ROLE shards_v2_verifier;
+SELECT set_config('shards.principal_id','agt_a_verifier',true);
+INSERT INTO shards_v2.verifications
+ (org_id,task_id,creator_id,worker_id,verifier_id,decision,evidence_sha256,result_sha256,evidence_json)
+ VALUES ('00000000-0000-4000-8000-000000000001','task_result_freeze','agt_a_creator',
+  'agt_a_worker','agt_a_verifier','approved',decode(repeat('22',32),'hex'),
+  sha256(convert_to('{"result": "approved"}'::jsonb::text,'UTF8')),'{"ci":"result freeze fixture"}');
+SET ROLE shards_v2_runtime;
+SELECT set_config('shards.principal_id','',true);
+DO $result_freeze$
+BEGIN
+ BEGIN
+  UPDATE shards_v2.tasks SET result_json='{"result":"substituted"}'
+   WHERE task_id='task_result_freeze';
+  RAISE EXCEPTION 'FAIL: approved result replaced while task was still reported';
+ EXCEPTION WHEN insufficient_privilege THEN NULL;
+ END;
+ IF (SELECT result_json::text FROM shards_v2.tasks WHERE task_id='task_result_freeze')
+    <> '{"result": "approved"}' THEN
+  RAISE EXCEPTION 'FAIL: reported result diverged from the approved digest';
+ END IF;
+END $result_freeze$;
+
 UPDATE shards_v2.tasks SET state='succeeded' WHERE task_id='task_a';
 DO $$
 BEGIN
@@ -535,6 +569,53 @@ BEGIN
  EXCEPTION WHEN insufficient_privilege THEN NULL;
  END;
 END $$;
+
+-- TRUNCATE is additionally denied by statement-level triggers. Those triggers
+-- are a separate layer from the FK and the CASCADE cascade above, so assert
+-- they exist rather than relying on a path another guard blocks first.
+DO $truncate_triggers$
+DECLARE missing text;
+BEGIN
+ SELECT string_agg(t,', ') INTO missing FROM (
+   SELECT t FROM unnest(ARRAY[
+     'audit_entries','audit_heads','governance_receipts','effect_outbox','verifications'
+   ]) AS t
+   WHERE NOT EXISTS (
+     SELECT 1 FROM pg_trigger g
+      WHERE g.tgrelid = format('shards_v2.%I',t)::regclass
+        AND NOT g.tgisinternal AND (g.tgtype & 34) = 34
+   )
+ ) s;
+ IF missing IS NOT NULL THEN
+  RAISE EXCEPTION 'FAIL: no statement-level TRUNCATE trigger on %', missing;
+ END IF;
+END $truncate_triggers$;
+
+-- The audit head must not be removable or rewindable. Without this a writer
+-- could delete the head and restart the chain at seq 1, leaving two
+-- independently plausible ledgers for the same tenant.
+DO $audit_head_guard$
+DECLARE head_seq bigint;
+BEGIN
+ BEGIN
+  DELETE FROM shards_v2.audit_heads
+   WHERE org_id='00000000-0000-4000-8000-000000000001';
+  RAISE EXCEPTION 'FAIL: audit head deleted';
+ EXCEPTION WHEN insufficient_privilege THEN NULL;
+ END;
+ SELECT last_seq INTO head_seq FROM shards_v2.audit_heads
+  WHERE org_id='00000000-0000-4000-8000-000000000001';
+ BEGIN
+  UPDATE shards_v2.audit_heads SET last_seq=head_seq+5
+   WHERE org_id='00000000-0000-4000-8000-000000000001';
+  RAISE EXCEPTION 'FAIL: audit head rewound/forwarded outside an append';
+ EXCEPTION WHEN check_violation THEN NULL;
+ END;
+ IF (SELECT last_seq FROM shards_v2.audit_heads
+      WHERE org_id='00000000-0000-4000-8000-000000000001') <> head_seq THEN
+  RAISE EXCEPTION 'FAIL: audit head moved without an append';
+ END IF;
+END $audit_head_guard$;
 
 DO $$
 DECLARE t record;
