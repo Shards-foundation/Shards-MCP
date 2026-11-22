@@ -55,7 +55,7 @@ test("legacy operator console and enrolment entrypoints remain available",async(
   assert.match(await enroll.text(),/Enrol a real agent/);
 });
 
-test("public MCP tool contract is unchanged without bearer authentication",async()=>{
+test("reviewed source public MCP tool inventory remains unchanged without bearer authentication",async()=>{
   const request=new Request(root+"/mcp",{
     method:"POST",headers:{"content-type":"application/json"},
     body:JSON.stringify({jsonrpc:"2.0",id:7,method:"tools/list",params:{}})
@@ -64,7 +64,7 @@ test("public MCP tool contract is unchanged without bearer authentication",async
   assert.equal(response.status,200);
   const result=await response.json();
   const names=Array.from(result.result.tools,x=>x.name).sort();
-  assert.deepEqual(names,["shards_dns_lookup","shards_gateway_status","shards_systems_catalog"].sort());
+  assert.deepEqual(names,["shards_dns_lookup","shards_gateway_status","shards_systems_catalog","shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs"].sort());
 });
 
 test("developer page cannot bypass the protected MCP tool boundary",async()=>{
