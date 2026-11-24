@@ -222,11 +222,12 @@ python3 scripts/kernel_bridge_provision.py \
 The script:
 
 - writes atomically: a same-directory `O_EXCL|O_NOFOLLOW` temporary file with
-  mode `0600`, `fsync`, revalidation, then `os.replace`; a failed write leaves
-  the existing reviewed file byte-identical and removes the temporary file;
-- refuses to overwrite without `--force`, rejects symlinks (including dangling
-  symlinks), directories, non-regular files and output paths containing control
-  characters;
+  mode `0600`, `fsync`, revalidation, then `os.replace` for `--force`; without
+  `--force` it uses an atomic hard-link create-if-absent, so a file that appears
+  after validation is never overwritten. A failed write leaves the existing
+  reviewed file byte-identical and removes the temporary file;
+- rejects symlinks (including dangling symlinks), directories, non-regular
+  files and output paths containing control characters;
 - prints only the tenant, agent id, kernel actor, SHA-256 fingerprint, redacted
   token (`edge-agent-alice.****`) and a verifier command; the printed path is
   shell-quoted and raw control sequences are never emitted;
@@ -451,10 +452,11 @@ The bridge tests prove:
 - existing public and protected tools are unchanged;
 - a verified Cloudflare Access human identity cannot call the tool.
 
-The provisioning tests prove atomic replacement, byte-identical preservation of
-the reviewed file on injected write/fsync/replace failures, rotation, rejection
-of symlink and dangling-symlink targets, rejection of control-character output
-paths, no temporary secret leaks, and shell-safe verifier rendering.
+The provisioning tests prove atomic replacement, atomic create-if-absent (a
+concurrent file is never clobbered), byte-identical preservation of the reviewed
+file on injected write/fsync/replace failures, rotation, rejection of symlink
+and dangling-symlink targets, rejection of control-character output paths, no
+temporary secret leaks, and shell-safe verifier rendering.
 
 They do **not** prove a real kernel #162 process, a real Cloudflare
 Tunnel/Access origin, a real GitHub label write or read-back, an ARM64 systemd

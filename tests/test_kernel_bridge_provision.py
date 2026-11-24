@@ -162,6 +162,22 @@ class KernelBridgeProvisionTests(unittest.TestCase):
             self.assertFalse(out.exists(), "failed new write must not leave a partial credential")
             self.assertEqual(self._names(Path(location)), [], "failed new write must not leak a temporary secret")
 
+    def test_force_false_never_overwrites_a_file_created_after_validation(self):
+        module = _load_script()
+        with tempfile.TemporaryDirectory(prefix="kernel-bridge-provision-") as location:
+            out = Path(location) / "alice.json"
+            real_link = module.os.link
+
+            def race_link(src, dst, *args, **kwargs):
+                Path(dst).write_bytes(b"unreviewed credential\n")
+                return real_link(src, dst, *args, **kwargs)
+
+            with mock.patch.object(module.os, "link", side_effect=race_link):
+                with self.assertRaises(FileExistsError):
+                    module.write_private(out, {"new": "credential"}, force=False)
+            self.assertEqual(out.read_bytes(), b"unreviewed credential\n", "a concurrent file must never be clobbered")
+            self.assertEqual(self._names(Path(location)), [out.name], "the failed create must not leak a temporary secret")
+
     def test_rejects_symlink_target_and_dangling_symlink(self):
         module = _load_script()
         with tempfile.TemporaryDirectory(prefix="kernel-bridge-provision-") as location:

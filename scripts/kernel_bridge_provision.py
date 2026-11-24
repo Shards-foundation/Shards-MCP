@@ -153,11 +153,24 @@ def write_private(path: Path, data: dict, *, force: bool) -> None:
             handle.flush()
             os.fsync(handle.fileno())
 
-        # Revalidate immediately before the atomic replace. A symlink that
+        # Revalidate immediately before the atomic operation. A symlink that
         # appeared after the first check is rejected rather than replaced.
         _check_target(path, force=force)
-        os.replace(temp_path, path)
-        temp_path = None
+        if force:
+            os.replace(temp_path, path)
+            temp_path = None
+        else:
+            # os.replace always overwrites, so a concurrent file could be
+            # clobbered after the check. A hard link is an atomic
+            # create-if-absent and fails closed if the target now exists.
+            try:
+                os.link(temp_path, path, follow_symlinks=False)
+            except FileExistsError:
+                raise FileExistsError(
+                    f"refusing to overwrite {shlex.quote(str(path))}; use --force after review"
+                ) from None
+            os.unlink(temp_path)
+            temp_path = None
         _fsync_directory(parent)
     finally:
         if fd is not None:
