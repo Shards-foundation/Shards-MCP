@@ -53,6 +53,8 @@ Example workflow for an authenticated worker: call `shards_agent_identity` to ch
 
 No publicly registered OAuth authorization server, ChatGPT private write-tool login, signed client-owned multi-tenant identities, real Python/Cloudflare task federation, complete A2A, distributed lease authority, externally reconciled side-effects or marketplace approval is yet provided by the edge. Never assert those features are operational without independent E2E evidence.
 
+The opt-in `shards_kernel_issue_label` bridge is source-only and disabled by default. It depends on draft kernel PR #162 and a private Cloudflare Tunnel/Access origin. Calls that reach `kernelIssueLabel` write sanitized attempt/outcome `audit_events` rows and fail closed if the pre-forward audit cannot commit; an authenticated scope or daily-budget denial writes one sanitized `kernel.issue_label.denied` row and fails closed if that audit cannot commit. Anonymous/invalid-token calls write no D1 audit row. Edge tests use an injected transport stub; they do not prove a real kernel, a real GitHub write or a live deployment. Read [the cross-repo contract](../../docs/kernel-issue-label-bridge.md) before changing or enabling it, and do not enable it before the private origin, the kernel merge and the release-gate tool-count update are approved.
+
 ## Release criteria
 
 Use version-pinned wheel and Worker deployment identification; run all CI; inspect independent automated reviewer comments; verify live DNS/domain and TLS routes; prove the actual user client connection. Keep uncertain items as **BLOCKED** and do not merge or tag as production-ready on a green smoke test alone.

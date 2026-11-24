@@ -33,9 +33,212 @@ const tools=[
 {name:'shards_task_inbox',description:'List the authenticated agent’s own queued, claimed or completed tasks.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,openWorldHint:false},public:false,scope:'task:read'},
 {name:'shards_task_claim',description:'Atomically claim an assigned queued task in D1; two agents cannot claim the same queued task.',inputSchema:{type:'object',properties:{task_id:{type:'string'}},required:['task_id'],additionalProperties:false},annotations:{readOnlyHint:false,openWorldHint:false},public:false,scope:'task:claim'},
 {name:'shards_task_complete',description:'Record a result for an assigned task currently claimed by this agent. No external effects or execution.',inputSchema:{type:'object',properties:{task_id:{type:'string'},result:{type:'object'}},required:['task_id','result'],additionalProperties:false},annotations:{readOnlyHint:false,openWorldHint:false},public:false,scope:'task:complete'},
-{name:'shards_audit_tail',description:'Read the authenticated agent’s latest 20 audit event summaries.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,openWorldHint:false},public:false,scope:'agent:identity'}
+{name:'shards_audit_tail',description:'Read the authenticated agent’s latest 20 audit event summaries.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,openWorldHint:false},public:false,scope:'agent:identity'},
+{name:'shards_kernel_issue_label',description:'Request one operator-approved GitHub issue label through a separate Shards-Kernel operator. Requires the distinct kernel:github_label scope and an operator-signed exact-scoped v2 permit. No arbitrary URL, repository, actor or credential input.',inputSchema:{type:'object',properties:{issue_number:{type:'integer',minimum:1,maximum:100000},label:{type:'string',minLength:1,maxLength:100},permit:{type:'object'},request_id:{type:'string',minLength:6,maxLength:80}},required:['issue_number','label','permit','request_id'],additionalProperties:false},annotations:{readOnlyHint:false,openWorldHint:true},public:false,scope:'kernel:github_label',kernelBridge:true}
 ];
-const SCOPES=['agent:identity','agent:list','message:send','message:read','task:create','task:read','task:claim','task:complete'];
+const SCOPES=['agent:identity','agent:list','message:send','message:read','task:create','task:read','task:claim','task:complete','kernel:github_label'];
+// Opt-in Shards-Kernel bridge. The Edge never signs permits and never trusts
+// client-supplied actor, origin, URL, authorization header or credential.
+// Every value below comes from Worker bindings, never from MCP arguments.
+const KERNEL_BRIDGE_TOOL='shards_kernel_issue_label';
+const AUTH_REQUIRED_TEXT='AUTH_REQUIRED: This tool needs a valid, separately provisioned scoped bearer key. Sign in at https://mcp.shardsinc.co.uk/manage to enrol an agent. ChatGPT OAuth for private tools is not available yet.';
+const KERNEL_ACTION='github.issue.add_label';
+const KERNEL_MAX_ACTORS=2;
+const KERNEL_MAX_ISSUE_NUMBER=100000;
+const KERNEL_TIMEOUT_MS=10000;
+const KERNEL_MAX_RESPONSE_BYTES=16384;
+const KERNEL_PERMIT_MAX_BYTES=8192;
+const KERNEL_PERMIT_FIELDS=['permit_id','issuer','subject','jurisdiction','action','params','constraints','max_executions','valid_from_ms','valid_until_ms','evidence_hash','proposal_hash','nonce','signature','key_id','version','algorithm','audience'];
+const KERNEL_PERMIT_KEYS=[...KERNEL_PERMIT_FIELDS].sort();
+const KERNEL_RECEIPT_STATUSES=new Set(['ACCEPTED','QUEUED','REJECTED','FAILED']);
+const KERNEL_DECISIONS=new Set(['ALLOW','DENY','HALT']);
+const kernelBridgeTool=t=>Boolean(t&&t.kernelBridge);
+function kernelExactKeys(value,expected){
+  if(!value||typeof value!=='object'||Array.isArray(value))return false;
+  const keys=Object.keys(value).sort();
+  if(keys.length!==expected.length)return false;
+  for(let i=0;i<expected.length;i++)if(keys[i]!==expected[i])return false;
+  return true;
+}
+function kernelBoundedString(value,min,max){return typeof value==='string'&&value.length>=min&&value.length<=max&&value===value.trim()}
+function kernelOrigin(value){
+  if(!kernelBoundedString(value,8,200))return null;
+  let parsed;try{parsed=new URL(value)}catch{return null}
+  if(parsed.protocol!=='https:'||parsed.username||parsed.password||parsed.search||parsed.hash||parsed.pathname!=='/')return null;
+  if(parsed.origin!==value)return null;
+  const host=parsed.hostname;
+  if(!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(host))return null;
+  if(/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)||host==='localhost'||host.endsWith('.local')||host==='mcp.shardsinc.co.uk')return null;
+  return parsed.origin;
+}
+function kernelBridgeConfig(env){
+  if(!env||env.KERNEL_BRIDGE_ENABLED!=='1')return {ok:false,reason:'BRIDGE_DISABLED'};
+  const origin=kernelOrigin(env.KERNEL_OPERATOR_ORIGIN);
+  if(!origin)return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+  const accessId=env.KERNEL_ACCESS_CLIENT_ID,accessSecret=env.KERNEL_ACCESS_CLIENT_SECRET;
+  if(!kernelBoundedString(accessId,8,128)||!kernelBoundedString(accessSecret,16,256))return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+  const gatewayIdentity=env.KERNEL_GATEWAY_IDENTITY,gatewayToken=env.KERNEL_GATEWAY_TOKEN;
+  if(typeof gatewayIdentity!=='string'||!/^[A-Za-z0-9._-]{1,128}$/.test(gatewayIdentity)||gatewayIdentity==='.'||gatewayIdentity==='..')return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+  if(typeof gatewayToken!=='string'||gatewayToken.length<32||gatewayToken.length>512||gatewayToken!==gatewayToken.trim())return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+  let labels;try{labels=JSON.parse(env.KERNEL_LABEL_ALLOWLIST)}catch{return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'}}
+  if(!Array.isArray(labels)||labels.length<1||labels.length>32||new Set(labels).size!==labels.length)return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+  if(labels.some(label=>typeof label!=='string'||label.length<1||label.length>100||label!==label.trim()||/[\u0000-\u001f\u007f]/.test(label)))return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+  const maxIssue=env.KERNEL_MAX_ISSUE_NUMBER===undefined?KERNEL_MAX_ISSUE_NUMBER:Number(env.KERNEL_MAX_ISSUE_NUMBER);
+  if(!Number.isSafeInteger(maxIssue)||maxIssue<1||maxIssue>KERNEL_MAX_ISSUE_NUMBER)return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+  let actors;try{actors=JSON.parse(env.KERNEL_ACTOR_MAP)}catch{return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'}}
+  if(!actors||typeof actors!=='object'||Array.isArray(actors))return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+  const keys=Object.keys(actors);
+  if(keys.length<1||keys.length>KERNEL_MAX_ACTORS)return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+  const seenActors=new Set(),seenTokens=new Set(),normalized={};
+  for(const key of keys){
+    if(!/^[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{12,90}$/.test(key))return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+    const entry=actors[key];
+    if(!entry||typeof entry!=='object'||Array.isArray(entry))return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+    if(!kernelExactKeys(entry,['actor','token']))return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+    const actor=entry.actor,token=entry.token;
+    if(typeof actor!=='string'||!/^[A-Za-z0-9_-]{1,128}$/.test(actor))return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+    if(typeof token!=='string'||token.length>640||token.split('.').length!==2||!token.startsWith(actor+'.'))return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+    const secret=token.slice(actor.length+1);
+    if(secret.length<32||secret.length>512||/[^\x21-\x7e]/.test(secret))return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+    if(seenActors.has(actor)||seenTokens.has(token)||actor===gatewayIdentity||token===gatewayToken||token===accessSecret||gatewayToken===accessSecret)return {ok:false,reason:'BRIDGE_NOT_CONFIGURED'};
+    seenActors.add(actor);seenTokens.add(token);normalized[key]={actor,token};
+  }
+  return {ok:true,origin,accessId,accessSecret,gatewayIdentity,gatewayToken,labels:new Set(labels),maxIssue,actors:normalized};
+}
+function kernelBridgeVisible(env){return kernelBridgeConfig(env).ok}
+function visibleTools(env){const visible=kernelBridgeVisible(env);return tools.filter(t=>!kernelBridgeTool(t)||visible)}
+function kernelBridgeResult(value,isError){return isError?{content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value,isError:true}:result(value)}
+function kernelSafeAuditStatus(value){return typeof value==='string'&&/^[A-Z0-9_]{1,64}$/.test(value)?value:'UNKNOWN'}
+async function kernelAudit(env,actor,action,objectId,status){
+  if(!env?.EDGE_DB||typeof env.EDGE_DB.prepare!=='function')return false;
+  if(!actor||typeof actor.tenant_id!=='string'||typeof actor.id!=='string')return false;
+  if(!/^[a-z0-9_.]{1,64}$/.test(action)||!/^[A-Z0-9_]{1,64}$/.test(status))return false;
+  if(typeof objectId!=='string'||objectId.length<1||objectId.length>128)return false;
+  try{
+    const r=await env.EDGE_DB.prepare("INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) VALUES(?,?,?,?,?,?,?)")
+      .bind(crypto.randomUUID(),actor.tenant_id,actor.id,action,objectId,status,new Date().toISOString()).run();
+    return r?.meta?.changes===1;
+  }catch(e){return false}
+}
+function kernelBridgeDeniedValue(reason,requestId=null){return {state:'DENIED',applied:false,kernel_reached:false,retryable:false,reason_code:reason,request_id:typeof requestId==='string'&&reqId(requestId)?requestId:null}}
+async function kernelBridgeAuditedResult(env,actor,value,isError,auditObjectId){
+  const action='kernel.issue_label.'+String(value.state||'unknown').toLowerCase();
+  const status=value.state==='SUCCEEDED'?'OK':kernelSafeAuditStatus(value.reason_code||'UNKNOWN');
+  const ok=await kernelAudit(env,actor,action,auditObjectId,status);
+  if(!ok)return kernelBridgeResult({state:value.kernel_reached===false?'UNAVAILABLE':'UNKNOWN',applied:null,kernel_reached:value.kernel_reached??null,retryable:false,reason_code:'EDGE_AUDIT_UNAVAILABLE',request_id:typeof value.request_id==='string'&&reqId(value.request_id)?value.request_id:null,next:'do not retry; inspect the issue, the kernel provider journal and the Edge audit store'},true);
+  return kernelBridgeResult(value,isError);
+}
+async function kernelBridgeDenialAudit(env,actor,args,status){
+  const objectId=args&&typeof args==='object'&&!Array.isArray(args)&&typeof args.request_id==='string'&&reqId(args.request_id)?args.request_id:crypto.randomUUID();
+  return kernelAudit(env,actor,'kernel.issue_label.denied',objectId,status);
+}
+function kernelSafeCode(value,allowed){return typeof value==='string'&&allowed.has(value)?value:null}
+function kernelSafeDetail(value){return typeof value==='string'&&/^[A-Z][A-Z0-9_]{2,63}$/.test(value)?value:null}
+function kernelSafeHash(value){return typeof value==='string'&&/^[0-9a-f]{64}$/.test(value)?value:null}
+function kernelValidatePermit(permit,actor,params){
+  if(!permit||typeof permit!=='object'||Array.isArray(permit))return {ok:false,reason:'PERMIT_INVALID'};
+  let serialized;try{serialized=JSON.stringify(permit)}catch{return {ok:false,reason:'PERMIT_INVALID'}}
+  if(typeof serialized!=='string'||serialized.length>KERNEL_PERMIT_MAX_BYTES)return {ok:false,reason:'PERMIT_TOO_LARGE'};
+  if(!kernelExactKeys(permit,KERNEL_PERMIT_KEYS))return {ok:false,reason:'PERMIT_INVALID'};
+  if(permit.version!==2||permit.algorithm!=='Ed25519')return {ok:false,reason:'PERMIT_VERSION_INVALID'};
+  if(permit.action!==KERNEL_ACTION)return {ok:false,reason:'PERMIT_ACTION_MISMATCH'};
+  if(permit.subject!==actor)return {ok:false,reason:'PERMIT_SUBJECT_MISMATCH'};
+  if(typeof permit.audience!=='string'||permit.audience.length<1||permit.audience.length>128)return {ok:false,reason:'PERMIT_INVALID'};
+  if(!permit.params||typeof permit.params!=='object'||Array.isArray(permit.params))return {ok:false,reason:'PERMIT_PARAMS_MISMATCH'};
+  if(!kernelExactKeys(permit.params,['issue_number','label']))return {ok:false,reason:'PERMIT_PARAMS_MISMATCH'};
+  if(permit.params.issue_number!==params.issue_number||permit.params.label!==params.label)return {ok:false,reason:'PERMIT_PARAMS_MISMATCH'};
+  if(permit.max_executions!==1)return {ok:false,reason:'PERMIT_MAX_EXECUTIONS_INVALID'};
+  if(!Number.isSafeInteger(permit.valid_from_ms)||!Number.isSafeInteger(permit.valid_until_ms)||permit.valid_until_ms<=permit.valid_from_ms)return {ok:false,reason:'PERMIT_INVALID'};
+  if(typeof permit.nonce!=='string'||permit.nonce.length<32||permit.nonce.length>256)return {ok:false,reason:'PERMIT_INVALID'};
+  if(typeof permit.signature!=='string'||!/^[0-9a-f]{128}$/.test(permit.signature))return {ok:false,reason:'PERMIT_INVALID'};
+  if(typeof permit.permit_id!=='string'||!/^[0-9a-f]{64}$/.test(permit.permit_id))return {ok:false,reason:'PERMIT_INVALID'};
+  for(const field of ['issuer','jurisdiction','key_id'])if(typeof permit[field]!=='string'||permit[field].length<1||permit[field].length>128)return {ok:false,reason:'PERMIT_INVALID'};
+  if(typeof permit.evidence_hash!=='string'||permit.evidence_hash.length>128)return {ok:false,reason:'PERMIT_INVALID'};
+  if(typeof permit.proposal_hash!=='string'||permit.proposal_hash.length<1||permit.proposal_hash.length>128)return {ok:false,reason:'PERMIT_INVALID'};
+  if(!permit.constraints||typeof permit.constraints!=='object'||Array.isArray(permit.constraints))return {ok:false,reason:'PERMIT_INVALID'};
+  return {ok:true};
+}
+async function kernelReadCapped(response,maxBytes){
+  if(!response.body)return '';
+  const reader=response.body.getReader(),parts=[];let size=0;
+  try{
+    for(;;){
+      const {done,value}=await reader.read();
+      if(done)break;
+      size+=value.byteLength;
+      if(size>maxBytes){await reader.cancel().catch(()=>{});throw Error('Kernel response too large')}
+      parts.push(value);
+    }
+  }finally{reader.releaseLock()}
+  const bytes=new Uint8Array(size);let at=0;
+  for(const part of parts){bytes.set(part,at);at+=part.byteLength}
+  return decoder.decode(bytes);
+}
+function kernelReceiptState(receipt){
+  if(!receipt||typeof receipt!=='object'||Array.isArray(receipt))return 'UNKNOWN';
+  const status=kernelSafeCode(receipt.status,KERNEL_RECEIPT_STATUSES);
+  const decision=kernelSafeCode(receipt.decision,KERNEL_DECISIONS);
+  const error=typeof receipt.error==='string'?receipt.error:'';
+  if(/PROVIDER_NOT_APPLIED/.test(error))return 'NOT_APPLIED';
+  if(/PROVIDER_EFFECT_UNKNOWN/.test(error))return 'UNKNOWN';
+  if(status==='REJECTED')return 'DENIED';
+  if(status==='FAILED')return 'UNKNOWN';
+  if(status==='ACCEPTED'&&decision==='ALLOW'){
+    const resultState=receipt.result&&typeof receipt.result==='object'?receipt.result.state:null;
+    if(resultState==='SUCCEEDED'||resultState==='NOT_APPLIED'||resultState==='UNKNOWN')return resultState;
+  }
+  return 'UNKNOWN';
+}
+async function kernelIssueLabel(args,actor,env){
+  let correlationId=null,auditObjectId=crypto.randomUUID(),attemptAudited=false;
+  try{
+    if(args&&typeof args==='object'&&!Array.isArray(args)&&typeof args.request_id==='string'&&reqId(args.request_id)){correlationId=args.request_id;auditObjectId=args.request_id}
+    const attemptOk=await kernelAudit(env,actor,'kernel.issue_label.attempt',auditObjectId,'ATTEMPTED');
+    if(!attemptOk)return kernelBridgeResult({state:'UNAVAILABLE',applied:null,kernel_reached:false,retryable:false,reason_code:'EDGE_AUDIT_UNAVAILABLE',request_id:correlationId,next:'do not retry automatically; operator must verify the Edge audit store'},true);
+    attemptAudited=true;
+    const config=kernelBridgeConfig(env);
+    if(!config.ok)return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue(config.reason,correlationId),true,auditObjectId);
+    if(!args||typeof args!=='object'||Array.isArray(args))return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue('INVALID_ARGUMENTS'),true,auditObjectId);
+    if(!kernelExactKeys(args,['issue_number','label','permit','request_id']))return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue('UNEXPECTED_ARGUMENT',correlationId),true,auditObjectId);
+    const {issue_number,label,permit,request_id}=args;
+    if(!Number.isSafeInteger(issue_number)||issue_number<1||issue_number>config.maxIssue)return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue('ISSUE_NUMBER_OUT_OF_RANGE',correlationId),true,auditObjectId);
+    if(typeof label!=='string'||!config.labels.has(label))return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue('LABEL_NOT_ALLOWLISTED',correlationId),true,auditObjectId);
+    if(typeof request_id!=='string'||!reqId(request_id))return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue('INVALID_REQUEST_ID',correlationId),true,auditObjectId);
+    const mapping=config.actors[actor.tenant_id+'/'+actor.id];
+    if(!mapping)return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue('AGENT_NOT_MAPPED',correlationId),true,auditObjectId);
+    const permitCheck=kernelValidatePermit(permit,mapping.actor,{issue_number,label});
+    if(!permitCheck.ok)return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue(permitCheck.reason,correlationId),true,auditObjectId);
+    const body={request_id,actor:mapping.actor,intent:'add one allowlisted label',tool_call:{name:KERNEL_ACTION,params:{issue_number,label}},params:{issue_number,label},permit};
+    let response;
+    try{
+      response=await fetch(config.origin+'/submit',{method:'POST',redirect:'manual',signal:AbortSignal.timeout(KERNEL_TIMEOUT_MS),headers:{'content-type':'application/json',accept:'application/json',authorization:'Bearer '+mapping.token,'x-shards-gateway-identity':config.gatewayIdentity,'x-shards-gateway-token':config.gatewayToken,'cf-access-client-id':config.accessId,'cf-access-client-secret':config.accessSecret},body:JSON.stringify(body)});
+    }catch(e){
+      return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_UNREACHABLE',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
+    }
+    if(response.status>=300&&response.status<400)return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_REDIRECT_REFUSED',request_id,next:'do not retry; operator must verify the exact kernel origin'},true,auditObjectId);
+    let text;try{text=await kernelReadCapped(response,KERNEL_MAX_RESPONSE_BYTES)}catch(e){return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_RESPONSE_UNREADABLE',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId)}
+    if(response.status!==200){
+      const reason=response.status>=500||response.status===429?'KERNEL_UNAVAILABLE':'KERNEL_UNEXPECTED_STATUS';
+      return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:reason,request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
+    }
+    let receipt;try{receipt=JSON.parse(text)}catch(e){return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_RESPONSE_INVALID',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId)}
+    if(typeof receipt.request_id!=='string'||receipt.request_id!==request_id)return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_RECEIPT_CORRELATION_MISMATCH',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
+    const state=kernelReceiptState(receipt);
+    const alreadyPresent=receipt.result&&typeof receipt.result==='object'&&receipt.result.already_present===true;
+    const detail=kernelSafeDetail(receipt.result&&typeof receipt.result==='object'?receipt.result.detail:null);
+    const base={request_id,kernel_request_id:receipt.request_id,kernel_status:kernelSafeCode(receipt.status,KERNEL_RECEIPT_STATUSES),kernel_decision:kernelSafeCode(receipt.decision,KERNEL_DECISIONS),kernel_evidence_hash:kernelSafeHash(receipt.evidence_hash),kernel_ts_ms:Number.isSafeInteger(receipt.ts_ms)?receipt.ts_ms:null};
+    if(state==='SUCCEEDED')return await kernelBridgeAuditedResult(env,actor,{state:'SUCCEEDED',applied:true,already_present:alreadyPresent,provider_detail:detail,kernel_reached:true,retryable:false,reason_code:null,issue_number,label,...base,next:'label presence verified by the kernel provider read-back'},false,auditObjectId);
+    if(state==='NOT_APPLIED')return await kernelBridgeAuditedResult(env,actor,{state:'NOT_APPLIED',applied:false,already_present:false,provider_detail:detail,kernel_reached:true,retryable:false,reason_code:'PROVIDER_NOT_APPLIED',issue_number,label,...base,next:'no label was added; request a new signed permit only after correcting the cause'},true,auditObjectId);
+    if(state==='DENIED')return await kernelBridgeAuditedResult(env,actor,{state:'DENIED',applied:false,already_present:false,provider_detail:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_DENIED',issue_number,label,...base,next:'no label was added; request a new signed permit only after correcting the cause'},true,auditObjectId);
+    return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,already_present:null,provider_detail:detail,kernel_reached:true,retryable:false,reason_code:'KERNEL_EFFECT_UNKNOWN',issue_number,label,...base,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
+  }catch(e){
+    if(attemptAudited){
+      const auditOk=await kernelAudit(env,actor,'kernel.issue_label.unknown',auditObjectId,'BRIDGE_INTERNAL_ERROR');
+      if(!auditOk)return kernelBridgeResult({state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'EDGE_AUDIT_UNAVAILABLE',request_id:correlationId,next:'do not retry; inspect the Edge audit store'},true);
+    }
+    return kernelBridgeResult({state:'UNAVAILABLE',applied:null,kernel_reached:null,retryable:false,reason_code:'BRIDGE_INTERNAL_ERROR',request_id:correlationId,next:'do not retry automatically; operator must verify the bridge'},true);
+  }
+}
 const pub=(obj,status=200,extra={})=>new Response(JSON.stringify(obj),{status,headers:{...HEADERS,'content-type':'application/json; charset=utf-8',...extra}});
 const plain=(s,status=200,ct='text/plain; charset=utf-8',extra={})=>new Response(s,{status,headers:{...HEADERS,'content-type':ct,...extra}});
 function rpc(id,result){return {jsonrpc:'2.0',id,result}}
@@ -187,16 +390,32 @@ async function publicResearchTool(name,args){
   throw Error('Unknown public research tool');
 }
 
-async function runTool(name,args,actor,env,request){if(!args||typeof args!=='object'||Array.isArray(args))return errorResult('Tool input must be an object');const t=tools.find(x=>x.name===name);if(!t)return errorResult('Unknown tool');if(!t.public&&(!actor||!actor.scopeSet.has(t.scope)))return errorResult('AUTH_REQUIRED: This tool needs a valid, separately provisioned scoped bearer key. Sign in at https://mcp.shardsinc.co.uk/manage to enrol an agent. ChatGPT OAuth for private tools is not available yet.');
+async function runTool(name,args,actor,env,request){if(!args||typeof args!=='object'||Array.isArray(args))return errorResult('Tool input must be an object');const t=tools.find(x=>x.name===name);if(!t)return errorResult('Unknown tool');
+if(!t.public&&!actor)return errorResult(AUTH_REQUIRED_TEXT);
+if(name===KERNEL_BRIDGE_TOOL){
+  let bridgeConfig;try{bridgeConfig=kernelBridgeConfig(env)}catch{bridgeConfig={ok:false,reason:'BRIDGE_NOT_CONFIGURED'}}
+  if(!bridgeConfig.ok){
+    if(!actor?.scopeSet?.has(t.scope))return errorResult(AUTH_REQUIRED_TEXT);
+    return kernelBridgeResult(kernelBridgeDeniedValue(bridgeConfig.reason,args.request_id),true);
+  }
+}
+if(!t.public&&!actor.scopeSet.has(t.scope)){
+  if(name===KERNEL_BRIDGE_TOOL&&!await kernelBridgeDenialAudit(env,actor,args,'SCOPE_DENIED'))return errorResult('UNAVAILABLE: EDGE_AUDIT_UNAVAILABLE; do not retry automatically');
+  return errorResult(AUTH_REQUIRED_TEXT);
+}
 if(t.public&&name==='shards_dns_lookup'){try{validateDNS(args)}catch(e){return errorResult('Invalid DNS arguments')}}
 if(t.public&&name.startsWith('shards_')&&['shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'].includes(name)&&!validPublicResearchArgs(name,args))return errorResult('Invalid public research arguments');
 if(t.public&&!await publicCallerBudget(env,request,name))return errorResult('Caller daily quota exceeded or budget unavailable');
 if(t.public&&!await budget(env,name,name==='shards_dns_lookup'?600:6000))return errorResult('Global daily quota exceeded or budget unavailable');
-if(!t.public&&!await budget(env,actor.id+':'+name,1500))return errorResult('Agent daily quota exceeded or budget unavailable');
+if(!t.public&&!await budget(env,actor.id+':'+name,t.kernelBridge?50:1500)){
+  if(name===KERNEL_BRIDGE_TOOL&&!await kernelBridgeDenialAudit(env,actor,args,'BUDGET_DENIED'))return errorResult('UNAVAILABLE: EDGE_AUDIT_UNAVAILABLE; do not retry automatically');
+  return errorResult('Agent daily quota exceeded or budget unavailable');
+}
 try{if(['shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'].includes(name))return result(await publicResearchTool(name,args));
 if(name==='shards_gateway_status')return result({name:'Shards MCP Edge',version:VERSION,endpoint:ORIGIN+'/mcp',protocols:['2025-11-25','2026-07-28 subset'],status:'online',persistence:'Cloudflare EU D1',python_gateway:'Separate upstream project; not federated by this edge service',anonymous_tools:tools.filter(t=>t.public).length,authenticated:'per-agent bearer key'});
 if(name==='shards_systems_catalog')return result({projects:[{name:'Shards-MCP (Python)',url:'https://github.com/Shards-foundation/Shards-MCP',status:'experimental self-hosted gateway'},{name:'Shards Kernel',url:'https://github.com/Shards-foundation/Shards-kernel',status:'open-source governance kernel'},{name:'Shards Inc',url:'https://shardsinc.co.uk',status:'company homepage'},{name:'Privacy Lab',url:'https://privacy.shardsinc.co.uk/lab',status:'live research utility suite'},{name:'Security Console',url:'https://security.shardsinc.co.uk',status:'early-stage defensive lab'},{name:'Voice Studio',url:'https://voice.shardsinc.co.uk',status:'browser tools, cloud provider gated'}]});
 if(name==='shards_dns_lookup')return result(await getDNS(args));
+if(name===KERNEL_BRIDGE_TOOL)return await kernelIssueLabel(args,actor,env);
 if(name==='shards_agent_identity')return result({id:actor.id,tenant:actor.tenant_id,name:actor.name,client:actor.client,scopes:[...actor.scopeSet]});
 if(name==='shards_agents_list'){const r=await env.EDGE_DB.prepare('SELECT id,name,client,created_at FROM agents WHERE tenant_id=? AND disabled_at IS NULL ORDER BY created_at DESC LIMIT 60').bind(actor.tenant_id).all();return result({agents:r.results||[]})}
 if(name==='shards_message_send'){
@@ -302,7 +521,7 @@ if(req.method==='notifications/initialized'||req.method.startsWith('notification
 if(req.method==='initialize'){const asked=req.params?.protocolVersion;const negotiated=['2025-11-25','2025-06-18'].includes(asked)?asked:'2025-11-25';return pub(rpc(id,{protocolVersion:negotiated,capabilities:{tools:{listChanged:false}},serverInfo:{name:'shards-mcp-edge',version:VERSION}}),200,{'mcp-protocol-version':negotiated})}
 if(req.method==='server/discover')return pub(rpc(id,{protocolVersion:'2026-07-28',serverInfo:{name:'shards-mcp-edge',version:VERSION},capabilities:{tools:{listChanged:false}}}),200,{'mcp-protocol-version':'2026-07-28'});
 if(req.method==='ping')return pub(rpc(id,{}));
-if(req.method==='tools/list'){if(signedIdentity){return pub(rpc(id,{tools:[...tools.filter(t=>t.public).map(({name,description,inputSchema,annotations})=>({name,description,inputSchema,annotations})),{name:'shards_user_identity',description:'Return only the caller identity verified by Cloudflare Access. Does not grant internal agent scopes.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,openWorldHint:false}}]}));}const actor=bearerActor;const visible=tools.filter(t=>t.public||(actor&&actor.scopeSet.has(t.scope)));return pub(rpc(id,{tools:visible.map(({name,description,inputSchema,annotations,public:pub})=>({name,description:description+(pub?'':' Requires an operator-issued scoped bearer key.'),inputSchema,annotations}))}));}
+if(req.method==='tools/list'){if(signedIdentity){return pub(rpc(id,{tools:[...visibleTools(env).filter(t=>t.public).map(({name,description,inputSchema,annotations})=>({name,description,inputSchema,annotations})),{name:'shards_user_identity',description:'Return only the caller identity verified by Cloudflare Access. Does not grant internal agent scopes.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,openWorldHint:false}}]}));}const actor=bearerActor;const visible=visibleTools(env).filter(t=>t.public||(actor&&actor.scopeSet.has(t.scope)));return pub(rpc(id,{tools:visible.map(({name,description,inputSchema,annotations,public:pub})=>({name,description:description+(pub?'':' Requires an operator-issued scoped bearer key.'),inputSchema,annotations}))}));}
 if(req.method==='resources/list')return pub(rpc(id,{resources:[]}));
 if(req.method==='prompts/list')return pub(rpc(id,{prompts:[]}));
 if(req.method==='tools/call'){const tname=req.params?.name;if(typeof tname!=='string')return pub(rpcError(id,-32602,'Tool name required'));if(signedIdentity){if(tname==='shards_user_identity'){const params=req.params&&Object.prototype.hasOwnProperty.call(req.params,'arguments')?req.params.arguments:{};if(typeof params!=='object'||params===null||Array.isArray(params)||Object.keys(params).length)return pub(rpc(id,errorResult('Unexpected tool arguments')));return pub(rpc(id,result({authenticated:true,provider:'cloudflare_access',subject_fingerprint:(await digest(signedIdentity.sub)).slice(0,20),email:typeof signedIdentity.email==='string'?signedIdentity.email:null,privileged_scopes:[]})))}if(!tools.some(t=>t.name===tname&&t.public))return pub(rpc(id,errorResult('PERMISSION_DENIED: Social login has no internal agent privileges')));return pub(rpc(id,await runTool(tname,req.params?.arguments||{},null,env,request)))}const actor=bearerActor;const r=await runTool(tname,req.params?.arguments||{},actor,env,request);return pub(rpc(id,r))}
@@ -847,7 +1066,7 @@ if(u.pathname==='/manage/api/account'||u.pathname.startsWith('/manage/api/accoun
 if(request.method==='GET'&&u.pathname==='/manage/settings')return new Response(SETTINGS_HTML,{headers:{...HEADERS,'content-type':'text/html; charset=utf-8','content-security-policy':"default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; script-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; font-src 'self'"}});
 if(request.method==='GET'&&u.pathname==='/manage/settings.js')return plain(SETTINGS_CLIENT,200,'text/javascript; charset=utf-8');
 if(request.method==='GET'&&u.pathname==='/manage/skills.js')return plain(SKILLS_CLIENT,200,'text/javascript; charset=utf-8');
-if(request.method==='GET'&&u.pathname==='/api/status'){let status='unavailable';try{await env.EDGE_DB.prepare('SELECT 1 AS ok').first();status='connected'}catch(e){}return pub({service:'Shards MCP Edge',version:VERSION,endpoint:ORIGIN+'/mcp',db:status,tools:tools.map(t=>({name:t.name,description:t.description,public:t.public})),authentication:{public:'noauth',private:'per-agent bearer',oauth:'not yet available on the original /mcp endpoint',authenticated_connect:{endpoint:ORIGIN+'/connect',worker_listener_configured:Boolean(env.CONNECT_ACCESS_AUD&&env.CONNECT_ACCESS_AUD!==env.ACCESS_AUD),provider:'Cloudflare Access Managed OAuth',scope:'verified identity and three public tools only'}},limits:'Experimental edge service, no remote Python gateway federation'})}
+if(request.method==='GET'&&u.pathname==='/api/status'){let status='unavailable';try{await env.EDGE_DB.prepare('SELECT 1 AS ok').first();status='connected'}catch(e){}return pub({service:'Shards MCP Edge',version:VERSION,endpoint:ORIGIN+'/mcp',db:status,tools:visibleTools(env).map(t=>({name:t.name,description:t.description,public:t.public})),authentication:{public:'noauth',private:'per-agent bearer',oauth:'not yet available on the original /mcp endpoint',authenticated_connect:{endpoint:ORIGIN+'/connect',worker_listener_configured:Boolean(env.CONNECT_ACCESS_AUD&&env.CONNECT_ACCESS_AUD!==env.ACCESS_AUD),provider:'Cloudflare Access Managed OAuth',scope:'verified identity and three public tools only'}},limits:'Experimental edge service, no remote Python gateway federation'})}
 if(u.pathname==='/mcp')return mcp(request,env);
 if(u.pathname.startsWith('/manage/api/'))return manage(request,env,u);
 return plain('Not Found',404)}}
