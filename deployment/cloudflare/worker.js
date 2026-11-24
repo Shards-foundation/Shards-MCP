@@ -362,7 +362,7 @@ function validPublicResearchArgs(name,args){
 async function publicSource(url,maxChars){
   // Fixed GitHub origins and allowlisted paths only. Never accept user-defined URLs or redirects.
   if(!url.startsWith('https://raw.githubusercontent.com/Shards-foundation/')&&!url.startsWith('https://api.github.com/repos/Shards-foundation/'))throw Error('Source not allowed');
-  const response=await fetch(url,{headers:{accept:'application/json, text/plain;q=0.9','user-agent':'shards-mcp-edge'},redirect:'error',signal:AbortSignal.timeout(7000),cf:{cacheEverything:true,cacheTtl:300}});
+  const response=await fetch(url,{headers:{accept:'application/json, text/plain;q=0.9','user-agent':'shards-mcp-edge'},redirect:'manual',signal:AbortSignal.timeout(7000),cf:{cacheEverything:true,cacheTtl:300}});
   if(!response.ok)throw Error('Public source unavailable (HTTP '+response.status+')');
   const byteLimit=Math.min(2400000,maxChars*3);
   const length=Number(response.headers.get('content-length')||0);
