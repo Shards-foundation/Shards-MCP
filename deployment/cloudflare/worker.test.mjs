@@ -580,7 +580,7 @@ test("Public research returns bounded live-source results from fixed GitHub orig
   assert.equal(prs.pull_requests.length,10,"GitHub responses with eleven PRs must truncate to ten metadata entries");
   assert.equal('body' in prs.pull_requests[0],false,"PR bodies must never be returned");
   assert.ok(calls.every(c=>c.url.startsWith("https://raw.githubusercontent.com/Shards-foundation/")||c.url.startsWith("https://api.github.com/repos/Shards-foundation/")));
-  assert.ok(calls.every(c=>c.options.redirect==="error"));
+  assert.ok(calls.every(c=>c.options.redirect==="manual"),"Cloudflare Workers supports manual redirects; all 3xx responses must fail closed");
   assert.ok(calls.every(c=>c.options.signal instanceof AbortSignal),"Each upstream request requires a timeout signal");
   assert.ok(calls.every(c=>c.options.cf?.cacheEverything===true&&c.options.cf?.cacheTtl===300),"All public reads must enable bounded caching");
   assert.equal(budgetWrites.length,16,"Eight valid public calls must each charge caller and global D1 budgets");
