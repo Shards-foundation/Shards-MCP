@@ -31,7 +31,7 @@ export async function accept(options){
   const call=(name,token,args={})=>rpc('tools/call',{name,arguments:args},token);
   const authReason='AUTH_REQUIRED: This tool needs a valid, separately provisioned scoped bearer key. Sign in at '+base+'/manage to enrol an agent. ChatGPT OAuth for private tools is not available yet.';
   const denied=(r,reason,code)=>ensure(r.status===200&&r.body?.result?.isError===true&&r.body?.result?.content?.length===1&&r.body.result.content[0].type==='text'&&r.body.result.content[0].text===reason,code);
-  const publicNames=['shards_gateway_status','shards_systems_catalog','shards_dns_lookup','shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs','shards_issue_read'];
+  const publicNames=['shards_gateway_status','shards_systems_catalog','shards_dns_lookup','shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'];
   const taskArgs={assignee_agent_id:role('reader').id,title:'Synthetic denied task',input:{fixture:true},request_id:'pr47-denial-task-0001'};
   // Establish staging identity before any credential leaves this process.
   let ready=false,identity;
@@ -121,7 +121,7 @@ export async function accept(options){
     const wrong=await request(base,'/connect',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+role('observer').token,'cf-access-jwt-assertion':'invalid.jwt'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'ping'})});ensure(wrong.status===401,'BEARER_TO_ACCESS_FALLBACK');
     const session=await request(base,'/connect',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer invalid','cf-access-jwt-assertion':access.token},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list'})});
     const names=session.body?.result?.tools?.map(t=>t.name)||[];
-    ensure(session.status===200&&names.length===9&&names.includes('shards_user_identity')&&!names.includes('shards_agent_identity'),'SIGNED_ACCESS_SCOPE_CONFUSION');
+    ensure(session.status===200&&names.length===8&&names.includes('shards_user_identity')&&!names.includes('shards_agent_identity'),'SIGNED_ACCESS_SCOPE_CONFUSION');
   });
   await record('storage failure returns sanitized 503',async()=>{
     if(!faultBase)return 'SEPARATE_FAULT_WORKER_REQUIRED';
