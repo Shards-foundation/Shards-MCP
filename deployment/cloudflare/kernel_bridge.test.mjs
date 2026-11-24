@@ -784,7 +784,7 @@ test("network errors, aborts, oversized and malformed responses become UNKNOWN",
     { name: "abort", handler: () => { throw Object.assign(new Error("aborted"), { name: "AbortError" }); }, reason: "KERNEL_UNREACHABLE" },
     { name: "oversize", handler: () => jsonResponse(200, "x".repeat(20000)), reason: "KERNEL_RESPONSE_UNREADABLE" },
     { name: "non-json", handler: () => jsonResponse(200, "not json"), reason: "KERNEL_RESPONSE_INVALID" },
-    { name: "array", handler: () => jsonResponse(200, "[]"), reason: "KERNEL_RECEIPT_CORRELATION_MISMATCH" },
+    { name: "array", handler: () => jsonResponse(200, "[]"), reason: "KERNEL_RESPONSE_INVALID" },
     { name: "empty-object", handler: () => jsonResponse(200, "{}"), reason: "KERNEL_RECEIPT_CORRELATION_MISMATCH" },
     { name: "accepted-without-result", handler: () => jsonResponse(200, { request_id: "req-0001", status: "ACCEPTED", decision: "ALLOW", result: null }), reason: "KERNEL_EFFECT_UNKNOWN" },
   ];
@@ -799,6 +799,47 @@ test("network errors, aborts, oversized and malformed responses become UNKNOWN",
     assert.equal(call.result.structuredContent.retryable, false, scenario.name);
     assert.equal(fetchStub.calls.length, 1, scenario.name);
     assertNoSecrets(call.result);
+  }
+});
+
+test("HTTP 200 receipts that are not JSON objects stay UNKNOWN/KERNEL_RESPONSE_INVALID, are audited and never retried", async () => {
+  const scenarios = [
+    { name: "null", handler: () => jsonResponse(200, "null"), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "boolean-true", handler: () => jsonResponse(200, "true"), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "boolean-false", handler: () => jsonResponse(200, "false"), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "number", handler: () => jsonResponse(200, "42"), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "string", handler: () => jsonResponse(200, '"ok"'), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "empty-array", handler: () => jsonResponse(200, "[]"), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "array-of-objects", handler: () => jsonResponse(200, JSON.stringify([receipt()])), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "malformed", handler: () => jsonResponse(200, "not json"), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "oversized", handler: () => jsonResponse(200, "x".repeat(20000)), reason: "KERNEL_RESPONSE_UNREADABLE" },
+    { name: "wrong-id", handler: () => jsonResponse(200, receipt({ request_id: "req-spoofed" })), reason: "KERNEL_RECEIPT_CORRELATION_MISMATCH" },
+  ];
+  for (const scenario of scenarios) {
+    const fetchStub = stubFetch(scenario.handler);
+    const { worker } = loadWorker(fetchStub);
+    const db = makeDB(makeActor());
+    const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }), validArgs());
+    assert.equal(call.result.isError, true, scenario.name);
+    assert.equal(call.result.structuredContent.state, "UNKNOWN", scenario.name);
+    assert.equal(call.result.structuredContent.applied, null, scenario.name);
+    assert.equal(call.result.structuredContent.kernel_reached, null, scenario.name);
+    assert.equal(call.result.structuredContent.retryable, false, scenario.name);
+    assert.equal(call.result.structuredContent.reason_code, scenario.reason, scenario.name);
+    assert.equal(call.result.structuredContent.request_id, "req-0001", scenario.name);
+    assert.equal(call.result.content[0].text.includes("no label was added"), false, scenario.name);
+    assert.match(call.result.content[0].text, /inspect the issue and the kernel provider journal/, scenario.name);
+    assert.equal(fetchStub.calls.length, 1, scenario.name, "an unusable 200 receipt must not be retried");
+    assertNoSecrets(call.result);
+    const audits = auditWrites(db);
+    assert.equal(audits.length, 2, scenario.name);
+    assert.equal(audits[0].values[3], "kernel.issue_label.attempt", scenario.name);
+    assert.equal(audits[0].values[4], "req-0001", scenario.name);
+    assert.equal(audits[0].values[5], "ATTEMPTED", scenario.name);
+    assert.equal(audits[1].values[3], "kernel.issue_label.unknown", scenario.name);
+    assert.equal(audits[1].values[4], "req-0001", scenario.name);
+    assert.equal(audits[1].values[5], scenario.reason, scenario.name);
+    assertNoSecrets(audits);
   }
 });
 

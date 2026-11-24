@@ -222,6 +222,7 @@ async function kernelIssueLabel(args,actor,env){
       return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:reason,request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
     }
     let receipt;try{receipt=JSON.parse(text)}catch(e){return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_RESPONSE_INVALID',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId)}
+    if(!receipt||typeof receipt!=='object'||Array.isArray(receipt))return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_RESPONSE_INVALID',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
     if(typeof receipt.request_id!=='string'||receipt.request_id!==request_id)return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_RECEIPT_CORRELATION_MISMATCH',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
     const state=kernelReceiptState(receipt);
     const alreadyPresent=receipt.result&&typeof receipt.result==='object'&&receipt.result.already_present===true;
