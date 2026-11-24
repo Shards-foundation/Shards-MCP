@@ -94,8 +94,8 @@ principal. For every authenticated bridge call:
   `kernel.issue_label.attempt` / `ATTEMPTED` **before forwarding**, then
   `kernel.issue_label.<outcome>` / `<stable reason code>` after the result
   (`succeeded`/`OK`, `denied`/`KERNEL_DENIED`,
-  `unknown`/`KERNEL_EFFECT_UNKNOWN`, `unavailable`/`KERNEL_AUTH_UNAVAILABLE`,
-  and so on).
+  `not_applied`/`PROVIDER_NOT_APPLIED`, `unknown`/`KERNEL_EFFECT_UNKNOWN` or a
+  stable transport reason code, and so on).
 
 If the denial audit or pre-forward attempt audit cannot commit, the Edge
 returns `UNAVAILABLE: EDGE_AUDIT_UNAVAILABLE`, does not dispatch, and does not
@@ -111,11 +111,21 @@ to the agent ledger: `runTool` returns the cheap `AUTH_REQUIRED`/401 path withou
 a D1 audit insert. Those network attempts belong to Cloudflare WAF/rate
 limiting, not the per-agent ledger.
 
-Residual cost tradeoff: an authenticated scope/budget denial adds one D1
-`audit_events` insert on top of the existing `authenticate()` activity upsert.
-The pilot is capped at two agents and tokens are revocable. If the operator
-requires zero extra writes on authenticated denials, the bridge must stay
-disabled.
+When the bridge is disabled or its configuration is invalid, `runTool` returns
+`BRIDGE_DISABLED`/`BRIDGE_NOT_CONFIGURED` **before** the scope check, the denial
+audit and the bridge budget. It writes no `kernel.issue_label.*` audit row and
+no `route_budgets` row; the existing `authenticate()` activity upsert is
+unchanged. This prevents an authenticated unscoped caller from generating
+bridge-specific denial writes while the bridge is off. When the bridge is
+enabled and valid, an unscoped caller still writes one `SCOPE_DENIED` row per
+attempt.
+
+Residual cost tradeoff: when the bridge is enabled and valid, an authenticated
+scope/budget denial adds one D1 `audit_events` insert on top of the existing
+`authenticate()` activity upsert. The pilot is capped at two agents and tokens
+are revocable. Enabling therefore requires Cloudflare WAF/rate limiting and a
+token-revocation runbook; if the operator requires zero extra writes on
+authenticated denials, the bridge must stay disabled.
 
 ## Edge configuration
 
@@ -372,8 +382,7 @@ Only a kernel-verified read-back is reported as success.
 | Kernel `FAILED`, provider `PROVIDER_NOT_APPLIED` | `NOT_APPLIED` | `false` | `false` | Definitive non-effect. |
 | Kernel `REJECTED` or permit denial | `DENIED` | `false` | `false` | No provider effect. |
 | Kernel `FAILED`, provider `PROVIDER_EFFECT_UNKNOWN` | `UNKNOWN` | `null` | `false` | Quarantined. Inspect the issue and journal. |
-| Kernel `401` or `404` | `UNAVAILABLE` | `false` | `false` | Gateway auth or origin configuration. |
-| Kernel `403`, `409`, `413` or `422` | `DENIED` | `false` | `false` | No provider effect. |
+| Any non-200 response after POST other than `3xx`/`5xx`/`429`, including proxy/Access `401`, `403`, `404`, `409`, `413` or `422` | `UNKNOWN` | `null` | `false` | Not a verified kernel receipt; `kernel_reached:null`. Do not retry. |
 | Kernel `5xx` or `429` | `UNKNOWN` | `null` | `false` | Do not retry. |
 | Redirect `3xx` | `UNKNOWN` | `null` | `false` | Not followed. |
 | Network error or timeout | `UNKNOWN` | `null` | `false` | Do not retry. |
@@ -382,21 +391,31 @@ Only a kernel-verified read-back is reported as success.
 | Pre-forward audit insert unavailable | `UNAVAILABLE` | `null` | `false` | `EDGE_AUDIT_UNAVAILABLE`; no forward. |
 | Outcome audit insert unavailable after forwarding | `UNKNOWN` | `null` | `false` | `EDGE_AUDIT_UNAVAILABLE`; never success, no retry. |
 
-Scope/budget denials happen before `kernelIssueLabel` and return the existing
-generic `AUTH_REQUIRED` / quota text, not the structured bridge result. They
-still write one `kernel.issue_label.denied` audit row (`SCOPE_DENIED` or
+Only a `200` response carrying a valid kernel receipt with the exact submitted
+`request_id` can produce `DENIED`/`applied:false` or `NOT_APPLIED`. A non-200
+status, including a Cloudflare Access/proxy `403` or `404` returned after the
+POST, is never treated as proof that no label was added.
+
+Scope/budget denials happen before `kernelIssueLabel` when the bridge
+configuration is valid and enabled, and return the existing generic
+`AUTH_REQUIRED` / quota text, not the structured bridge result. They still
+write one `kernel.issue_label.denied` audit row (`SCOPE_DENIED` or
 `BUDGET_DENIED`). If that audit insert fails, the response is
 `UNAVAILABLE: EDGE_AUDIT_UNAVAILABLE`, with no dispatch and no automatic retry.
+When the bridge is disabled or invalid, the earlier `BRIDGE_DISABLED` /
+`BRIDGE_NOT_CONFIGURED` result is returned before any of those writes.
 Anonymous/invalid-token requests write no audit row.
 
 Every result includes the client `request_id`, safe kernel status/decision
 values, a kernel evidence hash when present, and a stable reason code. A `200`
 receipt must echo the exact submitted `request_id`; a missing or different id is
-`UNKNOWN`, never success. The result never includes the kernel bearer, gateway
-token, Access secret, actor map, private origin or raw kernel error. A `UNKNOWN`
-result is not success and must be reconciled by a human against GitHub and the
-kernel provider journal. The same permit is denied as a replay if it is reused;
-a new action needs a new signed permit and a new request id.
+`UNKNOWN`, never success. A non-200 response, including a proxy/Access `403` or
+`404`, is `UNKNOWN` with `kernel_reached:null`; it never asserts that no label
+was added. The result never includes the kernel bearer, gateway token, Access
+secret, actor map, private origin or raw kernel error. A `UNKNOWN` result is not
+success and must be reconciled by a human against GitHub and the kernel provider
+journal. The same permit is denied as a replay if it is reused; a new action
+needs a new signed permit and a new request id.
 
 ## Deployment gates
 

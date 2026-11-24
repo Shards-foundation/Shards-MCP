@@ -215,13 +215,13 @@ async function kernelIssueLabel(args,actor,env){
       return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_UNREACHABLE',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
     }
     if(response.status>=300&&response.status<400)return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_REDIRECT_REFUSED',request_id,next:'do not retry; operator must verify the exact kernel origin'},true,auditObjectId);
-    let text;try{text=await kernelReadCapped(response,KERNEL_MAX_RESPONSE_BYTES)}catch(e){return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_RESPONSE_UNREADABLE',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId)}
-    if(response.status===401||response.status===404)return await kernelBridgeAuditedResult(env,actor,{state:'UNAVAILABLE',applied:false,kernel_reached:true,retryable:false,reason_code:'KERNEL_AUTH_UNAVAILABLE',request_id,next:'operator must verify the kernel gateway identity, token and origin'},true,auditObjectId);
-    if(response.status===400||response.status===403||response.status===409||response.status===413||response.status===422)return await kernelBridgeAuditedResult(env,actor,{state:'DENIED',applied:false,kernel_reached:true,retryable:false,reason_code:'KERNEL_DENIED',request_id,next:'no label was added; request a new signed permit only after correcting the cause'},true,auditObjectId);
-    if(response.status>=500||response.status===429)return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_UNAVAILABLE',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
-    if(response.status!==200)return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_UNEXPECTED_STATUS',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
-    let receipt;try{receipt=JSON.parse(text)}catch(e){return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_RESPONSE_INVALID',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId)}
-    if(typeof receipt.request_id!=='string'||receipt.request_id!==request_id)return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_RECEIPT_CORRELATION_MISMATCH',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
+    let text;try{text=await kernelReadCapped(response,KERNEL_MAX_RESPONSE_BYTES)}catch(e){return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_RESPONSE_UNREADABLE',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId)}
+    if(response.status!==200){
+      const reason=response.status>=500||response.status===429?'KERNEL_UNAVAILABLE':'KERNEL_UNEXPECTED_STATUS';
+      return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:reason,request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
+    }
+    let receipt;try{receipt=JSON.parse(text)}catch(e){return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_RESPONSE_INVALID',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId)}
+    if(typeof receipt.request_id!=='string'||receipt.request_id!==request_id)return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_RECEIPT_CORRELATION_MISMATCH',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
     const state=kernelReceiptState(receipt);
     const alreadyPresent=receipt.result&&typeof receipt.result==='object'&&receipt.result.already_present===true;
     const detail=kernelSafeDetail(receipt.result&&typeof receipt.result==='object'?receipt.result.detail:null);
@@ -391,6 +391,10 @@ async function publicResearchTool(name,args){
 
 async function runTool(name,args,actor,env,request){if(!args||typeof args!=='object'||Array.isArray(args))return errorResult('Tool input must be an object');const t=tools.find(x=>x.name===name);if(!t)return errorResult('Unknown tool');
 if(!t.public&&!actor)return errorResult('AUTH_REQUIRED: This tool needs a valid, separately provisioned scoped bearer key. Sign in at https://mcp.shardsinc.co.uk/manage to enrol an agent. ChatGPT OAuth for private tools is not available yet.');
+if(name===KERNEL_BRIDGE_TOOL){
+  let bridgeConfig;try{bridgeConfig=kernelBridgeConfig(env)}catch{bridgeConfig={ok:false,reason:'BRIDGE_NOT_CONFIGURED'}}
+  if(!bridgeConfig.ok)return kernelBridgeResult(kernelBridgeDeniedValue(bridgeConfig.reason,args.request_id),true);
+}
 if(!t.public&&!actor.scopeSet.has(t.scope)){
   if(name===KERNEL_BRIDGE_TOOL&&!await kernelBridgeDenialAudit(env,actor,args,'SCOPE_DENIED'))return errorResult('UNAVAILABLE: EDGE_AUDIT_UNAVAILABLE; do not retry automatically');
   return errorResult('AUTH_REQUIRED: This tool needs a valid, separately provisioned scoped bearer key. Sign in at https://mcp.shardsinc.co.uk/manage to enrol an agent. ChatGPT OAuth for private tools is not available yet.');

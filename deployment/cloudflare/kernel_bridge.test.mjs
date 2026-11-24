@@ -200,6 +200,14 @@ function auditWrites(db) {
   return db.writes.filter((write) => /audit_events/.test(write.sql));
 }
 
+function routeBudgetWrites(db) {
+  return db.writes.filter((write) => /route_budgets/.test(write.sql));
+}
+
+function connectionActivityWrites(db) {
+  return db.writes.filter((write) => /agent_connection_activity/.test(write.sql));
+}
+
 function assertDeniedWithoutDispatch(result, expectedReason) {
   assert.equal(result.isError, true);
   assert.equal(result.structuredContent.applied, false);
@@ -380,6 +388,61 @@ test("a non-bridge private scope denial keeps the generic path and writes no aud
   assert.match(body.result.content[0].text, /AUTH_REQUIRED/);
   assert.equal(auditWrites(db).length, 0);
   assert.equal(fetchStub.calls.length, 0);
+});
+
+test("a disabled or invalid bridge configuration writes no bridge audit or route budget rows", async () => {
+  const fetchStub = stubFetch(() => { throw new Error("must not fetch"); });
+  const { worker } = loadWorker(fetchStub);
+  const cases = [
+    { name: "disabled-scoped", actor: makeActor(), override: { KERNEL_BRIDGE_ENABLED: "0" }, reason: "BRIDGE_DISABLED" },
+    { name: "disabled-unscoped", actor: makeActor({ scopes: JSON.stringify(["agent:identity"]) }), override: { KERNEL_BRIDGE_ENABLED: "0" }, reason: "BRIDGE_DISABLED" },
+    { name: "invalid-unscoped", actor: makeActor({ scopes: JSON.stringify(["agent:identity"]) }), override: { KERNEL_GATEWAY_TOKEN: "short" }, reason: "BRIDGE_NOT_CONFIGURED" },
+  ];
+  for (const scenario of cases) {
+    const db = makeDB(scenario.actor);
+    const env = bridgeEnv({ ...scenario.override, EDGE_DB: db }, scenario.actor);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const call = await callTool(worker, env, validArgs());
+      assertDeniedWithoutDispatch(call.result, scenario.reason);
+      assertNoSecrets(call.result);
+    }
+    assert.equal(fetchStub.calls.length, 0, scenario.name);
+    assert.equal(auditWrites(db).length, 0, scenario.name + " must not write bridge audit rows");
+    assert.equal(routeBudgetWrites(db).length, 0, scenario.name + " must not write route budget rows");
+    assert.ok(connectionActivityWrites(db).length >= 1, "authenticate activity upsert remains unchanged");
+  }
+
+  const anonymousDB = makeDB(makeActor());
+  const anonymousEnv = bridgeEnv({ KERNEL_BRIDGE_ENABLED: "0", EDGE_DB: anonymousDB });
+  const anonymous = await worker.fetch(post("tools/call", { name: BRIDGE_TOOL, arguments: validArgs() }), anonymousEnv);
+  const anonymousBody = await anonymous.json();
+  assert.equal(anonymousBody.result.isError, true);
+  assert.match(anonymousBody.result.content[0].text, /AUTH_REQUIRED/);
+  assert.equal(anonymousDB.writes.length, 0, "no-credential cheap path remains zero-write");
+  assert.equal(fetchStub.calls.length, 0);
+});
+
+test("an enabled bridge audits every unscoped authenticated denial without route budget writes", async () => {
+  const fetchStub = stubFetch(() => { throw new Error("must not fetch"); });
+  const { worker } = loadWorker(fetchStub);
+  const actor = makeActor({ scopes: JSON.stringify(["agent:identity"]) });
+  const db = makeDB(actor);
+  const env = bridgeEnv({ EDGE_DB: db }, actor);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const call = await callTool(worker, env, validArgs());
+    assert.equal(call.result.isError, true);
+    assert.match(call.result.content[0].text, /AUTH_REQUIRED/);
+  }
+  assert.equal(fetchStub.calls.length, 0);
+  const audits = auditWrites(db);
+  assert.equal(audits.length, 2);
+  for (const audit of audits) {
+    assert.equal(audit.values[3], "kernel.issue_label.denied");
+    assert.equal(audit.values[4], "req-0001");
+    assert.equal(audit.values[5], "SCOPE_DENIED");
+  }
+  assert.equal(routeBudgetWrites(db).length, 0);
+  assertNoSecrets(audits);
 });
 
 test("unsafe or incomplete bridge configuration fails closed before dispatch", async () => {
@@ -605,6 +668,7 @@ test("provider NOT_APPLIED is a definitive non-effect", async () => {
   assert.equal(call.result.structuredContent.applied, false);
   assert.equal(call.result.structuredContent.reason_code, "PROVIDER_NOT_APPLIED");
   assert.equal(call.result.structuredContent.retryable, false);
+  assert.match(call.result.content[0].text, /no label was added/);
   assert.equal(fetchStub.calls.length, 1);
 });
 
@@ -637,6 +701,7 @@ test("kernel permit denials, including replay, are DENIED and never retried", as
     assert.equal(call.result.structuredContent.kernel_reached, true, error);
     assert.equal(call.result.structuredContent.reason_code, "KERNEL_DENIED", error);
     assert.equal(call.result.structuredContent.retryable, false, error);
+    assert.match(call.result.content[0].text, /no label was added/, error);
     assert.equal(fetchStub.calls.length, 1, error);
     assertNoSecrets(call.result);
   }
@@ -660,28 +725,48 @@ test("denied requests produce zero kernel dispatch", async () => {
   assert.equal(fetchStub.calls.length, 0, "denied requests must never reach the kernel");
 });
 
-test("kernel authentication, policy, redirect and failure responses fail closed", async () => {
+test("non-200 kernel or proxy responses are UNKNOWN and never claim no effect", async () => {
   const scenarios = [
-    { name: "gateway-auth", response: () => jsonResponse(401, { error: "Unauthorized" }), state: "UNAVAILABLE", applied: false, reason: "KERNEL_AUTH_UNAVAILABLE" },
-    { name: "not-found", response: () => jsonResponse(404, { error: "Not found" }), state: "UNAVAILABLE", applied: false, reason: "KERNEL_AUTH_UNAVAILABLE" },
-    { name: "forbidden", response: () => jsonResponse(403, { error: "Forbidden" }), state: "DENIED", applied: false, reason: "KERNEL_DENIED" },
-    { name: "conflict", response: () => jsonResponse(409, { error: "Conflict" }), state: "DENIED", applied: false, reason: "KERNEL_DENIED" },
-    { name: "payload", response: () => jsonResponse(413, { error: "Too large" }), state: "DENIED", applied: false, reason: "KERNEL_DENIED" },
-    { name: "unprocessable", response: () => jsonResponse(422, { error: "Unprocessable" }), state: "DENIED", applied: false, reason: "KERNEL_DENIED" },
-    { name: "server-error", response: () => jsonResponse(500, { error: "Internal" }), state: "UNKNOWN", applied: null, reason: "KERNEL_UNAVAILABLE" },
-    { name: "rate-limit", response: () => jsonResponse(429, { error: "Slow down" }), state: "UNKNOWN", applied: null, reason: "KERNEL_UNAVAILABLE" },
-    { name: "redirect", response: () => jsonResponse(302, "", { location: "https://evil.example/submit" }), state: "UNKNOWN", applied: null, reason: "KERNEL_REDIRECT_REFUSED" },
+    { name: "gateway-auth", response: () => jsonResponse(401, { error: "Unauthorized" }), reason: "KERNEL_UNEXPECTED_STATUS" },
+    { name: "not-found", response: () => jsonResponse(404, { error: "Not found" }), reason: "KERNEL_UNEXPECTED_STATUS" },
+    { name: "bad-request", response: () => jsonResponse(400, { error: "Bad request" }), reason: "KERNEL_UNEXPECTED_STATUS" },
+    { name: "forbidden", response: () => jsonResponse(403, { error: "Forbidden" }), reason: "KERNEL_UNEXPECTED_STATUS" },
+    { name: "conflict", response: () => jsonResponse(409, { error: "Conflict" }), reason: "KERNEL_UNEXPECTED_STATUS" },
+    { name: "payload", response: () => jsonResponse(413, { error: "Too large" }), reason: "KERNEL_UNEXPECTED_STATUS" },
+    { name: "unprocessable", response: () => jsonResponse(422, { error: "Unprocessable" }), reason: "KERNEL_UNEXPECTED_STATUS" },
+    { name: "server-error", response: () => jsonResponse(500, { error: "Internal" }), reason: "KERNEL_UNAVAILABLE" },
+    { name: "rate-limit", response: () => jsonResponse(429, { error: "Slow down" }), reason: "KERNEL_UNAVAILABLE" },
+    { name: "redirect", response: () => jsonResponse(302, "", { location: "https://evil.example/submit" }), reason: "KERNEL_REDIRECT_REFUSED" },
   ];
   for (const scenario of scenarios) {
     const fetchStub = stubFetch(() => scenario.response());
     const { worker } = loadWorker(fetchStub);
     const call = await callTool(worker, bridgeEnv(), validArgs());
     assert.equal(call.result.isError, true, scenario.name);
-    assert.equal(call.result.structuredContent.state, scenario.state, scenario.name);
-    assert.equal(call.result.structuredContent.applied, scenario.applied, scenario.name);
+    assert.equal(call.result.structuredContent.state, "UNKNOWN", scenario.name);
+    assert.equal(call.result.structuredContent.applied, null, scenario.name);
+    assert.equal(call.result.structuredContent.kernel_reached, null, scenario.name);
     assert.equal(call.result.structuredContent.reason_code, scenario.reason, scenario.name);
     assert.equal(call.result.structuredContent.retryable, false, scenario.name);
+    assert.equal(call.result.content[0].text.includes("no label was added"), false, scenario.name);
     assert.equal(fetchStub.calls.length, 1, scenario.name);
+    assertNoSecrets(call.result);
+  }
+});
+
+test("Cloudflare Access or proxy 403/404 after POST is UNKNOWN, not a kernel denial", async () => {
+  for (const status of [403, 404]) {
+    const fetchStub = stubFetch(() => jsonResponse(status, { error: "proxy or Access rejection" }));
+    const { worker } = loadWorker(fetchStub);
+    const call = await callTool(worker, bridgeEnv(), validArgs());
+    assert.equal(call.result.isError, true, String(status));
+    assert.equal(call.result.structuredContent.state, "UNKNOWN", String(status));
+    assert.equal(call.result.structuredContent.applied, null, String(status));
+    assert.equal(call.result.structuredContent.kernel_reached, null, String(status));
+    assert.equal(call.result.structuredContent.reason_code, "KERNEL_UNEXPECTED_STATUS", String(status));
+    assert.equal(call.result.structuredContent.retryable, false, String(status));
+    assert.equal(call.result.content[0].text.includes("no label was added"), false, String(status));
+    assert.equal(fetchStub.calls.length, 1, String(status));
     assertNoSecrets(call.result);
   }
 });
