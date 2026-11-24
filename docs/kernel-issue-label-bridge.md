@@ -111,12 +111,15 @@ to the agent ledger: `runTool` returns the cheap `AUTH_REQUIRED`/401 path withou
 a D1 audit insert. Those network attempts belong to Cloudflare WAF/rate
 limiting, not the per-agent ledger.
 
-When the bridge is disabled or its configuration is invalid, `runTool` returns
-`BRIDGE_DISABLED`/`BRIDGE_NOT_CONFIGURED` **before** the scope check, the denial
-audit and the bridge budget. It writes no `kernel.issue_label.*` audit row and
-no `route_budgets` row; the existing `authenticate()` activity upsert is
-unchanged. This prevents an authenticated unscoped caller from generating
-bridge-specific denial writes while the bridge is off. When the bridge is
+When the bridge is disabled or its configuration is invalid, `runTool` checks
+configuration **before** the scope check, the denial audit and the bridge budget.
+A caller without `kernel:github_label` receives the generic `AUTH_REQUIRED` text,
+not a bridge-specific reason; a scoped caller receives
+`BRIDGE_DISABLED`/`BRIDGE_NOT_CONFIGURED`. Neither path writes a
+`kernel.issue_label.*` audit row or a `route_budgets` row; the existing
+`authenticate()` activity upsert is unchanged. This prevents an authenticated
+unscoped caller from generating bridge-specific denial writes or learning the
+bridge's configuration state while the bridge is off. When the bridge is
 enabled and valid, an unscoped caller still writes one `SCOPE_DENIED` row per
 attempt.
 
@@ -402,9 +405,10 @@ configuration is valid and enabled, and return the existing generic
 write one `kernel.issue_label.denied` audit row (`SCOPE_DENIED` or
 `BUDGET_DENIED`). If that audit insert fails, the response is
 `UNAVAILABLE: EDGE_AUDIT_UNAVAILABLE`, with no dispatch and no automatic retry.
-When the bridge is disabled or invalid, the earlier `BRIDGE_DISABLED` /
-`BRIDGE_NOT_CONFIGURED` result is returned before any of those writes.
-Anonymous/invalid-token requests write no audit row.
+When the bridge is disabled or invalid, an unscoped caller receives the generic
+`AUTH_REQUIRED` text and a scoped caller receives `BRIDGE_DISABLED` /
+`BRIDGE_NOT_CONFIGURED`, before any of those writes. Anonymous/invalid-token
+requests write no audit row.
 
 Every result includes the client `request_id`, safe kernel status/decision
 values, a kernel evidence hash when present, and a stable reason code. A `200`

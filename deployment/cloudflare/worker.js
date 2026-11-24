@@ -41,6 +41,7 @@ const SCOPES=['agent:identity','agent:list','message:send','message:read','task:
 // client-supplied actor, origin, URL, authorization header or credential.
 // Every value below comes from Worker bindings, never from MCP arguments.
 const KERNEL_BRIDGE_TOOL='shards_kernel_issue_label';
+const AUTH_REQUIRED_TEXT='AUTH_REQUIRED: This tool needs a valid, separately provisioned scoped bearer key. Sign in at https://mcp.shardsinc.co.uk/manage to enrol an agent. ChatGPT OAuth for private tools is not available yet.';
 const KERNEL_ACTION='github.issue.add_label';
 const KERNEL_MAX_ACTORS=2;
 const KERNEL_MAX_ISSUE_NUMBER=100000;
@@ -390,14 +391,17 @@ async function publicResearchTool(name,args){
 }
 
 async function runTool(name,args,actor,env,request){if(!args||typeof args!=='object'||Array.isArray(args))return errorResult('Tool input must be an object');const t=tools.find(x=>x.name===name);if(!t)return errorResult('Unknown tool');
-if(!t.public&&!actor)return errorResult('AUTH_REQUIRED: This tool needs a valid, separately provisioned scoped bearer key. Sign in at https://mcp.shardsinc.co.uk/manage to enrol an agent. ChatGPT OAuth for private tools is not available yet.');
+if(!t.public&&!actor)return errorResult(AUTH_REQUIRED_TEXT);
 if(name===KERNEL_BRIDGE_TOOL){
   let bridgeConfig;try{bridgeConfig=kernelBridgeConfig(env)}catch{bridgeConfig={ok:false,reason:'BRIDGE_NOT_CONFIGURED'}}
-  if(!bridgeConfig.ok)return kernelBridgeResult(kernelBridgeDeniedValue(bridgeConfig.reason,args.request_id),true);
+  if(!bridgeConfig.ok){
+    if(!actor.scopeSet.has(t.scope))return errorResult(AUTH_REQUIRED_TEXT);
+    return kernelBridgeResult(kernelBridgeDeniedValue(bridgeConfig.reason,args.request_id),true);
+  }
 }
 if(!t.public&&!actor.scopeSet.has(t.scope)){
   if(name===KERNEL_BRIDGE_TOOL&&!await kernelBridgeDenialAudit(env,actor,args,'SCOPE_DENIED'))return errorResult('UNAVAILABLE: EDGE_AUDIT_UNAVAILABLE; do not retry automatically');
-  return errorResult('AUTH_REQUIRED: This tool needs a valid, separately provisioned scoped bearer key. Sign in at https://mcp.shardsinc.co.uk/manage to enrol an agent. ChatGPT OAuth for private tools is not available yet.');
+  return errorResult(AUTH_REQUIRED_TEXT);
 }
 if(t.public&&name==='shards_dns_lookup'){try{validateDNS(args)}catch(e){return errorResult('Invalid DNS arguments')}}
 if(t.public&&name.startsWith('shards_')&&['shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'].includes(name)&&!validPublicResearchArgs(name,args))return errorResult('Invalid public research arguments');

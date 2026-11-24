@@ -394,16 +394,23 @@ test("a disabled or invalid bridge configuration writes no bridge audit or route
   const fetchStub = stubFetch(() => { throw new Error("must not fetch"); });
   const { worker } = loadWorker(fetchStub);
   const cases = [
-    { name: "disabled-scoped", actor: makeActor(), override: { KERNEL_BRIDGE_ENABLED: "0" }, reason: "BRIDGE_DISABLED" },
-    { name: "disabled-unscoped", actor: makeActor({ scopes: JSON.stringify(["agent:identity"]) }), override: { KERNEL_BRIDGE_ENABLED: "0" }, reason: "BRIDGE_DISABLED" },
-    { name: "invalid-unscoped", actor: makeActor({ scopes: JSON.stringify(["agent:identity"]) }), override: { KERNEL_GATEWAY_TOKEN: "short" }, reason: "BRIDGE_NOT_CONFIGURED" },
+    { name: "disabled-scoped", actor: makeActor(), override: { KERNEL_BRIDGE_ENABLED: "0" }, reason: "BRIDGE_DISABLED", structured: true },
+    { name: "disabled-unscoped", actor: makeActor({ scopes: JSON.stringify(["agent:identity"]) }), override: { KERNEL_BRIDGE_ENABLED: "0" }, structured: false },
+    { name: "invalid-unscoped", actor: makeActor({ scopes: JSON.stringify(["agent:identity"]) }), override: { KERNEL_GATEWAY_TOKEN: "short" }, structured: false },
   ];
   for (const scenario of cases) {
     const db = makeDB(scenario.actor);
     const env = bridgeEnv({ ...scenario.override, EDGE_DB: db }, scenario.actor);
     for (let attempt = 0; attempt < 3; attempt++) {
       const call = await callTool(worker, env, validArgs());
-      assertDeniedWithoutDispatch(call.result, scenario.reason);
+      if (scenario.structured) {
+        assertDeniedWithoutDispatch(call.result, scenario.reason);
+      } else {
+        assert.equal(call.result.isError, true, scenario.name);
+        assert.match(call.result.content[0].text, /AUTH_REQUIRED/, scenario.name);
+        assert.equal(call.result.structuredContent, undefined, scenario.name);
+        assert.equal(call.result.content[0].text.includes("BRIDGE_"), false, scenario.name);
+      }
       assertNoSecrets(call.result);
     }
     assert.equal(fetchStub.calls.length, 0, scenario.name);
