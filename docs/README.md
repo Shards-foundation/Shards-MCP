@@ -26,6 +26,7 @@ Shards-MCP is a self-hosted, single-organisation gateway. The Python package, op
 - [Control matrix](compliance/controls.md), [data inventory](compliance/data-inventory.md), [publication sign-off](compliance/publication-gates.md)
 - [Contribution rules](../CONTRIBUTING.md), [governance](../GOVERNANCE.md), [license](../LICENSE), [third-party licensing](../LICENSING.md)
 - [Deployment runbook](../deploy/README.md), [Web console setup](../web/README.md), [release automation](releasing.md), [roadmap](roadmap.md)
+- [Opt-in Shards-Kernel GitHub issue-label bridge](kernel-issue-label-bridge.md) — source-only and disabled by default; requires kernel PR #162 and a private Tunnel/Access origin
 
 ## Documentation authority and release status
 

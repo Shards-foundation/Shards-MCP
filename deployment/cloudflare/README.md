@@ -52,6 +52,16 @@ Credentials are automatically rejected after expiry, user revocation, agent disa
 
 For enterprise multi-tenancy, this first release intentionally provisions **only** the internal Shards tenant. A public self-service customer registration endpoint does not exist.
 
+## Opt-in Shards-Kernel GitHub issue-label bridge (source only, disabled)
+
+The Worker source now contains an opt-in authenticated tool, `shards_kernel_issue_label`, that can request one operator-approved GitHub issue label through a separate Shards-Kernel operator on Oracle. It is **disabled by default** and hidden from `tools/list` and `/api/status` unless every Worker binding is present and valid. The live deployment is unchanged and still exposes 9 protected tools.
+
+The bridge requires the distinct `kernel:github_label` scope, an exact two-agent Worker secret mapping to separate kernel actors, a Worker-held gateway identity/token, a Cloudflare Access service token for a private Tunnel origin, and a separately operator-signed v2 permit. The Edge never signs permits, never holds a GitHub token, never accepts a client-supplied actor/URL/header/credential and never retries an ambiguous effect.
+
+**Dependency:** draft kernel PR [Shards-kernel#162](https://github.com/Shards-foundation/Shards-kernel/pull/162) at head `d9560c5858029636790835a050b5e235195f5285`. It is not merged. The private Cloudflare Tunnel/Access origin and the Oracle kernel are operator infrastructure and are not provisioned by this repository.
+
+Read [the exact cross-repo configuration handshake, Linux credential provisioning, offline permit issuance, failure semantics, deployment gates and rollback](../../docs/kernel-issue-label-bridge.md) before enabling anything. When enabled, `/api/status` will show 10 protected tools; update the manual production release gate expected names/count in the same approved rollout. Do not enable the bridge on a live Worker before that gate, the private origin and the kernel merge are all approved.
+
 ## External effect isolation
 
 The edge cannot execute arbitrary commands, browse a user-supplied endpoint, transfer money, access GitHub private repositories, install plugins on another device or perform production deployments. Its DNS tool sends only validated public domain queries to Cloudflare DoH.
