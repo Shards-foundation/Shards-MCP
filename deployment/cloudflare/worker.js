@@ -178,16 +178,44 @@ function kernelReceiptState(receipt){
   if(!receipt||typeof receipt!=='object'||Array.isArray(receipt))return 'UNKNOWN';
   const status=kernelSafeCode(receipt.status,KERNEL_RECEIPT_STATUSES);
   const decision=kernelSafeCode(receipt.decision,KERNEL_DECISIONS);
+  const result=receipt.result;
+  const hasResult=result!==undefined&&result!==null;
+  const resultIsObject=!!result&&typeof result==='object'&&!Array.isArray(result);
   const error=typeof receipt.error==='string'?receipt.error:'';
-  if(/PROVIDER_NOT_APPLIED/.test(error))return 'NOT_APPLIED';
-  if(/PROVIDER_EFFECT_UNKNOWN/.test(error))return 'UNKNOWN';
-  if(status==='REJECTED')return 'DENIED';
-  if(status==='FAILED')return 'UNKNOWN';
-  if(status==='ACCEPTED'&&decision==='ALLOW'){
-    const resultState=receipt.result&&typeof receipt.result==='object'?receipt.result.state:null;
+  const providerNotApplied=/PROVIDER_NOT_APPLIED/.test(error);
+  const providerUnknown=/PROVIDER_EFFECT_UNKNOWN/.test(error);
+  if(status==='ACCEPTED'){
+    // A success envelope must be ALLOW with an object result and no provider
+    // error marker; anything else is contradictory and stays UNKNOWN.
+    if(decision!=='ALLOW'||!resultIsObject||providerNotApplied||providerUnknown)return 'UNKNOWN';
+    const resultState=result.state;
     if(resultState==='SUCCEEDED'||resultState==='NOT_APPLIED'||resultState==='UNKNOWN')return resultState;
+    return 'UNKNOWN';
+  }
+  if(status==='REJECTED'){
+    // A denial is definitive only as DENY with no tool result and no provider marker.
+    if(decision!=='DENY'||hasResult||providerNotApplied||providerUnknown)return 'UNKNOWN';
+    return 'DENIED';
+  }
+  if(status==='FAILED'){
+    // Provider markers are honoured only on FAILED/DENY with no tool result.
+    if(decision!=='DENY'||hasResult)return 'UNKNOWN';
+    if(providerNotApplied&&providerUnknown)return 'UNKNOWN';
+    if(providerNotApplied)return 'NOT_APPLIED';
+    return 'UNKNOWN';
   }
   return 'UNKNOWN';
+}
+function kernelReceiptBinding(receipt,issue_number,label){
+  const result=receipt&&receipt.result;
+  if(!result||typeof result!=='object'||Array.isArray(result))return false;
+  if(result.issue_number!==issue_number||result.label!==label)return false;
+  if('already_present' in result&&typeof result.already_present!=='boolean')return false;
+  if('provider_ref' in result){
+    const ref=result.provider_ref;
+    if(typeof ref!=='string'||ref.length<1||ref.length>512||/[\x00-\x1f\x7f]/.test(ref))return false;
+  }
+  return true;
 }
 async function kernelIssueLabel(args,actor,env){
   let correlationId=null,auditObjectId=crypto.randomUUID(),attemptAudited=false;
@@ -228,6 +256,7 @@ async function kernelIssueLabel(args,actor,env){
     const alreadyPresent=receipt.result&&typeof receipt.result==='object'&&receipt.result.already_present===true;
     const detail=kernelSafeDetail(receipt.result&&typeof receipt.result==='object'?receipt.result.detail:null);
     const base={request_id,kernel_request_id:receipt.request_id,kernel_status:kernelSafeCode(receipt.status,KERNEL_RECEIPT_STATUSES),kernel_decision:kernelSafeCode(receipt.decision,KERNEL_DECISIONS),kernel_evidence_hash:kernelSafeHash(receipt.evidence_hash),kernel_ts_ms:Number.isSafeInteger(receipt.ts_ms)?receipt.ts_ms:null};
+    if(kernelSafeCode(receipt.status,KERNEL_RECEIPT_STATUSES)==='ACCEPTED'&&(state==='SUCCEEDED'||state==='NOT_APPLIED')&&!kernelReceiptBinding(receipt,issue_number,label))return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,already_present:null,provider_detail:detail,kernel_reached:true,retryable:false,reason_code:'KERNEL_RECEIPT_BINDING_MISMATCH',issue_number,label,...base,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
     if(state==='SUCCEEDED')return await kernelBridgeAuditedResult(env,actor,{state:'SUCCEEDED',applied:true,already_present:alreadyPresent,provider_detail:detail,kernel_reached:true,retryable:false,reason_code:null,issue_number,label,...base,next:'label presence verified by the kernel provider read-back'},false,auditObjectId);
     if(state==='NOT_APPLIED')return await kernelBridgeAuditedResult(env,actor,{state:'NOT_APPLIED',applied:false,already_present:false,provider_detail:detail,kernel_reached:true,retryable:false,reason_code:'PROVIDER_NOT_APPLIED',issue_number,label,...base,next:'no label was added; request a new signed permit only after correcting the cause'},true,auditObjectId);
     if(state==='DENIED')return await kernelBridgeAuditedResult(env,actor,{state:'DENIED',applied:false,already_present:false,provider_detail:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_DENIED',issue_number,label,...base,next:'no label was added; request a new signed permit only after correcting the cause'},true,auditObjectId);

@@ -663,6 +663,112 @@ test("already-present success is reported without claiming a new write", async (
   assert.equal(fetchStub.calls.length, 1);
 });
 
+test("ACCEPTED success receipts must bind to the requested issue_number and label", async () => {
+  const cases = [
+    { name: "issue-number-mismatch", overrides: { result: { ...receipt().result, issue_number: 124 } }, reason: "KERNEL_RECEIPT_BINDING_MISMATCH" },
+    { name: "label-mismatch", overrides: { result: { ...receipt().result, label: "other-label" } }, reason: "KERNEL_RECEIPT_BINDING_MISMATCH" },
+    { name: "missing-issue-number", overrides: { result: (() => { const result = { ...receipt().result }; delete result.issue_number; return result; })() }, reason: "KERNEL_RECEIPT_BINDING_MISMATCH" },
+    { name: "malformed-provider-ref", overrides: { result: { ...receipt().result, provider_ref: 12345 } }, reason: "KERNEL_RECEIPT_BINDING_MISMATCH" },
+    { name: "non-object-result", overrides: { result: "SUCCEEDED" }, reason: "KERNEL_EFFECT_UNKNOWN" },
+  ];
+  for (const scenario of cases) {
+    const fetchStub = stubFetch(() => jsonResponse(200, receipt(scenario.overrides)));
+    const { worker } = loadWorker(fetchStub);
+    const db = makeDB(makeActor());
+    const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }), validArgs());
+    assert.equal(call.result.isError, true, scenario.name);
+    assert.equal(call.result.structuredContent.state, "UNKNOWN", scenario.name);
+    assert.equal(call.result.structuredContent.applied, null, scenario.name);
+    assert.equal(call.result.structuredContent.kernel_reached, true, scenario.name);
+    assert.equal(call.result.structuredContent.retryable, false, scenario.name);
+    assert.equal(call.result.structuredContent.reason_code, scenario.reason, scenario.name);
+    assert.equal(call.result.content[0].text.includes("no label was added"), false, scenario.name);
+    assert.match(call.result.content[0].text, /inspect the issue and the kernel provider journal/, scenario.name);
+    assert.equal(fetchStub.calls.length, 1, scenario.name, "a mismatched success receipt must not be retried");
+    assertNoSecrets(call.result);
+    const audits = auditWrites(db);
+    assert.equal(audits.length, 2, scenario.name);
+    assert.equal(audits[0].values[3], "kernel.issue_label.attempt", scenario.name);
+    assert.equal(audits[0].values[5], "ATTEMPTED", scenario.name);
+    assert.equal(audits[1].values[3], "kernel.issue_label.unknown", scenario.name);
+    assert.equal(audits[1].values[4], "req-0001", scenario.name);
+    assert.equal(audits[1].values[5], scenario.reason, scenario.name);
+    assertNoSecrets(audits);
+  }
+});
+
+test("coherent ACCEPTED success and already-present receipts still report success", async () => {
+  const successStub = stubFetch(() => jsonResponse(200, receipt()));
+  const success = await callTool(loadWorker(successStub).worker, bridgeEnv(), validArgs());
+  assert.equal(success.result.isError, false);
+  assert.equal(success.result.structuredContent.state, "SUCCEEDED");
+  assert.equal(success.result.structuredContent.applied, true);
+  assert.equal(success.result.structuredContent.already_present, false);
+  assert.equal(successStub.calls.length, 1);
+
+  const alreadyStub = stubFetch(() => jsonResponse(200, receipt({
+    result: { ...receipt().result, already_present: true, detail: "ALREADY_PRESENT" },
+  })));
+  const already = await callTool(loadWorker(alreadyStub).worker, bridgeEnv(), validArgs());
+  assert.equal(already.result.isError, false);
+  assert.equal(already.result.structuredContent.state, "SUCCEEDED");
+  assert.equal(already.result.structuredContent.applied, true);
+  assert.equal(already.result.structuredContent.already_present, true);
+  assert.equal(alreadyStub.calls.length, 1);
+});
+
+test("provider error markers require a coherent FAILED/DENY/result:null envelope", async () => {
+  const cases = [
+    { name: "marker-without-status-decision", body: { request_id: "req-0001", error: "PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" } },
+    { name: "marker-status-only", body: { request_id: "req-0001", status: "FAILED", error: "PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" } },
+    { name: "marker-failed-allow", body: { request_id: "req-0001", status: "FAILED", decision: "ALLOW", error: "PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" } },
+    { name: "marker-failed-with-result", body: { request_id: "req-0001", status: "FAILED", decision: "DENY", result: { ...receipt().result }, error: "PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" } },
+    { name: "marker-on-rejected", body: { request_id: "req-0001", status: "REJECTED", decision: "DENY", result: null, error: "PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" } },
+    { name: "marker-on-accepted", body: receipt({ error: "PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" }) },
+    { name: "rejected-missing-decision", body: { request_id: "req-0001", status: "REJECTED", result: null, error: "PERMIT_DENIED: EXPIRED" } },
+    { name: "rejected-with-result", body: { request_id: "req-0001", status: "REJECTED", decision: "DENY", result: { ...receipt().result }, error: "PERMIT_DENIED: EXPIRED" } },
+    { name: "failed-with-allow", body: receipt({ status: "FAILED", decision: "ALLOW", result: null }) },
+  ];
+  for (const scenario of cases) {
+    const fetchStub = stubFetch(() => jsonResponse(200, scenario.body));
+    const { worker } = loadWorker(fetchStub);
+    const db = makeDB(makeActor());
+    const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }), validArgs());
+    assert.equal(call.result.isError, true, scenario.name);
+    assert.equal(call.result.structuredContent.state, "UNKNOWN", scenario.name);
+    assert.equal(call.result.structuredContent.applied, null, scenario.name);
+    assert.equal(call.result.structuredContent.kernel_reached, true, scenario.name);
+    assert.equal(call.result.structuredContent.retryable, false, scenario.name);
+    assert.equal(call.result.structuredContent.reason_code, "KERNEL_EFFECT_UNKNOWN", scenario.name);
+    assert.equal(call.result.content[0].text.includes("no label was added"), false, scenario.name);
+    assert.equal(fetchStub.calls.length, 1, scenario.name);
+    assertNoSecrets(call.result);
+    const audits = auditWrites(db);
+    assert.equal(audits.length, 2, scenario.name);
+    assert.equal(audits[1].values[3], "kernel.issue_label.unknown", scenario.name);
+    assert.equal(audits[1].values[5], "KERNEL_EFFECT_UNKNOWN", scenario.name);
+  }
+});
+
+test("legitimate FAILED provider outcomes and REJECTED denials keep their contracts", async () => {
+  const cases = [
+    { name: "not-applied", body: receipt({ status: "FAILED", decision: "DENY", result: null, error: "Tool execution failed: PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" }), state: "NOT_APPLIED", reason: "PROVIDER_NOT_APPLIED", applied: false },
+    { name: "effect-unknown", body: receipt({ status: "FAILED", decision: "DENY", result: null, error: "Tool execution failed: PROVIDER_EFFECT_UNKNOWN: AMBIGUOUS_NO_READBACK_PROOF" }), state: "UNKNOWN", reason: "KERNEL_EFFECT_UNKNOWN", applied: null },
+    { name: "denied", body: { request_id: "req-0001", status: "REJECTED", decision: "DENY", result: null, error: "PERMIT_DENIED: EXPIRED", evidence_hash: null, ts_ms: 1234567890 }, state: "DENIED", reason: "KERNEL_DENIED", applied: false },
+  ];
+  for (const scenario of cases) {
+    const fetchStub = stubFetch(() => jsonResponse(200, scenario.body));
+    const call = await callTool(loadWorker(fetchStub).worker, bridgeEnv(), validArgs());
+    assert.equal(call.result.isError, true, scenario.name);
+    assert.equal(call.result.structuredContent.state, scenario.state, scenario.name);
+    assert.equal(call.result.structuredContent.applied, scenario.applied, scenario.name);
+    assert.equal(call.result.structuredContent.retryable, false, scenario.name);
+    assert.equal(call.result.structuredContent.reason_code, scenario.reason, scenario.name);
+    assert.equal(fetchStub.calls.length, 1, scenario.name);
+    assertNoSecrets(call.result);
+  }
+});
+
 test("provider NOT_APPLIED is a definitive non-effect", async () => {
   const fetchStub = stubFetch(() => jsonResponse(200, receipt({
     status: "FAILED", decision: "DENY", result: null,

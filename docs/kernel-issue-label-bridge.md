@@ -375,7 +375,8 @@ credential from the request.
 
 ## Result semantics
 
-Only a kernel-verified read-back is reported as success.
+Only a kernel-verified read-back is reported as success, and only when the
+success payload binds to the requested issue and label.
 
 | Observation | Edge `state` | `applied` | `retryable` | Meaning |
 | --- | --- | --- | --- | --- |
@@ -391,6 +392,8 @@ Only a kernel-verified read-back is reported as success.
 | Network error or timeout | `UNKNOWN` | `null` | `false` | Do not retry. |
 | Oversized, non-JSON or malformed receipt | `UNKNOWN` | `null` | `false` | Do not retry. |
 | `200` receipt missing or mismatching the submitted `request_id` | `UNKNOWN` | `null` | `false` | `KERNEL_RECEIPT_CORRELATION_MISMATCH`; do not retry. |
+| `200` `ACCEPTED`/`ALLOW` receipt whose `result.issue_number` or `result.label` does not match the request, or whose `result`/`provider_ref`/`already_present` is malformed | `UNKNOWN` | `null` | `false` | `KERNEL_RECEIPT_BINDING_MISMATCH`; never success; do not retry. |
+| `200` receipt whose `status`/`decision`/`result`/`error` envelope is contradictory or incomplete | `UNKNOWN` | `null` | `false` | Envelope-coherence gate; `KERNEL_EFFECT_UNKNOWN`; never `DENIED`/`NOT_APPLIED`; do not retry. |
 | Pre-forward audit insert unavailable | `UNAVAILABLE` | `null` | `false` | `EDGE_AUDIT_UNAVAILABLE`; no forward. |
 | Outcome audit insert unavailable after forwarding | `UNKNOWN` | `null` | `false` | `EDGE_AUDIT_UNAVAILABLE`; never success, no retry. |
 
@@ -398,6 +401,40 @@ Only a `200` response carrying a valid kernel receipt with the exact submitted
 `request_id` can produce `DENIED`/`applied:false` or `NOT_APPLIED`. A non-200
 status, including a Cloudflare Access/proxy `403` or `404` returned after the
 POST, is never treated as proof that no label was added.
+
+### Receipt validation gates
+
+The Edge accepts a `200` body only after four ordered gates, all of which must
+pass before it can report `SUCCEEDED`, `DENIED` or `NOT_APPLIED`:
+
+1. **Parse and shape.** `JSON.parse` must yield a non-null, non-array object;
+   otherwise `KERNEL_RESPONSE_INVALID` → `UNKNOWN`.
+2. **Correlation.** `receipt.request_id` must be a string equal to the
+   submitted `request_id`; otherwise `KERNEL_RECEIPT_CORRELATION_MISMATCH` →
+   `UNKNOWN`.
+3. **Envelope coherence.** `status` must be one of `ACCEPTED`/`QUEUED`/
+   `REJECTED`/`FAILED` and `decision` one of `ALLOW`/`DENY`/`HALT`. Only these
+   combinations are honoured:
+   - `ACCEPTED` + `ALLOW` + an object `result` whose `state` is `SUCCEEDED`,
+     `NOT_APPLIED` or `UNKNOWN`, with no provider error marker;
+   - `REJECTED` + `DENY` + `result: null` and no provider error marker →
+     `DENIED`;
+   - `FAILED` + `DENY` + `result: null` → `NOT_APPLIED` only when `error`
+     contains `PROVIDER_NOT_APPLIED`; otherwise `UNKNOWN`.
+
+   Provider error markers are never read from an `ACCEPTED`, `REJECTED` or
+   `QUEUED` receipt, and a `FAILED` receipt that carries a tool `result` is
+   contradictory. Any other status/decision/result/error combination →
+   `UNKNOWN` (`KERNEL_EFFECT_UNKNOWN`), never `DENIED` or `NOT_APPLIED`.
+4. **Success binding.** For an `ACCEPTED`/`ALLOW` receipt that would report
+   `SUCCEEDED` or `NOT_APPLIED`, `result` must bind to the request:
+   `result.issue_number` must equal the submitted integer, `result.label` must
+   equal the submitted label, `already_present` (when present) must be boolean,
+   and `provider_ref` (when present) must be a bounded, non-empty,
+   control-free string. A mismatch or malformed payload →
+   `UNKNOWN` (`KERNEL_RECEIPT_BINDING_MISMATCH`), `applied: null`, no retry.
+   This matches the kernel provider `result` shape
+   `{state, issue_number, label, already_present, provider_ref, detail, ...}`.
 
 Scope/budget denials happen before `kernelIssueLabel` when the bridge
 configuration is valid and enabled, and return the existing generic
