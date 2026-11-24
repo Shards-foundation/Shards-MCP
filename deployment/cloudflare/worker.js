@@ -395,7 +395,7 @@ if(!t.public&&!actor)return errorResult(AUTH_REQUIRED_TEXT);
 if(name===KERNEL_BRIDGE_TOOL){
   let bridgeConfig;try{bridgeConfig=kernelBridgeConfig(env)}catch{bridgeConfig={ok:false,reason:'BRIDGE_NOT_CONFIGURED'}}
   if(!bridgeConfig.ok){
-    if(!actor.scopeSet.has(t.scope))return errorResult(AUTH_REQUIRED_TEXT);
+    if(!actor?.scopeSet?.has(t.scope))return errorResult(AUTH_REQUIRED_TEXT);
     return kernelBridgeResult(kernelBridgeDeniedValue(bridgeConfig.reason,args.request_id),true);
   }
 }
