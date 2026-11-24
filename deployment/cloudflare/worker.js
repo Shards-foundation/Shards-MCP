@@ -127,6 +127,10 @@ async function kernelBridgeAuditedResult(env,actor,value,isError,auditObjectId){
   if(!ok)return kernelBridgeResult({state:value.kernel_reached===false?'UNAVAILABLE':'UNKNOWN',applied:null,kernel_reached:value.kernel_reached??null,retryable:false,reason_code:'EDGE_AUDIT_UNAVAILABLE',request_id:typeof value.request_id==='string'&&reqId(value.request_id)?value.request_id:null,next:'do not retry; inspect the issue, the kernel provider journal and the Edge audit store'},true);
   return kernelBridgeResult(value,isError);
 }
+async function kernelBridgeDenialAudit(env,actor,args,status){
+  const objectId=args&&typeof args==='object'&&!Array.isArray(args)&&typeof args.request_id==='string'&&reqId(args.request_id)?args.request_id:crypto.randomUUID();
+  return kernelAudit(env,actor,'kernel.issue_label.denied',objectId,status);
+}
 function kernelSafeCode(value,allowed){return typeof value==='string'&&allowed.has(value)?value:null}
 function kernelSafeDetail(value){return typeof value==='string'&&/^[A-Z][A-Z0-9_]{2,63}$/.test(value)?value:null}
 function kernelSafeHash(value){return typeof value==='string'&&/^[0-9a-f]{64}$/.test(value)?value:null}
@@ -385,12 +389,20 @@ async function publicResearchTool(name,args){
   throw Error('Unknown public research tool');
 }
 
-async function runTool(name,args,actor,env,request){if(!args||typeof args!=='object'||Array.isArray(args))return errorResult('Tool input must be an object');const t=tools.find(x=>x.name===name);if(!t)return errorResult('Unknown tool');if(!t.public&&(!actor||!actor.scopeSet.has(t.scope)))return errorResult('AUTH_REQUIRED: This tool needs a valid, separately provisioned scoped bearer key. Sign in at https://mcp.shardsinc.co.uk/manage to enrol an agent. ChatGPT OAuth for private tools is not available yet.');
+async function runTool(name,args,actor,env,request){if(!args||typeof args!=='object'||Array.isArray(args))return errorResult('Tool input must be an object');const t=tools.find(x=>x.name===name);if(!t)return errorResult('Unknown tool');
+if(!t.public&&!actor)return errorResult('AUTH_REQUIRED: This tool needs a valid, separately provisioned scoped bearer key. Sign in at https://mcp.shardsinc.co.uk/manage to enrol an agent. ChatGPT OAuth for private tools is not available yet.');
+if(!t.public&&!actor.scopeSet.has(t.scope)){
+  if(name===KERNEL_BRIDGE_TOOL&&!await kernelBridgeDenialAudit(env,actor,args,'SCOPE_DENIED'))return errorResult('UNAVAILABLE: EDGE_AUDIT_UNAVAILABLE; do not retry automatically');
+  return errorResult('AUTH_REQUIRED: This tool needs a valid, separately provisioned scoped bearer key. Sign in at https://mcp.shardsinc.co.uk/manage to enrol an agent. ChatGPT OAuth for private tools is not available yet.');
+}
 if(t.public&&name==='shards_dns_lookup'){try{validateDNS(args)}catch(e){return errorResult('Invalid DNS arguments')}}
 if(t.public&&name.startsWith('shards_')&&['shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'].includes(name)&&!validPublicResearchArgs(name,args))return errorResult('Invalid public research arguments');
 if(t.public&&!await publicCallerBudget(env,request,name))return errorResult('Caller daily quota exceeded or budget unavailable');
 if(t.public&&!await budget(env,name,name==='shards_dns_lookup'?600:6000))return errorResult('Global daily quota exceeded or budget unavailable');
-if(!t.public&&!await budget(env,actor.id+':'+name,t.kernelBridge?50:1500))return errorResult('Agent daily quota exceeded or budget unavailable');
+if(!t.public&&!await budget(env,actor.id+':'+name,t.kernelBridge?50:1500)){
+  if(name===KERNEL_BRIDGE_TOOL&&!await kernelBridgeDenialAudit(env,actor,args,'BUDGET_DENIED'))return errorResult('UNAVAILABLE: EDGE_AUDIT_UNAVAILABLE; do not retry automatically');
+  return errorResult('Agent daily quota exceeded or budget unavailable');
+}
 try{if(['shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'].includes(name))return result(await publicResearchTool(name,args));
 if(name==='shards_gateway_status')return result({name:'Shards MCP Edge',version:VERSION,endpoint:ORIGIN+'/mcp',protocols:['2025-11-25','2026-07-28 subset'],status:'online',persistence:'Cloudflare EU D1',python_gateway:'Separate upstream project; not federated by this edge service',anonymous_tools:tools.filter(t=>t.public).length,authenticated:'per-agent bearer key'});
 if(name==='shards_systems_catalog')return result({projects:[{name:'Shards-MCP (Python)',url:'https://github.com/Shards-foundation/Shards-MCP',status:'experimental self-hosted gateway'},{name:'Shards Kernel',url:'https://github.com/Shards-foundation/Shards-kernel',status:'open-source governance kernel'},{name:'Shards Inc',url:'https://shardsinc.co.uk',status:'company homepage'},{name:'Privacy Lab',url:'https://privacy.shardsinc.co.uk/lab',status:'live research utility suite'},{name:'Security Console',url:'https://security.shardsinc.co.uk',status:'early-stage defensive lab'},{name:'Voice Studio',url:'https://voice.shardsinc.co.uk',status:'browser tools, cloud provider gated'}]});

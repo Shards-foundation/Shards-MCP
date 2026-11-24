@@ -81,27 +81,41 @@ but cannot sign its own permit.
 
 `authenticate()` updates `agent_connection_activity`
 (`last_authenticated_at`, `last_operation`) and `budget()` increments
-`route_budgets`; neither is a per-request history. For every call that reaches
-`kernelIssueLabel`, the Edge appends two sanitized `audit_events` rows:
+`route_budgets`; neither is a per-request history.
 
-1. `kernel.issue_label.attempt` / `ATTEMPTED` **before forwarding**;
-2. `kernel.issue_label.<outcome>` / `<stable reason code>` after the result
-   (`succeeded`/`OK`, `denied`/`KERNEL_DENIED`, `unknown`/`KERNEL_EFFECT_UNKNOWN`,
-   `unavailable`/`KERNEL_AUTH_UNAVAILABLE`, and so on).
+Per-attempt auditing starts only after `authenticate()` returns a verified D1
+principal. For every authenticated bridge call:
 
-If the pre-forward insert cannot commit, the bridge returns
-`UNAVAILABLE`/`EDGE_AUDIT_UNAVAILABLE` and does not forward. If the outcome
-insert cannot commit after a forward, it returns
-`UNKNOWN`/`EDGE_AUDIT_UNAVAILABLE`, never success, and does not retry. The audit
-rows contain only tenant, agent, action, request id, status and timestamp; they
-never contain the permit, kernel bearer, gateway token, Access secret or private
-origin. The kernel's hash-chained audit and durable provider journal remain
-authoritative for the effect.
+- a caller missing `kernel:github_label` gets one `kernel.issue_label.denied` /
+  `SCOPE_DENIED` row before the generic `AUTH_REQUIRED` response;
+- a caller over the bridge budget gets one `kernel.issue_label.denied` /
+  `BUDGET_DENIED` row before the generic quota response;
+- a call that reaches `kernelIssueLabel` gets
+  `kernel.issue_label.attempt` / `ATTEMPTED` **before forwarding**, then
+  `kernel.issue_label.<outcome>` / `<stable reason code>` after the result
+  (`succeeded`/`OK`, `denied`/`KERNEL_DENIED`,
+  `unknown`/`KERNEL_EFFECT_UNKNOWN`, `unavailable`/`KERNEL_AUTH_UNAVAILABLE`,
+  and so on).
 
-Scope and daily-budget denials are enforced by the generic private-tool path
-before `kernelIssueLabel`; they are visible in `agent_connection_activity` and
-the MCP response, but are not bridge-specific `audit_events` rows. This is a
-residual boundary and part of why the bridge remains disabled and NO-GO.
+If the denial audit or pre-forward attempt audit cannot commit, the Edge
+returns `UNAVAILABLE: EDGE_AUDIT_UNAVAILABLE`, does not dispatch, and does not
+retry automatically. If the outcome audit cannot commit after a forward, it
+returns `UNKNOWN`/`EDGE_AUDIT_UNAVAILABLE`, never success, and does not retry.
+The audit rows contain only tenant, agent, action, request id, status and
+timestamp; they never contain the permit, kernel bearer, gateway token, Access
+secret or private origin. The kernel's hash-chained audit and durable provider
+journal remain authoritative for the effect.
+
+Pre-auth, anonymous and invalid-token requests are deliberately **not** written
+to the agent ledger: `runTool` returns the cheap `AUTH_REQUIRED`/401 path without
+a D1 audit insert. Those network attempts belong to Cloudflare WAF/rate
+limiting, not the per-agent ledger.
+
+Residual cost tradeoff: an authenticated scope/budget denial adds one D1
+`audit_events` insert on top of the existing `authenticate()` activity upsert.
+The pilot is capped at two agents and tokens are revocable. If the operator
+requires zero extra writes on authenticated denials, the bridge must stay
+disabled.
 
 ## Edge configuration
 
@@ -368,6 +382,13 @@ Only a kernel-verified read-back is reported as success.
 | Pre-forward audit insert unavailable | `UNAVAILABLE` | `null` | `false` | `EDGE_AUDIT_UNAVAILABLE`; no forward. |
 | Outcome audit insert unavailable after forwarding | `UNKNOWN` | `null` | `false` | `EDGE_AUDIT_UNAVAILABLE`; never success, no retry. |
 
+Scope/budget denials happen before `kernelIssueLabel` and return the existing
+generic `AUTH_REQUIRED` / quota text, not the structured bridge result. They
+still write one `kernel.issue_label.denied` audit row (`SCOPE_DENIED` or
+`BUDGET_DENIED`). If that audit insert fails, the response is
+`UNAVAILABLE: EDGE_AUDIT_UNAVAILABLE`, with no dispatch and no automatic retry.
+Anonymous/invalid-token requests write no audit row.
+
 Every result includes the client `request_id`, safe kernel status/decision
 values, a kernel evidence hash when present, and a stable reason code. A `200`
 receipt must echo the exact submitted `request_id`; a missing or different id is
@@ -400,9 +421,12 @@ The bridge must remain disabled until every gate below is satisfied.
    tenant-wide mapping or self-service enrolment. Agents without a mapping are
    denied even if they hold the scope.
 5. **Release gate update.** When the bridge is enabled, `/api/status` exposes
-   10 protected tools instead of 9. Update the expected private tool names and
-   count in the manual production release gate before enabling. Leaving the
-   bridge disabled keeps the current 9-tool live gate valid.
+   10 protected tools instead of 9. The manual production release gate now takes
+   `bridge_mode`: `disabled` (default) expects exactly 9 and rejects the bridge;
+   `enabled` expects exactly 10 including `shards_kernel_issue_label`. Both modes
+   always require exactly 7 public tools and no protected tool in anonymous
+   discovery. Select `enabled` only in the approved enablement rollout; leaving
+   the bridge disabled keeps the current 9-tool live gate valid.
 6. **No paid resources.** This change provisions no Cloudflare, Oracle, GitHub
    or paid resource. The operator uses existing infrastructure under separate
    approval.
@@ -442,8 +466,12 @@ The bridge tests prove:
   and non-JSON responses are reported truthfully;
 - a `200` receipt with a missing or wrong `request_id` is `UNKNOWN` and is not
   retried; the exact matching id is required for success;
-- every bridge call that reaches `kernelIssueLabel` writes an `attempt` audit
-  row before forwarding and an outcome row for success, denial or unknown;
+- every authenticated bridge call writes a sanitized audit row: scope/budget
+  denials write one `kernel.issue_label.denied` row, and calls reaching
+  `kernelIssueLabel` write an `attempt` row before forwarding plus an outcome
+  row;
+- an authenticated scope/budget denial audit failure returns `UNAVAILABLE`
+  with zero dispatch; pre-auth/invalid-token calls write no D1 audit rows;
 - a pre-forward audit failure returns `UNAVAILABLE` with zero dispatch, and a
   post-forward audit failure returns `UNKNOWN`, never success and no retry;
 - audit rows contain only tenant, agent, action, request id, status and
@@ -460,10 +488,11 @@ temporary secret leaks, and shell-safe verifier rendering.
 
 They do **not** prove a real kernel #162 process, a real Cloudflare
 Tunnel/Access origin, a real GitHub label write or read-back, an ARM64 systemd
-start or a live Worker deployment. Those remain **BLOCKED** on the Oracle host,
-the private ingress and the kernel merge. Scope and daily-budget denials are
-enforced by the generic private-tool path before `kernelIssueLabel`; they are
-not bridge-specific audit rows, which is a documented residual boundary.
+start or a live Worker deployment. The denial-audit tests simulate D1 failures;
+they do not prove real D1 durability under a Cloudflare outage. Those remain
+**BLOCKED** on the Oracle host, the private ingress and the kernel merge.
+Pre-auth/invalid-token attempts are outside the agent ledger by design and
+should be handled by Cloudflare WAF/rate limiting.
 
 ## Rollback
 

@@ -40,7 +40,7 @@ function makeActor(overrides = {}) {
   };
 }
 
-function makeDB(actor, { auth = true, writes = [], failAudit = false } = {}) {
+function makeDB(actor, { auth = true, writes = [], failAudit = false, failBudget = false } = {}) {
   let auditRuns = 0;
   return {
     writes,
@@ -61,6 +61,7 @@ function makeDB(actor, { auth = true, writes = [], failAudit = false } = {}) {
                   throw new Error("audit unavailable");
                 }
               }
+              if (failBudget && /route_budgets/.test(sql)) return { meta: { changes: 0 } };
               return { meta: { changes: 1 } };
             },
             async all() { return { results: [] }; },
@@ -280,6 +281,104 @@ test("a missing scope is denied before any dispatch", async () => {
   const call = await callTool(worker, env, validArgs());
   assert.equal(call.result.isError, true);
   assert.match(call.result.content[0].text, /AUTH_REQUIRED/);
+  assert.equal(fetchStub.calls.length, 0);
+});
+
+test("an authenticated scope denial writes a sanitized denial audit and never dispatches", async () => {
+  const fetchStub = stubFetch(() => { throw new Error("must not fetch"); });
+  const { worker } = loadWorker(fetchStub);
+  const actor = makeActor({ scopes: JSON.stringify(["agent:identity"]) });
+  const db = makeDB(actor);
+  const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }, actor), validArgs());
+  assert.equal(call.result.isError, true);
+  assert.match(call.result.content[0].text, /AUTH_REQUIRED/);
+  assert.equal(fetchStub.calls.length, 0);
+  const audits = auditWrites(db);
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].values[3], "kernel.issue_label.denied");
+  assert.equal(audits[0].values[4], "req-0001");
+  assert.equal(audits[0].values[5], "SCOPE_DENIED");
+  assertNoSecrets(call.result);
+  assertNoSecrets(audits);
+  assert.equal(JSON.stringify(audits).includes("permit"), false);
+  assert.equal(JSON.stringify(audits).includes("signature"), false);
+});
+
+test("an authenticated budget denial writes a sanitized denial audit and never dispatches", async () => {
+  const fetchStub = stubFetch(() => { throw new Error("must not fetch"); });
+  const { worker } = loadWorker(fetchStub);
+  const actor = makeActor();
+  const db = makeDB(actor, { failBudget: true });
+  const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }, actor), validArgs());
+  assert.equal(call.result.isError, true);
+  assert.match(call.result.content[0].text, /quota exceeded|budget unavailable/);
+  assert.equal(fetchStub.calls.length, 0);
+  const audits = auditWrites(db);
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].values[3], "kernel.issue_label.denied");
+  assert.equal(audits[0].values[4], "req-0001");
+  assert.equal(audits[0].values[5], "BUDGET_DENIED");
+  assertNoSecrets(call.result);
+  assertNoSecrets(audits);
+});
+
+test("an authenticated scope denial audit failure fails closed with zero dispatch", async () => {
+  const fetchStub = stubFetch(() => { throw new Error("must not fetch"); });
+  const { worker } = loadWorker(fetchStub);
+  const actor = makeActor({ scopes: JSON.stringify(["agent:identity"]) });
+  const db = makeDB(actor, { failAudit: true });
+  const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }, actor), validArgs());
+  assert.equal(call.result.isError, true);
+  assert.match(call.result.content[0].text, /EDGE_AUDIT_UNAVAILABLE/);
+  assert.equal(fetchStub.calls.length, 0);
+  assert.equal(auditWrites(db).length, 1);
+  assertNoSecrets(call.result);
+});
+
+test("an authenticated budget denial audit failure fails closed with zero dispatch", async () => {
+  const fetchStub = stubFetch(() => { throw new Error("must not fetch"); });
+  const { worker } = loadWorker(fetchStub);
+  const actor = makeActor();
+  const db = makeDB(actor, { failBudget: true, failAudit: true });
+  const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }, actor), validArgs());
+  assert.equal(call.result.isError, true);
+  assert.match(call.result.content[0].text, /EDGE_AUDIT_UNAVAILABLE/);
+  assert.equal(fetchStub.calls.length, 0);
+  assert.equal(auditWrites(db).length, 1);
+  assertNoSecrets(call.result);
+});
+
+test("unauthenticated and invalid-token bridge calls write no audit rows", async () => {
+  const { worker } = loadWorker(() => { throw new Error("must not fetch"); });
+
+  const anonymousDB = makeDB(makeActor());
+  const anonymousEnv = bridgeEnv({ EDGE_DB: anonymousDB });
+  const anonymous = await worker.fetch(post("tools/call", { name: BRIDGE_TOOL, arguments: validArgs() }), anonymousEnv);
+  const anonymousBody = await anonymous.json();
+  assert.equal(anonymousBody.result.isError, true);
+  assert.match(anonymousBody.result.content[0].text, /AUTH_REQUIRED/);
+  assert.equal(auditWrites(anonymousDB).length, 0);
+  assert.equal(anonymousDB.writes.length, 0, "unauthenticated bridge calls must not write D1");
+
+  const invalidDB = makeDB(makeActor(), { auth: false });
+  const invalidEnv = bridgeEnv({ EDGE_DB: invalidDB });
+  const invalid = await worker.fetch(post("tools/call", { name: BRIDGE_TOOL, arguments: validArgs() }, authHeaders()), invalidEnv);
+  assert.equal(invalid.status, 401);
+  assert.equal(auditWrites(invalidDB).length, 0);
+  assert.equal(invalidDB.writes.length, 0, "invalid token requests must not write D1");
+});
+
+test("a non-bridge private scope denial keeps the generic path and writes no audit", async () => {
+  const fetchStub = stubFetch(() => { throw new Error("must not fetch"); });
+  const { worker } = loadWorker(fetchStub);
+  const actor = makeActor({ scopes: JSON.stringify(["agent:identity"]) });
+  const db = makeDB(actor);
+  const env = bridgeEnv({ EDGE_DB: db }, actor);
+  const res = await worker.fetch(post("tools/call", { name: "shards_agents_list", arguments: {} }, authHeaders()), env);
+  const body = await res.json();
+  assert.equal(body.result.isError, true);
+  assert.match(body.result.content[0].text, /AUTH_REQUIRED/);
+  assert.equal(auditWrites(db).length, 0);
   assert.equal(fetchStub.calls.length, 0);
 });
 

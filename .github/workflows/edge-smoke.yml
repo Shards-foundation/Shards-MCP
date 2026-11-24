@@ -45,7 +45,7 @@ jobs:
       - name: Isolated pre-deployment edge regression — no cancelled tests
         run: |
           set -euo pipefail
-          node --test --test-reporter=tap deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs deployment/cloudflare/kernel_bridge.test.mjs | tee /tmp/shards-edge-tests.tap
+          node --test --test-reporter=tap deployment/cloudflare/worker.test.mjs deployment/cloudflare/audit_atomic.test.mjs deployment/cloudflare/kernel_bridge.test.mjs deployment/cloudflare/release_gate_names.test.mjs | tee /tmp/shards-edge-tests.tap
           node <<'NODE'
           const fs = require('node:fs');
           const tap = fs.readFileSync('/tmp/shards-edge-tests.tap','utf8');
@@ -71,6 +71,10 @@ jobs:
           node --test deployment/cloudflare/sdk.test.mjs
       # Staged rollout: production still has 3 tools before this PR is deployed.
       # After rollout, pin the live checks to 7 and verify the four added tools by name.
+      # This live probe expects the currently deployed disabled bridge (9
+      # protected tools). The mode-aware post-deployment release gate is the
+      # authority after enabling the 10th tool; update this probe in the same
+      # approved rollout.
       - name: Verify real website and database status
         run: |
           set -euo pipefail

@@ -1,6 +1,8 @@
 name: Shards MCP post-deployment release gate
 # This workflow is deliberately NOT part of source-only PR CI. Invoke after
 # deploying a reviewed, pinned Worker version; three-tool production MUST fail.
+# bridge_mode defaults to disabled (9 protected tools); enabled expects 10,
+# including shards_kernel_issue_label. Anonymous discovery is always 7 public.
 on:
   workflow_dispatch:
     inputs:
@@ -8,6 +10,14 @@ on:
         description: "Actual deployed Cloudflare Worker version UUID (required evidence)"
         required: true
         type: string
+      bridge_mode:
+        description: "Expected protected-tool mode: disabled (9 tools) or enabled (10 tools, includes shards_kernel_issue_label)"
+        required: true
+        default: disabled
+        type: choice
+        options:
+          - disabled
+          - enabled
 permissions:
   contents: read
 jobs:
@@ -29,9 +39,10 @@ jobs:
           set -euo pipefail
           test "$(node --version)" = "v22.16.0"
           node deployment/cloudflare/verify_release_deployment.mjs
-      - name: Validate release evidence and exact seven-tool discovery
+      - name: Validate release evidence and exact public/protected discovery
         env:
           DEPLOYED_WORKER_VERSION: ${{ inputs.deployed_worker_version }}
+          EXPECTED_BRIDGE_MODE: ${{ inputs.bridge_mode }}
         run: |
           set -euo pipefail
           [[ "$DEPLOYED_WORKER_VERSION" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || { echo "Missing version evidence"; exit 1; }
@@ -41,17 +52,14 @@ jobs:
             -H "Accept: application/json, text/event-stream" \
             --data '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' -o /tmp/mcp-tools.json
           node <<'NODE'
-          const status=require('/tmp/mcp-status.json');
-          const response=require('/tmp/mcp-tools.json');
-          const publicNames=['shards_gateway_status','shards_systems_catalog','shards_dns_lookup','shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'].sort();
-          const privateNames=['shards_agent_identity','shards_agents_list','shards_message_send','shards_message_inbox','shards_task_create','shards_task_inbox','shards_task_claim','shards_task_complete','shards_audit_tail'].sort();
-          const eql=(a,b)=>JSON.stringify([...a].sort())===JSON.stringify([...b].sort());
-          const declared=status.tools||[];
-          if(status.db!=='connected')throw Error('Production D1 not connected');
-          if(!eql(declared.filter(t=>t.public).map(t=>t.name),publicNames))throw Error('API status public tools not exactly seven');
-          if(!eql(declared.filter(t=>!t.public).map(t=>t.name),privateNames))throw Error('API status protected tools not exactly nine');
-          if(!eql((response.result?.tools||[]).map(t=>t.name),publicNames))throw Error('Unauthenticated discovery not exactly seven public tools');
-          console.log('PASS: seven exact public names, nine exact private names, no anonymous privileged discovery');
+          (async()=>{
+            const status=require('/tmp/mcp-status.json');
+            const response=require('/tmp/mcp-tools.json');
+            const {assertExactNames}=await import('./deployment/cloudflare/release_gate_names.mjs');
+            if(status.db!=='connected')throw Error('Production D1 not connected');
+            const result=assertExactNames(status.tools||[], response.result?.tools||[], process.env.EXPECTED_BRIDGE_MODE);
+            console.log(`PASS: seven exact public names, ${result.expectedPrivate.length} exact private names (bridge ${result.bridgeMode}), no anonymous privileged discovery`);
+          })().catch(err=>{console.error(err);process.exitCode=1});
           NODE
       - name: Check four real public operations and private-tool denial
         run: |
