@@ -5,6 +5,7 @@ on:
     paths:
       - "deployment/cloudflare/**"
       - ".github/workflows/edge-smoke.yml"
+      - ".github/workflows/edge-production-release-gate.yml"
       - "docs/GET_STARTED_UNIVERSAL.md"
   workflow_dispatch:
 permissions:
