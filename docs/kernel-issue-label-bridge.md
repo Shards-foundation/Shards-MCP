@@ -1,16 +1,15 @@
 # Opt-in Shards-Kernel GitHub issue-label bridge
 
-**Status:** source-only, disabled by default, draft review. This page documents a
-proposed Edge tool, not a deployed capability. No Cloudflare Worker, D1 database,
-Access application, Oracle host, credential or GitHub repository was changed to
-produce it.
+**Status** — The Edge bridge is source-only and disabled by default. Live MCP
+Worker-to-Kernel acceptance is pending.
 
-**Dependency:** Shards-Kernel pull request
-[#162](https://github.com/Shards-foundation/Shards-kernel/pull/162), head
-`d9560c5858029636790835a050b5e235195f5285`, base
-`c2c39200cd2a3ba6d3d03b533ecbed3d590166e1`. At the time of writing it is a
-**DRAFT and not merged**. This repository does not create, modify or merge a
-kernel pull request.
+**Kernel dependency** — Shards-Kernel PR #162 merged at
+`61cc6e82ee25aefa0a9c95ae75aedda42a7090ae`, the source revision reported for
+the Oracle pilot. Pin the pilot build to its source SHA. Both that revision
+and the public `v0.1.4` tag report version `0.1.4`, and the tag resolves to
+`3106a0df39ec8c8e9abdd4071e92167a3ef085b4`.
+[Kernel PR #162](https://github.com/Shards-foundation/Shards-kernel/pull/162) ·
+[Public tag](https://github.com/Shards-foundation/Shards-kernel/tree/v0.1.4)
 
 ## What this adds
 
@@ -58,6 +57,7 @@ Cloudflare Edge Worker
   - structural permit checks only; no signing and no authority
         |
         | HTTPS POST https://<private-tunnel-host>/submit
+        | User-Agent: Shards-MCP-Kernel-Bridge
         | redirect: manual, 10 s timeout, 16 KiB response cap
         v
 Cloudflare Access service token + private Tunnel
@@ -65,7 +65,7 @@ Cloudflare Access service token + private Tunnel
   - origin must not be publicly reachable
         |
         v
-Shards-Kernel operator (127.0.0.1:8765 on Oracle, kernel #162)
+Shards-Kernel operator (127.0.0.1:8765 on Oracle ARM64)
   - gateway identity/token, per-agent actor-labelled bearer
   - signed v2 permit: signature, audience, subject, action, params, nonce
   - replay ledger + hash-chained audit + durable provider journal
@@ -78,6 +78,11 @@ https://api.github.com  POST label, then authoritative GET read-back
 The human approver, offline permit issuer, policy signer, kernel runtime,
 Edge Worker and agent are separate identities. An agent can request an action
 but cannot sign its own permit.
+
+The Worker sets the fixed `User-Agent: Shards-MCP-Kernel-Bridge` on its
+outbound POST. The value identifies the Worker service. The Access service
+token, gateway credentials, actor bearer and signed permit continue to
+govern the request.
 
 `authenticate()` updates `agent_connection_activity`
 (`last_authenticated_at`, `last_operation`) and `budget()` increments
@@ -375,7 +380,8 @@ credential from the request.
 
 ## Result semantics
 
-Only a kernel-verified read-back is reported as success.
+Only a kernel-verified read-back is reported as success, and only when the
+success payload binds to the requested issue and label.
 
 | Observation | Edge `state` | `applied` | `retryable` | Meaning |
 | --- | --- | --- | --- | --- |
@@ -391,6 +397,8 @@ Only a kernel-verified read-back is reported as success.
 | Network error or timeout | `UNKNOWN` | `null` | `false` | Do not retry. |
 | Oversized, non-JSON or malformed receipt | `UNKNOWN` | `null` | `false` | Do not retry. |
 | `200` receipt missing or mismatching the submitted `request_id` | `UNKNOWN` | `null` | `false` | `KERNEL_RECEIPT_CORRELATION_MISMATCH`; do not retry. |
+| `200` `ACCEPTED`/`ALLOW` receipt whose `result.issue_number` or `result.label` does not match the request, or whose `result`/`provider_ref`/`already_present` is malformed | `UNKNOWN` | `null` | `false` | `KERNEL_RECEIPT_BINDING_MISMATCH`; never success; do not retry. |
+| `200` receipt whose `status`/`decision`/`result`/`error` envelope is contradictory or incomplete | `UNKNOWN` | `null` | `false` | Envelope-coherence gate; `KERNEL_EFFECT_UNKNOWN`; never `DENIED`/`NOT_APPLIED`; do not retry. |
 | Pre-forward audit insert unavailable | `UNAVAILABLE` | `null` | `false` | `EDGE_AUDIT_UNAVAILABLE`; no forward. |
 | Outcome audit insert unavailable after forwarding | `UNKNOWN` | `null` | `false` | `EDGE_AUDIT_UNAVAILABLE`; never success, no retry. |
 
@@ -398,6 +406,40 @@ Only a `200` response carrying a valid kernel receipt with the exact submitted
 `request_id` can produce `DENIED`/`applied:false` or `NOT_APPLIED`. A non-200
 status, including a Cloudflare Access/proxy `403` or `404` returned after the
 POST, is never treated as proof that no label was added.
+
+### Receipt validation gates
+
+The Edge accepts a `200` body only after four ordered gates, all of which must
+pass before it can report `SUCCEEDED`, `DENIED` or `NOT_APPLIED`:
+
+1. **Parse and shape.** `JSON.parse` must yield a non-null, non-array object;
+   otherwise `KERNEL_RESPONSE_INVALID` → `UNKNOWN`.
+2. **Correlation.** `receipt.request_id` must be a string equal to the
+   submitted `request_id`; otherwise `KERNEL_RECEIPT_CORRELATION_MISMATCH` →
+   `UNKNOWN`.
+3. **Envelope coherence.** `status` must be one of `ACCEPTED`/`QUEUED`/
+   `REJECTED`/`FAILED` and `decision` one of `ALLOW`/`DENY`/`HALT`. Only these
+   combinations are honoured:
+   - `ACCEPTED` + `ALLOW` + an object `result` whose `state` is `SUCCEEDED`,
+     `NOT_APPLIED` or `UNKNOWN`, with no provider error marker;
+   - `REJECTED` + `DENY` + `result: null` and no provider error marker →
+     `DENIED`;
+   - `FAILED` + `DENY` + `result: null` → `NOT_APPLIED` only when `error`
+     contains `PROVIDER_NOT_APPLIED`; otherwise `UNKNOWN`.
+
+   Provider error markers are never read from an `ACCEPTED`, `REJECTED` or
+   `QUEUED` receipt, and a `FAILED` receipt that carries a tool `result` is
+   contradictory. Any other status/decision/result/error combination →
+   `UNKNOWN` (`KERNEL_EFFECT_UNKNOWN`), never `DENIED` or `NOT_APPLIED`.
+4. **Success binding.** For an `ACCEPTED`/`ALLOW` receipt that would report
+   `SUCCEEDED` or `NOT_APPLIED`, `result` must bind to the request:
+   `result.issue_number` must equal the submitted integer, `result.label` must
+   equal the submitted label, `already_present` (when present) must be boolean,
+   and `provider_ref` (when present) must be a bounded, non-empty,
+   control-free string. A mismatch or malformed payload →
+   `UNKNOWN` (`KERNEL_RECEIPT_BINDING_MISMATCH`), `applied: null`, no retry.
+   This matches the kernel provider `result` shape
+   `{state, issue_number, label, already_present, provider_ref, detail, ...}`.
 
 Scope/budget denials happen before `kernelIssueLabel` when the bridge
 configuration is valid and enabled, and return the existing generic
@@ -423,11 +465,11 @@ needs a new signed permit and a new request id.
 
 ## Deployment gates
 
-The bridge must remain disabled until every gate below is satisfied.
+Keep the production bridge disabled until every gate below is satisfied.
 
-1. **Kernel #162 is merged or explicitly pinned.** It is currently a draft. Do
-   not point the Edge at an unmerged kernel revision without the release
-   owner's decision and a pinned SHA.
+1. **Kernel source and artifact are pinned.** Kernel #162 is merged and the
+   operator reports the merge SHA on the Oracle pilot. Verify the provenance
+   of the running artifact against that SHA during release sign-off.
 2. **Private ingress exists.** The kernel binds `127.0.0.1:8765` only. A private
    Cloudflare Tunnel must expose exactly that loopback listener under an
    Access-protected hostname. The origin must not be reachable from the public
@@ -453,11 +495,54 @@ The bridge must remain disabled until every gate below is satisfied.
 6. **No paid resources.** This change provisions no Cloudflare, Oracle, GitHub
    or paid resource. The operator uses existing infrastructure under separate
    approval.
+7. **The deployed MCP Worker passes bridge acceptance.** In a separately
+   approved pilot, exercise the protected MCP tool from the identified
+   Worker version through Access to the configured Kernel origin. Verify a
+   correlated Kernel denial and the Edge attempt and outcome audit records.
+   A permit-denial check at this boundary requires a request that passes the
+   Worker's structural permit checks. Provider-effect acceptance requires
+   separate authorization and GitHub read-back.
 
 ## Verification
 
-Run these commands from the repository root. The Node tests use an injected
-transport stub; they never contact a real kernel, Cloudflare or GitHub.
+### Operator-reported terminal acceptance
+
+The operator reports Shards Kernel v0.1.4 on Oracle ARM64 at source revision
+`61cc6e82ee25aefa0a9c95ae75aedda42a7090ae`, with an active signed v3 operator
+policy and a dedicated Cloudflare Tunnel protected by Access Service Auth.
+
+| Acceptance layer | Terminal result |
+| --- | --- |
+| Kernel operational acceptance | 7/7 PASS |
+| HAProxy acceptance | 7/7 PASS |
+| External HTTPS acceptance through the protected pilot hostname | 7/7 PASS |
+
+In the controlled terminal A/B test, the default Python HTTP client received
+HTTP 403 with Cloudflare error 1010. With the explicit
+`User-Agent: Shards-Kernel-Pilot/0.1.4`, it received HTTP 200 with a valid
+Kernel `MISSING_PERMIT` denial receipt. This shows that the identified
+terminal client reached Kernel policy evaluation over the protected route.
+The operator reports that the exercise left the pilot issue unmodified.
+[Pilot issue and `documentation` label target](https://github.com/Shards-foundation/shards-agent-core/issues/3)
+
+### Worker acceptance
+
+A local workerd loopback probe observed no User-Agent on a fresh subrequest
+with the header omitted. It received `Shards-MCP-Kernel-Bridge` when the
+subrequest set it explicitly, even with a different inbound client value.
+The bridge regression asserts that same fixed value on the actual outbound
+request options. In hosted PR CI, the Edge workflow probes the currently
+deployed MCP baseline with the bridge disabled.
+
+The deployed Worker-to-Kernel path with the new service User-Agent still
+requires acceptance through the pilot's Access policy. The terminal
+`MISSING_PERMIT` receipt came from a direct request to the pilot origin.
+The Worker requires a structurally valid permit to dispatch an MCP request.
+
+### Local regression tests
+
+Run these commands from the repository root. The bridge regression suite
+uses an injected transport stub and synthetic credentials.
 
 ```sh
 node --check deployment/cloudflare/worker.js
@@ -482,8 +567,9 @@ The bridge tests prove:
 - client-supplied actor, URL, destination, header or credential fields are
   rejected;
 - malformed, stale-shaped, over-broad and oversized permits are rejected;
-- a valid request dispatches exactly once with the mapped kernel actor, the
-  gateway headers, the Access service token and the exact permit;
+- a valid request dispatches exactly once with the fixed service User-Agent,
+  the mapped kernel actor, the gateway headers, the Access service token and
+  the exact permit, even when the inbound MCP User-Agent differs;
 - kernel denials, provider `NOT_APPLIED`, provider `UNKNOWN`, authentication
   failures, redirects, 5xx, 429, network errors, aborts, oversized responses
   and non-JSON responses are reported truthfully;
@@ -509,11 +595,9 @@ file on injected write/fsync/replace failures, rotation, rejection of symlink
 and dangling-symlink targets, rejection of control-character output paths, no
 temporary secret leaks, and shell-safe verifier rendering.
 
-They do **not** prove a real kernel #162 process, a real Cloudflare
-Tunnel/Access origin, a real GitHub label write or read-back, an ARM64 systemd
-start or a live Worker deployment. The denial-audit tests simulate D1 failures;
-they do not prove real D1 durability under a Cloudflare outage. Those remain
-**BLOCKED** on the Oracle host, the private ingress and the kernel merge.
+The denial-audit tests simulate D1 failures. Live D1 audit evidence and any
+GitHub write and read-back through the deployed bridge require the separate
+Worker acceptance gate above.
 Pre-auth/invalid-token attempts are outside the agent ledger by design and
 should be handled by Cloudflare WAF/rate limiting.
 
@@ -533,9 +617,8 @@ should be handled by Cloudflare WAF/rate limiting.
 
 ## Residual risks and blockers
 
-- **Kernel draft.** Kernel #162 is not merged. The Edge source is written
-  against its exact documented contract; a later kernel revision may change
-  field names or semantics.
+- **Kernel artifact provenance.** Use the reported source SHA for the pilot
+  artifact check. The public version tag identifies a different revision.
 - **Shared-secret gateway auth.** The kernel trusts the proxy and compares a
   shared gateway token. A compromised proxy can impersonate the gateway. The
   Access service token, exact origin and private tunnel reduce exposure but do
@@ -549,21 +632,20 @@ should be handled by Cloudflare WAF/rate limiting.
 - **Offline issuer compromise.** If the permit issuer private key is
   compromised, every permit signed by that key is compromised. Revoke the
   `issuer_keys` entry, rotate the key and re-sign the policy.
-- **No live acceptance.** The Edge tests use a transport stub. The real kernel,
-  Tunnel/Access origin and GitHub read-back remain gated on Oracle.
+- **Live MCP bridge acceptance pending.** The deployed Worker must exercise
+  the protected origin with its service User-Agent, and its audit records and
+  receipt must be verified. A GitHub write and read-back through the Worker
+  remain outside the terminal acceptance.
 
 ## Kernel #162 safety assessment
 
-The kernel contract at `d9560c5` already provides the required gateway
+The kernel contract merged in #162 provides the required gateway
 identity/token validation, per-agent actor-labelled bearer verification, signed
 v2 permit verification with audience/subject/action/params/max-executions/nonce
 binding, replay protection, a durable provider journal, authoritative GitHub
 read-back and fail-closed `UNKNOWN` semantics. No code-level change to kernel
 #162 is required to make this Edge bridge safe to review.
 
-The blockers are deployment and release, not a missing kernel capability: the
-kernel is a draft, the private Tunnel/Access origin is operator infrastructure,
-and no live end-to-end acceptance has been performed. If the operator exposes
-the kernel origin directly to the internet or omits the Access service token,
-the gateway shared secret becomes the only barrier; that configuration must be
-rejected and is not supported.
+The supported deployment requires the private Tunnel, Access Service Auth
+and the gateway credential together. Live MCP bridge acceptance and
+independent review remain release gates.

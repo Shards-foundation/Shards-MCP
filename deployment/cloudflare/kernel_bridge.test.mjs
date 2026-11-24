@@ -603,12 +603,12 @@ test("issue number and label bounds are enforced before dispatch", async () => {
   assert.equal(fetchStub.calls.length, 0);
 });
 
-test("a valid request dispatches once with the mapped actor and returns a redacted success", async () => {
+test("a valid request dispatches once with the mapped actor and fixed service User-Agent and returns a redacted success", async () => {
   const fetchStub = stubFetch(() => jsonResponse(200, receipt()));
   const { worker } = loadWorker(fetchStub);
   const env = bridgeEnv();
   const args = validArgs();
-  const call = await callTool(worker, env, args);
+  const call = await callTool(worker, env, args, { ...authHeaders(), "user-agent": "mcp-test-client/1.0" });
 
   assert.equal(call.result.isError, false);
   assert.equal(call.result.structuredContent.state, "SUCCEEDED");
@@ -630,6 +630,7 @@ test("a valid request dispatches once with the mapped actor and returns a redact
   assert.equal(dispatched.init.signal.aborted, false);
 
   const headers = new Headers(dispatched.init.headers);
+  assert.equal(headers.get("user-agent"), "Shards-MCP-Kernel-Bridge");
   assert.equal(headers.get("x-shards-gateway-identity"), GATEWAY_IDENTITY);
   assert.equal(headers.get("x-shards-gateway-token"), GATEWAY_TOKEN);
   assert.equal(headers.get("cf-access-client-id"), ACCESS_ID);
@@ -661,6 +662,112 @@ test("already-present success is reported without claiming a new write", async (
   assert.equal(call.result.structuredContent.already_present, true);
   assert.equal(call.result.structuredContent.provider_detail, "ALREADY_PRESENT");
   assert.equal(fetchStub.calls.length, 1);
+});
+
+test("ACCEPTED success receipts must bind to the requested issue_number and label", async () => {
+  const cases = [
+    { name: "issue-number-mismatch", overrides: { result: { ...receipt().result, issue_number: 124 } }, reason: "KERNEL_RECEIPT_BINDING_MISMATCH" },
+    { name: "label-mismatch", overrides: { result: { ...receipt().result, label: "other-label" } }, reason: "KERNEL_RECEIPT_BINDING_MISMATCH" },
+    { name: "missing-issue-number", overrides: { result: (() => { const result = { ...receipt().result }; delete result.issue_number; return result; })() }, reason: "KERNEL_RECEIPT_BINDING_MISMATCH" },
+    { name: "malformed-provider-ref", overrides: { result: { ...receipt().result, provider_ref: 12345 } }, reason: "KERNEL_RECEIPT_BINDING_MISMATCH" },
+    { name: "non-object-result", overrides: { result: "SUCCEEDED" }, reason: "KERNEL_EFFECT_UNKNOWN" },
+  ];
+  for (const scenario of cases) {
+    const fetchStub = stubFetch(() => jsonResponse(200, receipt(scenario.overrides)));
+    const { worker } = loadWorker(fetchStub);
+    const db = makeDB(makeActor());
+    const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }), validArgs());
+    assert.equal(call.result.isError, true, scenario.name);
+    assert.equal(call.result.structuredContent.state, "UNKNOWN", scenario.name);
+    assert.equal(call.result.structuredContent.applied, null, scenario.name);
+    assert.equal(call.result.structuredContent.kernel_reached, true, scenario.name);
+    assert.equal(call.result.structuredContent.retryable, false, scenario.name);
+    assert.equal(call.result.structuredContent.reason_code, scenario.reason, scenario.name);
+    assert.equal(call.result.content[0].text.includes("no label was added"), false, scenario.name);
+    assert.match(call.result.content[0].text, /inspect the issue and the kernel provider journal/, scenario.name);
+    assert.equal(fetchStub.calls.length, 1, scenario.name, "a mismatched success receipt must not be retried");
+    assertNoSecrets(call.result);
+    const audits = auditWrites(db);
+    assert.equal(audits.length, 2, scenario.name);
+    assert.equal(audits[0].values[3], "kernel.issue_label.attempt", scenario.name);
+    assert.equal(audits[0].values[5], "ATTEMPTED", scenario.name);
+    assert.equal(audits[1].values[3], "kernel.issue_label.unknown", scenario.name);
+    assert.equal(audits[1].values[4], "req-0001", scenario.name);
+    assert.equal(audits[1].values[5], scenario.reason, scenario.name);
+    assertNoSecrets(audits);
+  }
+});
+
+test("coherent ACCEPTED success and already-present receipts still report success", async () => {
+  const successStub = stubFetch(() => jsonResponse(200, receipt()));
+  const success = await callTool(loadWorker(successStub).worker, bridgeEnv(), validArgs());
+  assert.equal(success.result.isError, false);
+  assert.equal(success.result.structuredContent.state, "SUCCEEDED");
+  assert.equal(success.result.structuredContent.applied, true);
+  assert.equal(success.result.structuredContent.already_present, false);
+  assert.equal(successStub.calls.length, 1);
+
+  const alreadyStub = stubFetch(() => jsonResponse(200, receipt({
+    result: { ...receipt().result, already_present: true, detail: "ALREADY_PRESENT" },
+  })));
+  const already = await callTool(loadWorker(alreadyStub).worker, bridgeEnv(), validArgs());
+  assert.equal(already.result.isError, false);
+  assert.equal(already.result.structuredContent.state, "SUCCEEDED");
+  assert.equal(already.result.structuredContent.applied, true);
+  assert.equal(already.result.structuredContent.already_present, true);
+  assert.equal(alreadyStub.calls.length, 1);
+});
+
+test("provider error markers require a coherent FAILED/DENY/result:null envelope", async () => {
+  const cases = [
+    { name: "marker-without-status-decision", body: { request_id: "req-0001", error: "PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" } },
+    { name: "marker-status-only", body: { request_id: "req-0001", status: "FAILED", error: "PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" } },
+    { name: "marker-failed-allow", body: { request_id: "req-0001", status: "FAILED", decision: "ALLOW", error: "PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" } },
+    { name: "marker-failed-with-result", body: { request_id: "req-0001", status: "FAILED", decision: "DENY", result: { ...receipt().result }, error: "PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" } },
+    { name: "marker-on-rejected", body: { request_id: "req-0001", status: "REJECTED", decision: "DENY", result: null, error: "PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" } },
+    { name: "marker-on-accepted", body: receipt({ error: "PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" }) },
+    { name: "rejected-missing-decision", body: { request_id: "req-0001", status: "REJECTED", result: null, error: "PERMIT_DENIED: EXPIRED" } },
+    { name: "rejected-with-result", body: { request_id: "req-0001", status: "REJECTED", decision: "DENY", result: { ...receipt().result }, error: "PERMIT_DENIED: EXPIRED" } },
+    { name: "failed-with-allow", body: receipt({ status: "FAILED", decision: "ALLOW", result: null }) },
+  ];
+  for (const scenario of cases) {
+    const fetchStub = stubFetch(() => jsonResponse(200, scenario.body));
+    const { worker } = loadWorker(fetchStub);
+    const db = makeDB(makeActor());
+    const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }), validArgs());
+    assert.equal(call.result.isError, true, scenario.name);
+    assert.equal(call.result.structuredContent.state, "UNKNOWN", scenario.name);
+    assert.equal(call.result.structuredContent.applied, null, scenario.name);
+    assert.equal(call.result.structuredContent.kernel_reached, true, scenario.name);
+    assert.equal(call.result.structuredContent.retryable, false, scenario.name);
+    assert.equal(call.result.structuredContent.reason_code, "KERNEL_EFFECT_UNKNOWN", scenario.name);
+    assert.equal(call.result.content[0].text.includes("no label was added"), false, scenario.name);
+    assert.equal(fetchStub.calls.length, 1, scenario.name);
+    assertNoSecrets(call.result);
+    const audits = auditWrites(db);
+    assert.equal(audits.length, 2, scenario.name);
+    assert.equal(audits[1].values[3], "kernel.issue_label.unknown", scenario.name);
+    assert.equal(audits[1].values[5], "KERNEL_EFFECT_UNKNOWN", scenario.name);
+  }
+});
+
+test("legitimate FAILED provider outcomes and REJECTED denials keep their contracts", async () => {
+  const cases = [
+    { name: "not-applied", body: receipt({ status: "FAILED", decision: "DENY", result: null, error: "Tool execution failed: PROVIDER_NOT_APPLIED: ISSUE_NOT_FOUND" }), state: "NOT_APPLIED", reason: "PROVIDER_NOT_APPLIED", applied: false },
+    { name: "effect-unknown", body: receipt({ status: "FAILED", decision: "DENY", result: null, error: "Tool execution failed: PROVIDER_EFFECT_UNKNOWN: AMBIGUOUS_NO_READBACK_PROOF" }), state: "UNKNOWN", reason: "KERNEL_EFFECT_UNKNOWN", applied: null },
+    { name: "denied", body: { request_id: "req-0001", status: "REJECTED", decision: "DENY", result: null, error: "PERMIT_DENIED: EXPIRED", evidence_hash: null, ts_ms: 1234567890 }, state: "DENIED", reason: "KERNEL_DENIED", applied: false },
+  ];
+  for (const scenario of cases) {
+    const fetchStub = stubFetch(() => jsonResponse(200, scenario.body));
+    const call = await callTool(loadWorker(fetchStub).worker, bridgeEnv(), validArgs());
+    assert.equal(call.result.isError, true, scenario.name);
+    assert.equal(call.result.structuredContent.state, scenario.state, scenario.name);
+    assert.equal(call.result.structuredContent.applied, scenario.applied, scenario.name);
+    assert.equal(call.result.structuredContent.retryable, false, scenario.name);
+    assert.equal(call.result.structuredContent.reason_code, scenario.reason, scenario.name);
+    assert.equal(fetchStub.calls.length, 1, scenario.name);
+    assertNoSecrets(call.result);
+  }
 });
 
 test("provider NOT_APPLIED is a definitive non-effect", async () => {
@@ -784,7 +891,7 @@ test("network errors, aborts, oversized and malformed responses become UNKNOWN",
     { name: "abort", handler: () => { throw Object.assign(new Error("aborted"), { name: "AbortError" }); }, reason: "KERNEL_UNREACHABLE" },
     { name: "oversize", handler: () => jsonResponse(200, "x".repeat(20000)), reason: "KERNEL_RESPONSE_UNREADABLE" },
     { name: "non-json", handler: () => jsonResponse(200, "not json"), reason: "KERNEL_RESPONSE_INVALID" },
-    { name: "array", handler: () => jsonResponse(200, "[]"), reason: "KERNEL_RECEIPT_CORRELATION_MISMATCH" },
+    { name: "array", handler: () => jsonResponse(200, "[]"), reason: "KERNEL_RESPONSE_INVALID" },
     { name: "empty-object", handler: () => jsonResponse(200, "{}"), reason: "KERNEL_RECEIPT_CORRELATION_MISMATCH" },
     { name: "accepted-without-result", handler: () => jsonResponse(200, { request_id: "req-0001", status: "ACCEPTED", decision: "ALLOW", result: null }), reason: "KERNEL_EFFECT_UNKNOWN" },
   ];
@@ -799,6 +906,47 @@ test("network errors, aborts, oversized and malformed responses become UNKNOWN",
     assert.equal(call.result.structuredContent.retryable, false, scenario.name);
     assert.equal(fetchStub.calls.length, 1, scenario.name);
     assertNoSecrets(call.result);
+  }
+});
+
+test("HTTP 200 receipts that are not JSON objects stay UNKNOWN/KERNEL_RESPONSE_INVALID, are audited and never retried", async () => {
+  const scenarios = [
+    { name: "null", handler: () => jsonResponse(200, "null"), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "boolean-true", handler: () => jsonResponse(200, "true"), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "boolean-false", handler: () => jsonResponse(200, "false"), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "number", handler: () => jsonResponse(200, "42"), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "string", handler: () => jsonResponse(200, '"ok"'), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "empty-array", handler: () => jsonResponse(200, "[]"), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "array-of-objects", handler: () => jsonResponse(200, JSON.stringify([receipt()])), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "malformed", handler: () => jsonResponse(200, "not json"), reason: "KERNEL_RESPONSE_INVALID" },
+    { name: "oversized", handler: () => jsonResponse(200, "x".repeat(20000)), reason: "KERNEL_RESPONSE_UNREADABLE" },
+    { name: "wrong-id", handler: () => jsonResponse(200, receipt({ request_id: "req-spoofed" })), reason: "KERNEL_RECEIPT_CORRELATION_MISMATCH" },
+  ];
+  for (const scenario of scenarios) {
+    const fetchStub = stubFetch(scenario.handler);
+    const { worker } = loadWorker(fetchStub);
+    const db = makeDB(makeActor());
+    const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }), validArgs());
+    assert.equal(call.result.isError, true, scenario.name);
+    assert.equal(call.result.structuredContent.state, "UNKNOWN", scenario.name);
+    assert.equal(call.result.structuredContent.applied, null, scenario.name);
+    assert.equal(call.result.structuredContent.kernel_reached, null, scenario.name);
+    assert.equal(call.result.structuredContent.retryable, false, scenario.name);
+    assert.equal(call.result.structuredContent.reason_code, scenario.reason, scenario.name);
+    assert.equal(call.result.structuredContent.request_id, "req-0001", scenario.name);
+    assert.equal(call.result.content[0].text.includes("no label was added"), false, scenario.name);
+    assert.match(call.result.content[0].text, /inspect the issue and the kernel provider journal/, scenario.name);
+    assert.equal(fetchStub.calls.length, 1, scenario.name, "an unusable 200 receipt must not be retried");
+    assertNoSecrets(call.result);
+    const audits = auditWrites(db);
+    assert.equal(audits.length, 2, scenario.name);
+    assert.equal(audits[0].values[3], "kernel.issue_label.attempt", scenario.name);
+    assert.equal(audits[0].values[4], "req-0001", scenario.name);
+    assert.equal(audits[0].values[5], "ATTEMPTED", scenario.name);
+    assert.equal(audits[1].values[3], "kernel.issue_label.unknown", scenario.name);
+    assert.equal(audits[1].values[4], "req-0001", scenario.name);
+    assert.equal(audits[1].values[5], scenario.reason, scenario.name);
+    assertNoSecrets(audits);
   }
 });
 
