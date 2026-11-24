@@ -55,7 +55,7 @@ jobs:
             return Number(match[1]);
           };
           const tests=metric('tests'),passed=metric('pass'),failed=metric('fail'),cancelled=metric('cancelled');
-          if (tests < 27 || passed !== tests || failed !== 0 || cancelled !== 0) {
+          if (tests < 48 || passed !== tests || failed !== 0 || cancelled !== 0) {
             throw Error('Worker regression incomplete: '+JSON.stringify({tests,passed,failed,cancelled}));
           }
           console.log('Strict Worker regressions PASS: '+tests+' passed, zero failed or cancelled.');

@@ -107,7 +107,26 @@ function kernelBridgeConfig(env){
 function kernelBridgeVisible(env){return kernelBridgeConfig(env).ok}
 function visibleTools(env){const visible=kernelBridgeVisible(env);return tools.filter(t=>!kernelBridgeTool(t)||visible)}
 function kernelBridgeResult(value,isError){return isError?{content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value,isError:true}:result(value)}
-function kernelBridgeDenied(reason,requestId=null){return kernelBridgeResult({state:'DENIED',applied:false,kernel_reached:false,retryable:false,reason_code:reason,request_id:typeof requestId==='string'&&reqId(requestId)?requestId:null},true)}
+function kernelSafeAuditStatus(value){return typeof value==='string'&&/^[A-Z0-9_]{1,64}$/.test(value)?value:'UNKNOWN'}
+async function kernelAudit(env,actor,action,objectId,status){
+  if(!env?.EDGE_DB||typeof env.EDGE_DB.prepare!=='function')return false;
+  if(!actor||typeof actor.tenant_id!=='string'||typeof actor.id!=='string')return false;
+  if(!/^[a-z0-9_.]{1,64}$/.test(action)||!/^[A-Z0-9_]{1,64}$/.test(status))return false;
+  if(typeof objectId!=='string'||objectId.length<1||objectId.length>128)return false;
+  try{
+    const r=await env.EDGE_DB.prepare("INSERT INTO audit_events(id,tenant_id,agent_id,action,object_id,status,created_at) VALUES(?,?,?,?,?,?,?)")
+      .bind(crypto.randomUUID(),actor.tenant_id,actor.id,action,objectId,status,new Date().toISOString()).run();
+    return r?.meta?.changes===1;
+  }catch(e){return false}
+}
+function kernelBridgeDeniedValue(reason,requestId=null){return {state:'DENIED',applied:false,kernel_reached:false,retryable:false,reason_code:reason,request_id:typeof requestId==='string'&&reqId(requestId)?requestId:null}}
+async function kernelBridgeAuditedResult(env,actor,value,isError,auditObjectId){
+  const action='kernel.issue_label.'+String(value.state||'unknown').toLowerCase();
+  const status=value.state==='SUCCEEDED'?'OK':kernelSafeAuditStatus(value.reason_code||'UNKNOWN');
+  const ok=await kernelAudit(env,actor,action,auditObjectId,status);
+  if(!ok)return kernelBridgeResult({state:value.kernel_reached===false?'UNAVAILABLE':'UNKNOWN',applied:null,kernel_reached:value.kernel_reached??null,retryable:false,reason_code:'EDGE_AUDIT_UNAVAILABLE',request_id:typeof value.request_id==='string'&&reqId(value.request_id)?value.request_id:null,next:'do not retry; inspect the issue, the kernel provider journal and the Edge audit store'},true);
+  return kernelBridgeResult(value,isError);
+}
 function kernelSafeCode(value,allowed){return typeof value==='string'&&allowed.has(value)?value:null}
 function kernelSafeDetail(value){return typeof value==='string'&&/^[A-Z][A-Z0-9_]{2,63}$/.test(value)?value:null}
 function kernelSafeHash(value){return typeof value==='string'&&/^[0-9a-f]{64}$/.test(value)?value:null}
@@ -166,44 +185,52 @@ function kernelReceiptState(receipt){
   return 'UNKNOWN';
 }
 async function kernelIssueLabel(args,actor,env){
-  let correlationId=null;
+  let correlationId=null,auditObjectId=crypto.randomUUID(),attemptAudited=false;
   try{
+    if(args&&typeof args==='object'&&!Array.isArray(args)&&typeof args.request_id==='string'&&reqId(args.request_id)){correlationId=args.request_id;auditObjectId=args.request_id}
+    const attemptOk=await kernelAudit(env,actor,'kernel.issue_label.attempt',auditObjectId,'ATTEMPTED');
+    if(!attemptOk)return kernelBridgeResult({state:'UNAVAILABLE',applied:null,kernel_reached:false,retryable:false,reason_code:'EDGE_AUDIT_UNAVAILABLE',request_id:correlationId,next:'do not retry automatically; operator must verify the Edge audit store'},true);
+    attemptAudited=true;
     const config=kernelBridgeConfig(env);
-    if(!config.ok)return kernelBridgeDenied(config.reason);
-    if(!args||typeof args!=='object'||Array.isArray(args))return kernelBridgeDenied('INVALID_ARGUMENTS');
-    if(!kernelExactKeys(args,['issue_number','label','permit','request_id']))return kernelBridgeDenied('UNEXPECTED_ARGUMENT');
+    if(!config.ok)return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue(config.reason,correlationId),true,auditObjectId);
+    if(!args||typeof args!=='object'||Array.isArray(args))return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue('INVALID_ARGUMENTS'),true,auditObjectId);
+    if(!kernelExactKeys(args,['issue_number','label','permit','request_id']))return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue('UNEXPECTED_ARGUMENT',correlationId),true,auditObjectId);
     const {issue_number,label,permit,request_id}=args;
-    if(typeof request_id==='string'&&reqId(request_id))correlationId=request_id;
-    if(!Number.isSafeInteger(issue_number)||issue_number<1||issue_number>config.maxIssue)return kernelBridgeDenied('ISSUE_NUMBER_OUT_OF_RANGE',request_id);
-    if(typeof label!=='string'||!config.labels.has(label))return kernelBridgeDenied('LABEL_NOT_ALLOWLISTED',request_id);
-    if(typeof request_id!=='string'||!reqId(request_id))return kernelBridgeDenied('INVALID_REQUEST_ID',request_id);
+    if(!Number.isSafeInteger(issue_number)||issue_number<1||issue_number>config.maxIssue)return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue('ISSUE_NUMBER_OUT_OF_RANGE',correlationId),true,auditObjectId);
+    if(typeof label!=='string'||!config.labels.has(label))return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue('LABEL_NOT_ALLOWLISTED',correlationId),true,auditObjectId);
+    if(typeof request_id!=='string'||!reqId(request_id))return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue('INVALID_REQUEST_ID',correlationId),true,auditObjectId);
     const mapping=config.actors[actor.tenant_id+'/'+actor.id];
-    if(!mapping)return kernelBridgeDenied('AGENT_NOT_MAPPED',request_id);
+    if(!mapping)return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue('AGENT_NOT_MAPPED',correlationId),true,auditObjectId);
     const permitCheck=kernelValidatePermit(permit,mapping.actor,{issue_number,label});
-    if(!permitCheck.ok)return kernelBridgeDenied(permitCheck.reason,request_id);
+    if(!permitCheck.ok)return await kernelBridgeAuditedResult(env,actor,kernelBridgeDeniedValue(permitCheck.reason,correlationId),true,auditObjectId);
     const body={request_id,actor:mapping.actor,intent:'add one allowlisted label',tool_call:{name:KERNEL_ACTION,params:{issue_number,label}},params:{issue_number,label},permit};
     let response;
     try{
       response=await fetch(config.origin+'/submit',{method:'POST',redirect:'manual',signal:AbortSignal.timeout(KERNEL_TIMEOUT_MS),headers:{'content-type':'application/json',accept:'application/json',authorization:'Bearer '+mapping.token,'x-shards-gateway-identity':config.gatewayIdentity,'x-shards-gateway-token':config.gatewayToken,'cf-access-client-id':config.accessId,'cf-access-client-secret':config.accessSecret},body:JSON.stringify(body)});
     }catch(e){
-      return kernelBridgeResult({state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_UNREACHABLE',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true);
+      return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_UNREACHABLE',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
     }
-    if(response.status>=300&&response.status<400)return kernelBridgeResult({state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_REDIRECT_REFUSED',request_id,next:'do not retry; operator must verify the exact kernel origin'},true);
-    let text;try{text=await kernelReadCapped(response,KERNEL_MAX_RESPONSE_BYTES)}catch(e){return kernelBridgeResult({state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_RESPONSE_UNREADABLE',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true)}
-    if(response.status===401||response.status===404)return kernelBridgeResult({state:'UNAVAILABLE',applied:false,kernel_reached:true,retryable:false,reason_code:'KERNEL_AUTH_UNAVAILABLE',request_id,next:'operator must verify the kernel gateway identity, token and origin'},true);
-    if(response.status===400||response.status===403||response.status===409||response.status===413||response.status===422)return kernelBridgeResult({state:'DENIED',applied:false,kernel_reached:true,retryable:false,reason_code:'KERNEL_DENIED',request_id,next:'no label was added; request a new signed permit only after correcting the cause'},true);
-    if(response.status>=500||response.status===429)return kernelBridgeResult({state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_UNAVAILABLE',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true);
-    if(response.status!==200)return kernelBridgeResult({state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_UNEXPECTED_STATUS',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true);
-    let receipt;try{receipt=JSON.parse(text)}catch(e){return kernelBridgeResult({state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_RESPONSE_INVALID',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true)}
+    if(response.status>=300&&response.status<400)return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_REDIRECT_REFUSED',request_id,next:'do not retry; operator must verify the exact kernel origin'},true,auditObjectId);
+    let text;try{text=await kernelReadCapped(response,KERNEL_MAX_RESPONSE_BYTES)}catch(e){return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_RESPONSE_UNREADABLE',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId)}
+    if(response.status===401||response.status===404)return await kernelBridgeAuditedResult(env,actor,{state:'UNAVAILABLE',applied:false,kernel_reached:true,retryable:false,reason_code:'KERNEL_AUTH_UNAVAILABLE',request_id,next:'operator must verify the kernel gateway identity, token and origin'},true,auditObjectId);
+    if(response.status===400||response.status===403||response.status===409||response.status===413||response.status===422)return await kernelBridgeAuditedResult(env,actor,{state:'DENIED',applied:false,kernel_reached:true,retryable:false,reason_code:'KERNEL_DENIED',request_id,next:'no label was added; request a new signed permit only after correcting the cause'},true,auditObjectId);
+    if(response.status>=500||response.status===429)return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_UNAVAILABLE',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
+    if(response.status!==200)return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_UNEXPECTED_STATUS',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
+    let receipt;try{receipt=JSON.parse(text)}catch(e){return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_RESPONSE_INVALID',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId)}
+    if(typeof receipt.request_id!=='string'||receipt.request_id!==request_id)return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_RECEIPT_CORRELATION_MISMATCH',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
     const state=kernelReceiptState(receipt);
     const alreadyPresent=receipt.result&&typeof receipt.result==='object'&&receipt.result.already_present===true;
     const detail=kernelSafeDetail(receipt.result&&typeof receipt.result==='object'?receipt.result.detail:null);
-    const base={request_id,kernel_request_id:typeof receipt.request_id==='string'&&reqId(receipt.request_id)?receipt.request_id:null,kernel_status:kernelSafeCode(receipt.status,KERNEL_RECEIPT_STATUSES),kernel_decision:kernelSafeCode(receipt.decision,KERNEL_DECISIONS),kernel_evidence_hash:kernelSafeHash(receipt.evidence_hash),kernel_ts_ms:Number.isSafeInteger(receipt.ts_ms)?receipt.ts_ms:null};
-    if(state==='SUCCEEDED')return kernelBridgeResult({state:'SUCCEEDED',applied:true,already_present:alreadyPresent,provider_detail:detail,kernel_reached:true,retryable:false,reason_code:null,issue_number,label,...base,next:'label presence verified by the kernel provider read-back'},false);
-    if(state==='NOT_APPLIED')return kernelBridgeResult({state:'NOT_APPLIED',applied:false,already_present:false,provider_detail:detail,kernel_reached:true,retryable:false,reason_code:'PROVIDER_NOT_APPLIED',issue_number,label,...base,next:'no label was added; request a new signed permit only after correcting the cause'},true);
-    if(state==='DENIED')return kernelBridgeResult({state:'DENIED',applied:false,already_present:false,provider_detail:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_DENIED',issue_number,label,...base,next:'no label was added; request a new signed permit only after correcting the cause'},true);
-    return kernelBridgeResult({state:'UNKNOWN',applied:null,already_present:null,provider_detail:detail,kernel_reached:true,retryable:false,reason_code:'KERNEL_EFFECT_UNKNOWN',issue_number,label,...base,next:'do not retry; inspect the issue and the kernel provider journal'},true);
+    const base={request_id,kernel_request_id:receipt.request_id,kernel_status:kernelSafeCode(receipt.status,KERNEL_RECEIPT_STATUSES),kernel_decision:kernelSafeCode(receipt.decision,KERNEL_DECISIONS),kernel_evidence_hash:kernelSafeHash(receipt.evidence_hash),kernel_ts_ms:Number.isSafeInteger(receipt.ts_ms)?receipt.ts_ms:null};
+    if(state==='SUCCEEDED')return await kernelBridgeAuditedResult(env,actor,{state:'SUCCEEDED',applied:true,already_present:alreadyPresent,provider_detail:detail,kernel_reached:true,retryable:false,reason_code:null,issue_number,label,...base,next:'label presence verified by the kernel provider read-back'},false,auditObjectId);
+    if(state==='NOT_APPLIED')return await kernelBridgeAuditedResult(env,actor,{state:'NOT_APPLIED',applied:false,already_present:false,provider_detail:detail,kernel_reached:true,retryable:false,reason_code:'PROVIDER_NOT_APPLIED',issue_number,label,...base,next:'no label was added; request a new signed permit only after correcting the cause'},true,auditObjectId);
+    if(state==='DENIED')return await kernelBridgeAuditedResult(env,actor,{state:'DENIED',applied:false,already_present:false,provider_detail:null,kernel_reached:true,retryable:false,reason_code:'KERNEL_DENIED',issue_number,label,...base,next:'no label was added; request a new signed permit only after correcting the cause'},true,auditObjectId);
+    return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,already_present:null,provider_detail:detail,kernel_reached:true,retryable:false,reason_code:'KERNEL_EFFECT_UNKNOWN',issue_number,label,...base,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
   }catch(e){
+    if(attemptAudited){
+      const auditOk=await kernelAudit(env,actor,'kernel.issue_label.unknown',auditObjectId,'BRIDGE_INTERNAL_ERROR');
+      if(!auditOk)return kernelBridgeResult({state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'EDGE_AUDIT_UNAVAILABLE',request_id:correlationId,next:'do not retry; inspect the Edge audit store'},true);
+    }
     return kernelBridgeResult({state:'UNAVAILABLE',applied:null,kernel_reached:null,retryable:false,reason_code:'BRIDGE_INTERNAL_ERROR',request_id:correlationId,next:'do not retry automatically; operator must verify the bridge'},true);
   }
 }

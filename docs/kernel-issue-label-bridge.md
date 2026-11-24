@@ -79,10 +79,29 @@ The human approver, offline permit issuer, policy signer, kernel runtime,
 Edge Worker and agent are separate identities. An agent can request an action
 but cannot sign its own permit.
 
-The Edge records the authenticated request in its D1 activity table; the
-kernel's hash-chained audit and durable provider journal are the authoritative
-records of the requested effect. The Edge never logs the permit, kernel bearer,
-gateway token, Access secret or private origin.
+`authenticate()` updates `agent_connection_activity`
+(`last_authenticated_at`, `last_operation`) and `budget()` increments
+`route_budgets`; neither is a per-request history. For every call that reaches
+`kernelIssueLabel`, the Edge appends two sanitized `audit_events` rows:
+
+1. `kernel.issue_label.attempt` / `ATTEMPTED` **before forwarding**;
+2. `kernel.issue_label.<outcome>` / `<stable reason code>` after the result
+   (`succeeded`/`OK`, `denied`/`KERNEL_DENIED`, `unknown`/`KERNEL_EFFECT_UNKNOWN`,
+   `unavailable`/`KERNEL_AUTH_UNAVAILABLE`, and so on).
+
+If the pre-forward insert cannot commit, the bridge returns
+`UNAVAILABLE`/`EDGE_AUDIT_UNAVAILABLE` and does not forward. If the outcome
+insert cannot commit after a forward, it returns
+`UNKNOWN`/`EDGE_AUDIT_UNAVAILABLE`, never success, and does not retry. The audit
+rows contain only tenant, agent, action, request id, status and timestamp; they
+never contain the permit, kernel bearer, gateway token, Access secret or private
+origin. The kernel's hash-chained audit and durable provider journal remain
+authoritative for the effect.
+
+Scope and daily-budget denials are enforced by the generic private-tool path
+before `kernelIssueLabel`; they are visible in `agent_connection_activity` and
+the MCP response, but are not bridge-specific `audit_events` rows. This is a
+residual boundary and part of why the bridge remains disabled and NO-GO.
 
 ## Edge configuration
 
@@ -202,10 +221,15 @@ python3 scripts/kernel_bridge_provision.py \
 
 The script:
 
-- writes a JSON file with mode `0600` and refuses to overwrite without
-  `--force`;
+- writes atomically: a same-directory `O_EXCL|O_NOFOLLOW` temporary file with
+  mode `0600`, `fsync`, revalidation, then `os.replace`; a failed write leaves
+  the existing reviewed file byte-identical and removes the temporary file;
+- refuses to overwrite without `--force`, rejects symlinks (including dangling
+  symlinks), directories, non-regular files and output paths containing control
+  characters;
 - prints only the tenant, agent id, kernel actor, SHA-256 fingerprint, redacted
-  token (`edge-agent-alice.****`) and a verifier command;
+  token (`edge-agent-alice.****`) and a verifier command; the printed path is
+  shell-quoted and raw control sequences are never emitted;
 - never prints the bearer secret, never contacts the network and never writes
   to the Worker, D1, Cloudflare or the kernel.
 
@@ -339,14 +363,18 @@ Only a kernel-verified read-back is reported as success.
 | Redirect `3xx` | `UNKNOWN` | `null` | `false` | Not followed. |
 | Network error or timeout | `UNKNOWN` | `null` | `false` | Do not retry. |
 | Oversized, non-JSON or malformed receipt | `UNKNOWN` | `null` | `false` | Do not retry. |
+| `200` receipt missing or mismatching the submitted `request_id` | `UNKNOWN` | `null` | `false` | `KERNEL_RECEIPT_CORRELATION_MISMATCH`; do not retry. |
+| Pre-forward audit insert unavailable | `UNAVAILABLE` | `null` | `false` | `EDGE_AUDIT_UNAVAILABLE`; no forward. |
+| Outcome audit insert unavailable after forwarding | `UNKNOWN` | `null` | `false` | `EDGE_AUDIT_UNAVAILABLE`; never success, no retry. |
 
 Every result includes the client `request_id`, safe kernel status/decision
-values, a kernel evidence hash when present, and a stable reason code. It never
-includes the kernel bearer, gateway token, Access secret, actor map, private
-origin or raw kernel error. A `UNKNOWN` result is not success and must be
-reconciled by a human against GitHub and the kernel provider journal. The same
-permit is denied as a replay if it is reused; a new action needs a new signed
-permit and a new request id.
+values, a kernel evidence hash when present, and a stable reason code. A `200`
+receipt must echo the exact submitted `request_id`; a missing or different id is
+`UNKNOWN`, never success. The result never includes the kernel bearer, gateway
+token, Access secret, actor map, private origin or raw kernel error. A `UNKNOWN`
+result is not success and must be reconciled by a human against GitHub and the
+kernel provider journal. The same permit is denied as a replay if it is reused;
+a new action needs a new signed permit and a new request id.
 
 ## Deployment gates
 
@@ -411,14 +439,29 @@ The bridge tests prove:
 - kernel denials, provider `NOT_APPLIED`, provider `UNKNOWN`, authentication
   failures, redirects, 5xx, 429, network errors, aborts, oversized responses
   and non-JSON responses are reported truthfully;
+- a `200` receipt with a missing or wrong `request_id` is `UNKNOWN` and is not
+  retried; the exact matching id is required for success;
+- every bridge call that reaches `kernelIssueLabel` writes an `attempt` audit
+  row before forwarding and an outcome row for success, denial or unknown;
+- a pre-forward audit failure returns `UNAVAILABLE` with zero dispatch, and a
+  post-forward audit failure returns `UNKNOWN`, never success and no retry;
+- audit rows contain only tenant, agent, action, request id, status and
+  timestamp, with no permit, bearer, Access secret or private origin;
 - no bridge credential or private origin appears in a result or text;
 - existing public and protected tools are unchanged;
 - a verified Cloudflare Access human identity cannot call the tool.
 
+The provisioning tests prove atomic replacement, byte-identical preservation of
+the reviewed file on injected write/fsync/replace failures, rotation, rejection
+of symlink and dangling-symlink targets, rejection of control-character output
+paths, no temporary secret leaks, and shell-safe verifier rendering.
+
 They do **not** prove a real kernel #162 process, a real Cloudflare
 Tunnel/Access origin, a real GitHub label write or read-back, an ARM64 systemd
 start or a live Worker deployment. Those remain **BLOCKED** on the Oracle host,
-the private ingress and the kernel merge.
+the private ingress and the kernel merge. Scope and daily-budget denials are
+enforced by the generic private-tool path before `kernelIssueLabel`; they are
+not bridge-specific audit rows, which is a documented residual boundary.
 
 ## Rollback
 

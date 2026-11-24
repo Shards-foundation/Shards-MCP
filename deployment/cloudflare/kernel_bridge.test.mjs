@@ -40,7 +40,8 @@ function makeActor(overrides = {}) {
   };
 }
 
-function makeDB(actor, { auth = true, writes = [] } = {}) {
+function makeDB(actor, { auth = true, writes = [], failAudit = false } = {}) {
+  let auditRuns = 0;
   return {
     writes,
     prepare(sql) {
@@ -54,6 +55,12 @@ function makeDB(actor, { auth = true, writes = [] } = {}) {
             },
             async run() {
               writes.push({ sql, values });
+              if (/audit_events/.test(sql)) {
+                auditRuns += 1;
+                if (failAudit === true || (failAudit === "after-first" && auditRuns > 1)) {
+                  throw new Error("audit unavailable");
+                }
+              }
               return { meta: { changes: 1 } };
             },
             async all() { return { results: [] }; },
@@ -186,6 +193,10 @@ function assertNoSecrets(value) {
   for (const secret of [GATEWAY_TOKEN, ACCESS_SECRET, ACTOR_TOKEN, SMCP_TOKEN, KERNEL_ORIGIN]) {
     assert.equal(text.includes(secret), false, "tool result must not contain a bridge credential or private origin");
   }
+}
+
+function auditWrites(db) {
+  return db.writes.filter((write) => /audit_events/.test(write.sql));
 }
 
 function assertDeniedWithoutDispatch(result, expectedReason) {
@@ -582,8 +593,8 @@ test("network errors, aborts, oversized and malformed responses become UNKNOWN",
     { name: "abort", handler: () => { throw Object.assign(new Error("aborted"), { name: "AbortError" }); }, reason: "KERNEL_UNREACHABLE" },
     { name: "oversize", handler: () => jsonResponse(200, "x".repeat(20000)), reason: "KERNEL_RESPONSE_UNREADABLE" },
     { name: "non-json", handler: () => jsonResponse(200, "not json"), reason: "KERNEL_RESPONSE_INVALID" },
-    { name: "array", handler: () => jsonResponse(200, "[]"), reason: "KERNEL_EFFECT_UNKNOWN" },
-    { name: "empty-object", handler: () => jsonResponse(200, "{}"), reason: "KERNEL_EFFECT_UNKNOWN" },
+    { name: "array", handler: () => jsonResponse(200, "[]"), reason: "KERNEL_RECEIPT_CORRELATION_MISMATCH" },
+    { name: "empty-object", handler: () => jsonResponse(200, "{}"), reason: "KERNEL_RECEIPT_CORRELATION_MISMATCH" },
     { name: "accepted-without-result", handler: () => jsonResponse(200, { request_id: "req-0001", status: "ACCEPTED", decision: "ALLOW", result: null }), reason: "KERNEL_EFFECT_UNKNOWN" },
   ];
   for (const scenario of scenarios) {
@@ -598,6 +609,148 @@ test("network errors, aborts, oversized and malformed responses become UNKNOWN",
     assert.equal(fetchStub.calls.length, 1, scenario.name);
     assertNoSecrets(call.result);
   }
+});
+
+test("a success receipt with a wrong request_id is UNKNOWN, audited, and not retried", async () => {
+  const fetchStub = stubFetch(() => jsonResponse(200, receipt({ request_id: "req-spoofed" })));
+  const { worker } = loadWorker(fetchStub);
+  const db = makeDB(makeActor());
+  const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }), validArgs());
+  assert.equal(call.result.isError, true);
+  assert.equal(call.result.structuredContent.state, "UNKNOWN");
+  assert.equal(call.result.structuredContent.reason_code, "KERNEL_RECEIPT_CORRELATION_MISMATCH");
+  assert.equal(call.result.structuredContent.request_id, "req-0001");
+  assert.equal(call.result.structuredContent.applied, null);
+  assert.equal(call.result.structuredContent.retryable, false);
+  assert.equal(fetchStub.calls.length, 1, "a mismatched receipt must not be retried");
+  assert.equal(JSON.stringify(call.result).includes("req-spoofed"), false);
+  assertNoSecrets(call.result);
+  const audits = auditWrites(db);
+  assert.equal(audits.length, 2);
+  assert.equal(audits[0].values[3], "kernel.issue_label.attempt");
+  assert.equal(audits[0].values[4], "req-0001");
+  assert.equal(audits[0].values[5], "ATTEMPTED");
+  assert.equal(audits[1].values[3], "kernel.issue_label.unknown");
+  assert.equal(audits[1].values[4], "req-0001");
+  assert.equal(audits[1].values[5], "KERNEL_RECEIPT_CORRELATION_MISMATCH");
+  assertNoSecrets(audits);
+  assert.equal(JSON.stringify(audits).includes("permit"), false);
+  assert.equal(JSON.stringify(audits).includes("signature"), false);
+});
+
+test("a success receipt with a missing request_id is UNKNOWN, audited, and not retried", async () => {
+  const missing = receipt();
+  delete missing.request_id;
+  const fetchStub = stubFetch(() => jsonResponse(200, missing));
+  const { worker } = loadWorker(fetchStub);
+  const db = makeDB(makeActor());
+  const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }), validArgs());
+  assert.equal(call.result.isError, true);
+  assert.equal(call.result.structuredContent.state, "UNKNOWN");
+  assert.equal(call.result.structuredContent.reason_code, "KERNEL_RECEIPT_CORRELATION_MISMATCH");
+  assert.equal(call.result.structuredContent.request_id, "req-0001");
+  assert.equal(call.result.structuredContent.applied, null);
+  assert.equal(call.result.structuredContent.retryable, false);
+  assert.equal(fetchStub.calls.length, 1, "a receipt without correlation must not be retried");
+  assertNoSecrets(call.result);
+  const audits = auditWrites(db);
+  assert.equal(audits.length, 2);
+  assert.equal(audits[1].values[3], "kernel.issue_label.unknown");
+  assert.equal(audits[1].values[4], "req-0001");
+  assert.equal(audits[1].values[5], "KERNEL_RECEIPT_CORRELATION_MISMATCH");
+  assertNoSecrets(audits);
+});
+
+test("a success receipt with the exact request_id remains SUCCEEDED and audited", async () => {
+  const fetchStub = stubFetch(() => jsonResponse(200, receipt()));
+  const { worker } = loadWorker(fetchStub);
+  const db = makeDB(makeActor());
+  const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }), validArgs());
+  assert.equal(call.result.isError, false);
+  assert.equal(call.result.structuredContent.state, "SUCCEEDED");
+  assert.equal(call.result.structuredContent.kernel_request_id, "req-0001");
+  assert.equal(fetchStub.calls.length, 1);
+  const audits = auditWrites(db);
+  assert.equal(audits.length, 2);
+  assert.equal(audits[0].values[3], "kernel.issue_label.attempt");
+  assert.equal(audits[0].values[5], "ATTEMPTED");
+  assert.equal(audits[1].values[3], "kernel.issue_label.succeeded");
+  assert.equal(audits[1].values[4], "req-0001");
+  assert.equal(audits[1].values[5], "OK");
+  assertNoSecrets(audits);
+});
+
+test("a pre-forward denial writes attempt and denied audit rows without dispatch", async () => {
+  const fetchStub = stubFetch(() => { throw new Error("must not fetch"); });
+  const { worker } = loadWorker(fetchStub);
+  const db = makeDB(makeActor());
+  const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }), validArgs({ label: "not-allowed" }));
+  assert.equal(call.result.isError, true);
+  assert.equal(call.result.structuredContent.state, "DENIED");
+  assert.equal(call.result.structuredContent.reason_code, "LABEL_NOT_ALLOWLISTED");
+  assert.equal(fetchStub.calls.length, 0);
+  const audits = auditWrites(db);
+  assert.equal(audits.length, 2);
+  assert.equal(audits[0].values[3], "kernel.issue_label.attempt");
+  assert.equal(audits[0].values[5], "ATTEMPTED");
+  assert.equal(audits[1].values[3], "kernel.issue_label.denied");
+  assert.equal(audits[1].values[4], "req-0001");
+  assert.equal(audits[1].values[5], "LABEL_NOT_ALLOWLISTED");
+  assertNoSecrets(audits);
+  assert.equal(JSON.stringify(audits).includes("permit"), false);
+});
+
+test("a pre-forward audit failure returns UNAVAILABLE and dispatches nothing", async () => {
+  const fetchStub = stubFetch(() => { throw new Error("must not fetch"); });
+  const { worker } = loadWorker(fetchStub);
+  const db = makeDB(makeActor(), { failAudit: true });
+  const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }), validArgs());
+  assert.equal(call.result.isError, true);
+  assert.equal(call.result.structuredContent.state, "UNAVAILABLE");
+  assert.equal(call.result.structuredContent.reason_code, "EDGE_AUDIT_UNAVAILABLE");
+  assert.equal(call.result.structuredContent.kernel_reached, false);
+  assert.equal(call.result.structuredContent.retryable, false);
+  assert.equal(fetchStub.calls.length, 0, "no forwarding may occur without the prerequisite audit");
+  const audits = auditWrites(db);
+  assert.equal(audits.length, 1, "only the failed attempt insert is observed");
+  assert.equal(audits[0].values[3], "kernel.issue_label.attempt");
+  assertNoSecrets(call.result);
+});
+
+test("a post-forward audit failure returns UNKNOWN, does not retry, and never reports success", async () => {
+  const fetchStub = stubFetch(() => jsonResponse(200, receipt()));
+  const { worker } = loadWorker(fetchStub);
+  const db = makeDB(makeActor(), { failAudit: "after-first" });
+  const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }), validArgs());
+  assert.equal(call.result.isError, true);
+  assert.equal(call.result.structuredContent.state, "UNKNOWN");
+  assert.equal(call.result.structuredContent.reason_code, "EDGE_AUDIT_UNAVAILABLE");
+  assert.equal(call.result.structuredContent.kernel_reached, true);
+  assert.equal(call.result.structuredContent.applied, null);
+  assert.equal(call.result.structuredContent.retryable, false);
+  assert.equal(fetchStub.calls.length, 1, "the kernel must not be called twice");
+  const audits = auditWrites(db);
+  assert.equal(audits.length, 2);
+  assert.equal(audits[1].values[3], "kernel.issue_label.succeeded");
+  assert.equal(audits[1].values[5], "OK");
+  assertNoSecrets(call.result);
+});
+
+test("a pre-forward denial result-audit failure returns UNAVAILABLE and dispatches nothing", async () => {
+  const fetchStub = stubFetch(() => { throw new Error("must not fetch"); });
+  const { worker } = loadWorker(fetchStub);
+  const db = makeDB(makeActor(), { failAudit: "after-first" });
+  const call = await callTool(worker, bridgeEnv({ EDGE_DB: db }), validArgs({ label: "not-allowed" }));
+  assert.equal(call.result.isError, true);
+  assert.equal(call.result.structuredContent.state, "UNAVAILABLE");
+  assert.equal(call.result.structuredContent.reason_code, "EDGE_AUDIT_UNAVAILABLE");
+  assert.equal(call.result.structuredContent.kernel_reached, false);
+  assert.equal(fetchStub.calls.length, 0);
+  const audits = auditWrites(db);
+  assert.equal(audits.length, 2);
+  assert.equal(audits[1].values[3], "kernel.issue_label.denied");
+  assert.equal(audits[1].values[5], "LABEL_NOT_ALLOWLISTED");
+  assertNoSecrets(call.result);
 });
 
 test("the result and text never contain bridge credentials or the private origin", async () => {

@@ -18,6 +18,7 @@ import os
 import re
 import secrets
 import shlex
+import stat
 import sys
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -63,27 +64,116 @@ def build_entry(tenant: str, agent_id: str, actor: str) -> dict:
     }
 
 
-def write_private(path: Path, data: dict, *, force: bool) -> None:
-    if path.exists():
-        if not force:
-            raise FileExistsError(f"refusing to overwrite {path}; use --force after review")
-        if path.is_dir():
-            raise IsADirectoryError(f"{path} is a directory")
-        path.unlink()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags, 0o600)
+def _validate_output_path(path: Path) -> None:
+    text = str(path)
+    if not text or any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise ValueError("output path must be non-empty and contain no control characters")
+
+
+def _lstat_or_none(path: Path):
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def _check_target(path: Path, *, force: bool) -> None:
+    info = _lstat_or_none(path)
+    if info is None:
+        return
+    display = shlex.quote(str(path))
+    if stat.S_ISLNK(info.st_mode):
+        raise OSError(f"refusing to write through symlink {display}")
+    if stat.S_ISDIR(info.st_mode):
+        raise IsADirectoryError(f"{display} is a directory")
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError(f"refusing to replace non-regular file {display}")
+    if not force:
+        raise FileExistsError(f"refusing to overwrite {display}; use --force after review")
+
+
+def _fsync_directory(parent: Path) -> None:
+    try:
+        fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def write_private(path: Path, data: dict, *, force: bool) -> None:
+    """Write atomically without ever unlinking the reviewed file first.
+
+    The new credential is written to a same-directory 0600 temporary file,
+    fsynced, and only then atomically renamed over the target. A failed write
+    leaves the previous file byte-identical. Symlinks, including dangling
+    symlinks, are rejected before any write.
+    """
+    _validate_output_path(path)
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    if not parent.is_dir():
+        raise NotADirectoryError(f"{shlex.quote(str(parent))} is not a directory")
+    _check_target(path, force=force)
+
+    temp_path = None
+    fd = None
+    try:
+        for _ in range(32):
+            candidate = parent / (".kernel-bridge-credential-" + secrets.token_hex(16) + ".tmp")
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            try:
+                fd = os.open(candidate, flags, 0o600)
+                temp_path = candidate
+                break
+            except FileExistsError:
+                continue
+        if fd is None or temp_path is None:
+            raise OSError("could not create a unique temporary credential file")
+
+        os.fchmod(fd, 0o600)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = None
+        with handle:
             json.dump(data, handle, indent=2, sort_keys=True)
             handle.write("\n")
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
-    os.chmod(path, 0o600)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        # Revalidate immediately before the atomic replace. A symlink that
+        # appeared after the first check is rejected rather than replaced.
+        _check_target(path, force=force)
+        os.replace(temp_path, path)
+        temp_path = None
+        _fsync_directory(parent)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
 
 
 def verifier_command(path: Path) -> str:
+    _validate_output_path(path)
     code = (
         "import json,os;from pathlib import Path;"
         "from shards_kernel.integrations.auth import agent_token_kdf,resolve_agent_pepper;"
@@ -109,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    print(f"wrote: {args.out} (mode 0600)")
+    print(f"wrote: {shlex.quote(str(args.out))} (mode 0600)")
     print(f"tenant: {args.tenant}")
     print(f"agent_id: {args.agent_id}")
     print(f"kernel_actor: {args.actor}")
