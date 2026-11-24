@@ -222,7 +222,7 @@ test("kernel bridge is disabled by default and hidden from discovery", async () 
   const { worker } = loadWorker(fetchStub);
   const env = { EDGE_DB: makeDB(makeActor()) };
 
-  assert.equal((await listTools(worker, env)).length, 7);
+  assert.equal((await listTools(worker, env)).length, 8);
   assert.equal((await listTools(worker, env, authHeaders())).includes(BRIDGE_TOOL), false);
 
   const status = await worker.fetch(new Request("https://mcp.shardsinc.co.uk/api/status"), env);
@@ -249,7 +249,7 @@ test("kernel bridge is discoverable only for a verified actor with the new scope
   assert.equal((await listTools(worker, unscoped, authHeaders())).includes(BRIDGE_TOOL), false);
 
   const anonymous = await listTools(worker, scoped);
-  assert.equal(anonymous.length, 7);
+  assert.equal(anonymous.length, 8);
   assert.equal(anonymous.includes(BRIDGE_TOOL), false);
   assert.equal(fetchStub.calls.length, 0);
 });
@@ -962,6 +962,7 @@ test("existing public and protected tools remain unchanged when the bridge is en
   assert.deepEqual(anonymous, [
     "shards_gateway_status", "shards_systems_catalog", "shards_dns_lookup",
     "shards_skill_search", "shards_skill_read", "shards_repo_document", "shards_open_prs",
+    "shards_issue_read",
   ]);
 
   const observer = bridgeEnv({}, makeActor({ scopes: JSON.stringify(["agent:identity"]) }));

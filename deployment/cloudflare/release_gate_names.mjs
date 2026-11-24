@@ -6,6 +6,7 @@ export const PUBLIC_NAMES = [
   'shards_skill_read',
   'shards_repo_document',
   'shards_open_prs',
+  'shards_issue_read',
 ].sort();
 
 export const BASE_PRIVATE_NAMES = [
@@ -37,13 +38,13 @@ export function assertExactNames(declared, discovered, bridgeMode) {
   const declaredTools = Array.isArray(declared) ? declared : [];
   const discoveredTools = Array.isArray(discovered) ? discovered : [];
   if (!sameNames(declaredTools.filter(t => t.public).map(t => t.name), PUBLIC_NAMES)) {
-    throw new Error('API status public tools not exactly seven');
+    throw new Error('API status public tools not exactly eight');
   }
   if (!sameNames(declaredTools.filter(t => !t.public).map(t => t.name), expectedPrivate)) {
     throw new Error(`API status protected tools not exactly ${expectedPrivate.length} for bridge ${bridgeMode}`);
   }
   if (!sameNames(discoveredTools.map(t => t.name), PUBLIC_NAMES)) {
-    throw new Error('Unauthenticated discovery not exactly seven public tools');
+    throw new Error('Unauthenticated discovery not exactly eight public tools');
   }
   return { publicNames: PUBLIC_NAMES, expectedPrivate, bridgeMode };
 }

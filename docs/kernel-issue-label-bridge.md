@@ -447,7 +447,7 @@ The bridge must remain disabled until every gate below is satisfied.
    10 protected tools instead of 9. The manual production release gate now takes
    `bridge_mode`: `disabled` (default) expects exactly 9 and rejects the bridge;
    `enabled` expects exactly 10 including `shards_kernel_issue_label`. Both modes
-   always require exactly 7 public tools and no protected tool in anonymous
+   always require exactly 8 public tools and no protected tool in anonymous
    discovery. Select `enabled` only in the approved enablement rollout; leaving
    the bridge disabled keeps the current 9-tool live gate valid.
 6. **No paid resources.** This change provisions no Cloudflare, Oracle, GitHub

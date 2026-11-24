@@ -45,7 +45,7 @@ test("official MCP TypeScript SDK v1 exchanges real protocol messages with a sig
     await client.connect(transport);
     const tools=await client.listTools();
     const names=tools.tools.map(t=>t.name);
-    assert.deepEqual(names,["shards_gateway_status","shards_systems_catalog","shards_dns_lookup","shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs","shards_user_identity"]);
+    assert.deepEqual(names,["shards_gateway_status","shards_systems_catalog","shards_dns_lookup","shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs","shards_issue_read","shards_user_identity"]);
     const who=await client.callTool({name:"shards_user_identity",arguments:{}});
     assert.equal(who.isError,false);
     const verified=who.structuredContent||JSON.parse(who.content[0].text);

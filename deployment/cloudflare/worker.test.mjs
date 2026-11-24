@@ -138,7 +138,7 @@ test("Lab diagnostics do not require credentials; protected MCP tools still fail
   const listed = (await discovery.json()).result.tools.map(x => x.name);
   assert.deepEqual(Array.from(listed), [
     "shards_gateway_status", "shards_systems_catalog", "shards_dns_lookup",
-    "shards_skill_search", "shards_skill_read", "shards_repo_document", "shards_open_prs"
+    "shards_skill_search", "shards_skill_read", "shards_repo_document", "shards_open_prs", "shards_issue_read"
   ]);
   const forbidden = await worker.fetch(post("tools/call", {name:"shards_task_create", arguments:{}}), {});
   const body = await forbidden.json();
@@ -328,7 +328,7 @@ test("Managed OAuth endpoint fails closed without configuration or signed Access
   const fake=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":"invalid.jwt.token"}}),configured);
   assert.equal(fake.status,401);
   const oldPublic=await worker.fetch(post("tools/list"),configured);
-  assert.equal((await oldPublic.json()).result.tools.length,7);
+  assert.equal((await oldPublic.json()).result.tools.length,8);
 });
 
 test("Separate signed Cloudflare identity can discover only public and session tools", async () => {
@@ -379,7 +379,7 @@ test("Separate signed Cloudflare identity can discover only public and session t
     const visible=(await list.json()).result.tools.map(x=>x.name);
     assert.deepEqual(Array.from(visible),[
       "shards_gateway_status","shards_systems_catalog","shards_dns_lookup",
-      "shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs","shards_user_identity"
+      "shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs","shards_issue_read","shards_user_identity"
     ]);
     const identity=await worker.fetch(signedPost("tools/call",{name:"shards_user_identity",arguments:{}},good),env);
     const own=(await identity.json()).result.structuredContent;
@@ -500,8 +500,8 @@ test("Unauthenticated connect origin exposes discoverable metadata without grant
 test("Public research tools are discoverable, and private task tools remain hidden", async () => {
   const response=await worker.fetch(post("tools/list"),{});
   const names=(await response.json()).result.tools.map(t=>t.name);
-  for(const name of ["shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs"])assert.ok(names.includes(name),name);
-  assert.equal(names.length,7);
+  for(const name of ["shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs","shards_issue_read"])assert.ok(names.includes(name),name);
+  assert.equal(names.length,8);
   assert.equal(names.includes("shards_task_create"),false);
 });
 
@@ -513,7 +513,10 @@ test("Public research rejects traversal, arbitrary repos and malformed searches 
     {name:"shards_skill_search",arguments:{query:"security",limit:100}},
     {name:"shards_repo_document",arguments:{repository:"other-org/private",document:"README.md"}},
     {name:"shards_repo_document",arguments:{repository:"Shards-MCP",document:"../../.env"}},
-    {name:"shards_open_prs",arguments:{repository:"somebody-else"}}
+    {name:"shards_open_prs",arguments:{repository:"somebody-else"}},
+    {name:"shards_issue_read",arguments:{repository:"Shards-MCP",issue_number:0}},
+    {name:"shards_issue_read",arguments:{repository:"Shards-MCP",issue_number:1.5}},
+    {name:"shards_issue_read",arguments:{repository:"other-org/private",issue_number:53}}
   ];
   let dbHits=0;
   const env={EDGE_DB:{prepare(){dbHits++;throw Error("Malformed arguments must not consume D1 quota");}}};
@@ -624,7 +627,7 @@ test("supplied invalid credentials cannot downgrade handshake or discovery to an
   }
   const anonymous=await worker.fetch(post("tools/list"),{});
   assert.equal(anonymous.status,200);
-  assert.equal((await anonymous.json()).result.tools.length,7);
+  assert.equal((await anonymous.json()).result.tools.length,8);
 });
 
 test("bearer discovery is scoped, refreshed per request, and storage failure denies", async () => {
@@ -684,4 +687,127 @@ test("/mcp 401 metadata fallback never advertises /connect or an Access issuer",
       }
     }
   }
+});
+
+function issueSandbox(mockFetch){
+  const fake={Request,Response,Headers,URL,TextEncoder,TextDecoder,crypto:webcrypto,AbortSignal,atob,fetch:mockFetch};
+  vm.runInNewContext(src.replace("export default {", "globalThis.__edge = {"),fake,{filename:"worker.js"});
+  return fake.__edge;
+}
+function budgetEnv(writes){
+  return {EDGE_DB:{prepare(sql){assert.match(sql,/route_budgets/);return {bind(...values){writes.push(values);return {run:async()=>({meta:{changes:1}})}}}}}};
+}
+
+test("shards_issue_read is discoverable and reads one exact public issue from a fixed origin", async () => {
+  const calls=[],budgetWrites=[];
+  const longBody="B".repeat(7000);
+  const issue={number:53,title:"Read-only issue tool",state:"open",labels:[{name:"enhancement"},{name:"security"},{name:""},null,{name:42}],html_url:"https://github.com/Shards-foundation/Shards-MCP/issues/53",user:{login:"octo-user"},comments:4,created_at:"2026-11-20T10:00:00Z",updated_at:"2026-11-21T11:00:00Z",body:longBody};
+  const edge=issueSandbox(async (url,options)=>{
+    calls.push({url:String(url),options});
+    return new Response(JSON.stringify(issue),{status:200,headers:{"content-type":"application/json"}});
+  });
+  const env=budgetEnv(budgetWrites);
+  const names=(await (await edge.fetch(post("tools/list"),{})).json()).result.tools.map(t=>t.name);
+  assert.ok(names.includes("shards_issue_read"),"Public discovery must list the issue tool");
+  assert.equal(names.length,8);
+  const response=await edge.fetch(post("tools/call",{name:"shards_issue_read",arguments:{repository:"Shards-MCP",issue_number:53}},{"cf-connecting-ip":"203.0.113.9"}),env);
+  const payload=await response.json();
+  assert.equal(payload.result.isError,false,JSON.stringify(payload.result));
+  const out=payload.result.structuredContent;
+  assert.equal(out.repository,"Shards-MCP");
+  assert.equal(out.number,53);
+  assert.equal(out.title,"Read-only issue tool");
+  assert.equal(out.state,"open");
+  assert.deepEqual(Array.from(out.labels),["enhancement","security"]);
+  assert.equal(out.url,"https://github.com/Shards-foundation/Shards-MCP/issues/53");
+  assert.equal(out.created_at,"2026-11-20T10:00:00Z");
+  assert.equal(out.updated_at,"2026-11-21T11:00:00Z");
+  assert.equal(out.is_pull_request,false);
+  assert.equal(out.type,"issue");
+  assert.equal(out.body_excerpt.length,6000,"Body excerpt must be bounded to 6000 characters");
+  assert.equal(out.body_truncated,true);
+  assert.match(out.warning,/Untrusted public GitHub content/);
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].url,"https://api.github.com/repos/Shards-foundation/Shards-MCP/issues/53","Only the fixed approved origin and path may be requested");
+  assert.equal(calls[0].options.redirect,"manual");
+  assert.ok(calls[0].options.signal instanceof AbortSignal,"Upstream reads require a timeout signal");
+  assert.equal(calls[0].options.cf?.cacheEverything,true);
+  assert.equal(calls[0].options.cf?.cacheTtl,300);
+  assert.equal(JSON.stringify(calls[0].options.headers||{}).toLowerCase().includes("authorization"),false,"No credential may be attached");
+  assert.equal(JSON.stringify(payload).includes("smcp_"),false,"No agent token may leak into output");
+  assert.equal(JSON.stringify(payload).includes("github_pat_"),false,"No GitHub token may leak into output");
+  assert.equal(budgetWrites.length,2,"Each call charges caller and global D1 budgets");
+  assert.match(budgetWrites[0][1],/^public:shards_issue_read:caller:[a-f0-9]{24}$/);
+  assert.equal(budgetWrites[0][2],300);
+  assert.equal(budgetWrites[1][1],"shards_issue_read");
+  assert.equal(budgetWrites[1][2],6000);
+});
+
+test("shards_issue_read rejects invalid arguments before budgets or network", async () => {
+  let dbHits=0,fetches=0;
+  const env={EDGE_DB:{prepare(){dbHits++;throw Error("Malformed arguments must not consume D1 quota");}}};
+  const edge=issueSandbox(async()=>{fetches++;throw Error("Network must not be called");});
+  const invalid=[
+    {repository:"Shards-MCP",issue_number:0},
+    {repository:"Shards-MCP",issue_number:-5},
+    {repository:"Shards-MCP",issue_number:1000001},
+    {repository:"Shards-MCP",issue_number:1.5},
+    {repository:"Shards-MCP",issue_number:"53"},
+    {repository:"Shards-MCP",issue_number:true},
+    {repository:"Shards-MCP"},
+    {issue_number:53},
+    {repository:"other-org/private",issue_number:53},
+    {repository:"Shards-MCP",issue_number:53,url:"https://evil.example/"},
+    {repository:"Shards-MCP",issue_number:53,ref:"main"}
+  ];
+  for(const args of invalid){
+    const body=await (await edge.fetch(post("tools/call",{name:"shards_issue_read",arguments:args}),env)).json();
+    assert.equal(body.result.isError,true,JSON.stringify(args));
+    assert.match(body.result.content[0].text,/Invalid public research arguments/);
+  }
+  assert.equal(dbHits,0,"Rejected arguments must not touch D1");
+  assert.equal(fetches,0,"Rejected arguments must not call the network");
+});
+
+test("shards_issue_read reports GitHub 404, rate limiting and 3xx redirects explicitly", async () => {
+  const cases=[
+    [404,/GitHub issue not found: Shards-MCP#999 \(HTTP 404\)/],
+    [403,/GitHub upstream rate limit or access denial \(HTTP 403\)/],
+    [429,/GitHub upstream rate limit or access denial \(HTTP 429\)/],
+    [302,/Public source unavailable \(HTTP 302\)/]
+  ];
+  for(const [status,pattern] of cases){
+    const calls=[];
+    const edge=issueSandbox(async (url,options)=>{
+      calls.push({url:String(url),options});
+      return new Response(status===302?"":JSON.stringify({message:"denied"}),{status,headers:status===302?{location:"https://evil.example/x"}:{"content-type":"application/json"}});
+    });
+    const body=await (await edge.fetch(post("tools/call",{name:"shards_issue_read",arguments:{repository:"Shards-MCP",issue_number:999}}),budgetEnv([]))).json();
+    assert.equal(body.result.isError,true,String(status));
+    assert.match(body.result.content[0].text,pattern);
+    assert.equal(body.result.structuredContent,undefined,"A failed lookup must not return silent success data");
+    assert.equal(calls.length,1,"A redirect must never be followed");
+    assert.equal(calls[0].options.redirect,"manual");
+  }
+});
+
+test("shards_issue_read flags pull requests and enforces the bounded read", async () => {
+  const pr={number:55,title:"feat: edge",state:"open",labels:[],html_url:"https://github.com/Shards-foundation/Shards-MCP/pull/55",user:{login:"author"},comments:0,created_at:"2026-11-24T00:00:00Z",updated_at:"2026-11-24T01:00:00Z",body:"short body",pull_request:{url:"https://api.github.com/repos/Shards-foundation/Shards-MCP/pulls/55"}};
+  const edge=issueSandbox(async ()=>new Response(JSON.stringify(pr),{status:200,headers:{"content-type":"application/json"}}));
+  const out=(await (await edge.fetch(post("tools/call",{name:"shards_issue_read",arguments:{repository:"Shards-MCP",issue_number:55}}),budgetEnv([]))).json()).result.structuredContent;
+  assert.equal(out.is_pull_request,true);
+  assert.equal(out.type,"pull_request");
+  assert.match(out.warning,/pull request, not a plain issue/);
+  assert.equal(out.body_excerpt,"short body");
+  assert.equal(out.body_truncated,false);
+
+  const oversized=issueSandbox(async ()=>new Response("{}",{status:200,headers:{"content-length":"999999999"}}));
+  const bigBody=await (await oversized.fetch(post("tools/call",{name:"shards_issue_read",arguments:{repository:"Shards-MCP",issue_number:55}}),budgetEnv([]))).json();
+  assert.equal(bigBody.result.isError,true);
+  assert.match(bigBody.result.content[0].text,/Public source too large/);
+
+  const mismatch=issueSandbox(async ()=>new Response(JSON.stringify({...pr,number:999}),{status:200,headers:{"content-type":"application/json"}}));
+  const mismatchBody=await (await mismatch.fetch(post("tools/call",{name:"shards_issue_read",arguments:{repository:"Shards-MCP",issue_number:55}}),budgetEnv([]))).json();
+  assert.equal(mismatchBody.result.isError,true);
+  assert.match(mismatchBody.result.content[0].text,/Unexpected public issue response/);
 });
