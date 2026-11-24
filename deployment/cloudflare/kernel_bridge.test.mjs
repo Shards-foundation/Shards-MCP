@@ -603,12 +603,12 @@ test("issue number and label bounds are enforced before dispatch", async () => {
   assert.equal(fetchStub.calls.length, 0);
 });
 
-test("a valid request dispatches once with the mapped actor and returns a redacted success", async () => {
+test("a valid request dispatches once with the mapped actor and fixed service User-Agent and returns a redacted success", async () => {
   const fetchStub = stubFetch(() => jsonResponse(200, receipt()));
   const { worker } = loadWorker(fetchStub);
   const env = bridgeEnv();
   const args = validArgs();
-  const call = await callTool(worker, env, args);
+  const call = await callTool(worker, env, args, { ...authHeaders(), "user-agent": "mcp-test-client/1.0" });
 
   assert.equal(call.result.isError, false);
   assert.equal(call.result.structuredContent.state, "SUCCEEDED");
@@ -630,6 +630,7 @@ test("a valid request dispatches once with the mapped actor and returns a redact
   assert.equal(dispatched.init.signal.aborted, false);
 
   const headers = new Headers(dispatched.init.headers);
+  assert.equal(headers.get("user-agent"), "Shards-MCP-Kernel-Bridge");
   assert.equal(headers.get("x-shards-gateway-identity"), GATEWAY_IDENTITY);
   assert.equal(headers.get("x-shards-gateway-token"), GATEWAY_TOKEN);
   assert.equal(headers.get("cf-access-client-id"), ACCESS_ID);

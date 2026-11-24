@@ -239,7 +239,7 @@ async function kernelIssueLabel(args,actor,env){
     const body={request_id,actor:mapping.actor,intent:'add one allowlisted label',tool_call:{name:KERNEL_ACTION,params:{issue_number,label}},params:{issue_number,label},permit};
     let response;
     try{
-      response=await fetch(config.origin+'/submit',{method:'POST',redirect:'manual',signal:AbortSignal.timeout(KERNEL_TIMEOUT_MS),headers:{'content-type':'application/json',accept:'application/json',authorization:'Bearer '+mapping.token,'x-shards-gateway-identity':config.gatewayIdentity,'x-shards-gateway-token':config.gatewayToken,'cf-access-client-id':config.accessId,'cf-access-client-secret':config.accessSecret},body:JSON.stringify(body)});
+      response=await fetch(config.origin+'/submit',{method:'POST',redirect:'manual',signal:AbortSignal.timeout(KERNEL_TIMEOUT_MS),headers:{'content-type':'application/json',accept:'application/json','user-agent':'Shards-MCP-Kernel-Bridge',authorization:'Bearer '+mapping.token,'x-shards-gateway-identity':config.gatewayIdentity,'x-shards-gateway-token':config.gatewayToken,'cf-access-client-id':config.accessId,'cf-access-client-secret':config.accessSecret},body:JSON.stringify(body)});
     }catch(e){
       return await kernelBridgeAuditedResult(env,actor,{state:'UNKNOWN',applied:null,kernel_reached:null,retryable:false,reason_code:'KERNEL_UNREACHABLE',request_id,next:'do not retry; inspect the issue and the kernel provider journal'},true,auditObjectId);
     }
