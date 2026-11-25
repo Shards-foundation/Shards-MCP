@@ -260,7 +260,6 @@ class StateStore:
     def prepare(self) -> None:
         if not self.enabled:
             return
-        assert self.directory is not None
         try:
             self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             info = os.lstat(self.directory)
@@ -281,7 +280,6 @@ class StateStore:
     def acquire_process_lock(self) -> None:
         if not self.enabled or self._lock_fd is not None:
             return
-        assert self._lock_path is not None
         flags = (
             os.O_RDWR
             | os.O_CREAT
@@ -331,7 +329,6 @@ class StateStore:
     def is_pending(self) -> bool:
         if not self.enabled:
             return False
-        assert self._marker_path is not None
         try:
             os.lstat(self._marker_path)
         except FileNotFoundError:
@@ -344,7 +341,6 @@ class StateStore:
     def read_marker(self) -> dict[str, Any] | None:
         if not self.is_pending():
             return None
-        assert self._marker_path is not None
         try:
             data = _read_private_file(
                 self._marker_path,
@@ -365,7 +361,6 @@ class StateStore:
     def begin(self, namespace: str) -> dict[str, Any]:
         if not self.enabled:
             return {}
-        assert self.directory is not None and self._marker_path is not None
         record = {
             "schema": STATE_SCHEMA,
             "state": "pending_dispatch",
@@ -420,7 +415,6 @@ class StateStore:
     def clear(self) -> None:
         if not self.enabled:
             return
-        assert self._marker_path is not None
         try:
             os.unlink(self._marker_path)
         except FileNotFoundError:
@@ -430,7 +424,6 @@ class StateStore:
         self._fsync_directory()
 
     def _fsync_directory(self) -> None:
-        assert self.directory is not None
         flags = (
             os.O_RDONLY
             | getattr(os, "O_DIRECTORY", 0)
