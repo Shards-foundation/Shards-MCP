@@ -207,6 +207,7 @@ class Harness:
         max_response_bytes: int = adapter.MAX_RESPONSE_BYTES,
         redirect_port: int = 1,
         reply: str = "fake upstream reply",
+        state_dir: Path | None = None,
     ):
         self.secret = b"test-adapter-secret-" + secrets.token_urlsafe(32).encode()
         self.gateway_token = "test-gateway-token-" + secrets.token_urlsafe(24)
@@ -228,6 +229,7 @@ class Harness:
             max_message_chars=max_message_chars,
             max_message_bytes=max_message_bytes,
             max_response_bytes=max_response_bytes,
+            state_dir=state_dir,
         )
         self.server = adapter.LobbyHTTPServer(
             self.config, adapter.make_handler(self.config)
@@ -1081,6 +1083,329 @@ class AdapterHttpTests(unittest.TestCase):
         self.assertEqual(self.harness.upstream.calls, 1)
         self.assertNotIn(self.harness.token(), output.getvalue())
         self.assertNotIn(self.harness.gateway_token, output.getvalue())
+
+
+class PendingDispatchGateTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self.directory.name) / "state"
+        self.harness: Harness | None = None
+
+    def tearDown(self):
+        if self.harness is not None:
+            self.harness.close()
+        self.directory.cleanup()
+
+    def _start(self, **kwargs) -> Harness:
+        self.harness = Harness(state_dir=self.state_dir, **kwargs)
+        return self.harness
+
+    def _body(self, message: str = "hello", conversation_id: str | None = None):
+        return {
+            "conversation_id": conversation_id or str(uuid.uuid4()),
+            "message": message,
+        }
+
+    def _marker(self) -> Path:
+        return self.state_dir / adapter.PENDING_MARKER_NAME
+
+    def _raw_chat(self, harness: Harness, body: dict) -> bytes:
+        raw = json.dumps(body).encode()
+        return (
+            f"POST /chat HTTP/1.1\r\nHost: 127.0.0.1:{harness.port}\r\n"
+            f"Authorization: Bearer {harness.token()}\r\n"
+            f"Content-Type: application/json\r\nContent-Length: {len(raw)}\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode() + raw
+
+    def _await(self, predicate, timeout: float = 3.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return predicate()
+
+    def test_config_defaults_to_the_owner_only_state_directory(self):
+        config = adapter.AdapterConfig(
+            adapter_secret=b"a" * 64,
+            gateway_token="gateway-token-" + "x" * 24,
+        )
+        self.assertEqual(config.state_dir, adapter.default_state_dir())
+        self.assertIsNotNone(config.state_dir)
+
+    def test_success_clears_marker_and_health_stays_ok(self):
+        harness = self._start()
+        status, body, raw, _ = harness.request(
+            "POST", "/chat", self._body("hello gate"), token=harness.token()
+        )
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(body["reply"], "fake upstream reply")
+        self.assertFalse(self._marker().exists())
+        status, body, raw, _ = harness.request(
+            "GET", "/health", token=harness.token()
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body, {"status": "ok", "model": adapter.MODEL})
+
+    def test_unknown_timeout_retains_marker_and_blocks_all_conversations(self):
+        harness = self._start(upstream_delay=0.5, upstream_timeout=0.1)
+        conversation_id = str(uuid.uuid4())
+        status, body, raw, _ = harness.request(
+            "POST",
+            "/chat",
+            self._body("CANARY-PROMPT-TEXT", conversation_id),
+            token=harness.token(),
+        )
+        self.assertEqual(status, 504)
+        self.assertEqual(body, {"error": "upstream timeout", "outcome": "unknown"})
+        marker = self._marker()
+        self.assertTrue(marker.exists())
+        self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+        marker_raw = marker.read_bytes()
+        self.assertNotIn(b"CANARY-PROMPT-TEXT", marker_raw)
+        self.assertNotIn(conversation_id.encode(), marker_raw)
+        self.assertNotIn(harness.secret, marker_raw)
+        self.assertNotIn(harness.gateway_token.encode(), marker_raw)
+        self.assertIn(b"pending_dispatch", marker_raw)
+
+        status, health, health_raw, _ = harness.request(
+            "GET", "/health", token=harness.token()
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(health["status"], "blocked")
+        self.assertEqual(health["model"], adapter.MODEL)
+        self.assertIn("reason", health)
+        for forbidden in (
+            conversation_id.encode(),
+            harness.secret,
+            harness.gateway_token.encode(),
+        ):
+            self.assertNotIn(forbidden, health_raw)
+
+        status, body, raw, _ = harness.request(
+            "POST",
+            "/chat",
+            self._body("different conversation", str(uuid.uuid4())),
+            token=harness.token(),
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(body, {"error": "reconciliation required"})
+        self.assertEqual(harness.upstream.calls, 1)
+
+    def test_upstream_error_retains_marker(self):
+        harness = self._start(upstream_mode="error")
+        status, body, raw, _ = harness.request(
+            "POST", "/chat", self._body(), token=harness.token()
+        )
+        self.assertEqual(status, 502)
+        self.assertEqual(
+            body, {"error": "upstream rejected request", "outcome": "unknown"}
+        )
+        self.assertNotIn(b"UPSTREAM-INTERNAL-VALUE", raw)
+        self.assertTrue(self._marker().exists())
+        self.assertEqual(harness.upstream.calls, 1)
+
+    def test_blocked_chat_still_requires_authentication(self):
+        harness = self._start(upstream_delay=0.5, upstream_timeout=0.1)
+        harness.request("POST", "/chat", self._body(), token=harness.token())
+        self.assertTrue(self._marker().exists())
+        status, body, _, _ = harness.request("POST", "/chat", self._body())
+        self.assertEqual(status, 401)
+        self.assertEqual(harness.upstream.calls, 1)
+
+    def test_validation_error_writes_no_marker(self):
+        harness = self._start()
+        status, _, _, _ = harness.request(
+            "POST",
+            "/chat",
+            {"conversation_id": "not-a-uuid", "message": "x"},
+            token=harness.token(),
+        )
+        self.assertEqual(status, 400)
+        self.assertFalse(self._marker().exists())
+        self.assertEqual(harness.upstream.calls, 0)
+
+    def test_not_dispatched_clears_marker_and_allows_next_chat(self):
+        harness = self._start()
+        with mock.patch.object(
+            http.client.HTTPConnection,
+            "connect",
+            side_effect=ConnectionRefusedError,
+        ):
+            status, _, raw = raw_request(
+                harness.port, self._raw_chat(harness, self._body())
+            )
+        self.assertEqual(status, 502)
+        self.assertEqual(
+            json.loads(raw),
+            {"error": "upstream unavailable", "outcome": "not_dispatched"},
+        )
+        self.assertFalse(self._marker().exists())
+        status, body, raw, _ = harness.request(
+            "POST", "/chat", self._body("after"), token=harness.token()
+        )
+        self.assertEqual(status, 200, raw)
+        self.assertFalse(self._marker().exists())
+
+    def test_concurrent_second_request_is_busy_not_blocked(self):
+        harness = self._start(upstream_delay=0.4)
+        result: list[tuple[int, dict | None, bytes, dict]] = []
+
+        def first_request() -> None:
+            result.append(
+                harness.request("POST", "/chat", self._body(), token=harness.token())
+            )
+
+        worker = threading.Thread(target=first_request, daemon=True)
+        worker.start()
+        self.assertTrue(
+            self._await(lambda: harness.upstream.calls == 1),
+            "first request never reached the fake upstream",
+        )
+        self.assertTrue(self._marker().exists())
+        status, health, _, _ = harness.request(
+            "GET", "/health", token=harness.token()
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(health, {"status": "ok", "model": adapter.MODEL})
+        status, body, _, _ = harness.request(
+            "POST",
+            "/chat",
+            self._body("overlap", str(uuid.uuid4())),
+            token=harness.token(),
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(body, {"error": "busy"})
+        worker.join(timeout=5)
+        self.assertEqual(result[0][0], 200)
+        self.assertFalse(self._marker().exists())
+        self.assertEqual(harness.upstream.calls, 1)
+
+    def test_crash_marker_blocks_a_new_adapter_until_reconcile(self):
+        store = adapter.StateStore(self.state_dir)
+        store.prepare()
+        store.acquire_process_lock()
+        store.begin(adapter.conversation_namespace(str(uuid.uuid4())))
+        store.release_process_lock()
+        self.assertTrue(self._marker().exists())
+
+        harness = self._start()
+        status, body, _, _ = harness.request(
+            "GET", "/health", token=harness.token()
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(body["status"], "blocked")
+        status, body, _, _ = harness.request(
+            "POST", "/chat", self._body(), token=harness.token()
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(body, {"error": "reconciliation required"})
+        self.assertEqual(harness.upstream.calls, 0)
+
+    def test_restart_retains_marker_and_reconcile_is_explicit(self):
+        harness = self._start(upstream_delay=0.5, upstream_timeout=0.1)
+        harness.request("POST", "/chat", self._body(), token=harness.token())
+        self.assertTrue(self._marker().exists())
+        harness.close()
+        self.harness = None
+
+        output = io.StringIO()
+        with (
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(output),
+        ):
+            code = adapter.main(["reconcile", "--state-dir", str(self.state_dir)])
+        self.assertEqual(code, 2)
+        self.assertTrue(self._marker().exists())
+        self.assertIn("confirm-upstream-inspected", output.getvalue())
+
+        harness = self._start()
+        status, body, _, _ = harness.request(
+            "POST", "/chat", self._body(), token=harness.token()
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(body, {"error": "reconciliation required"})
+        self.assertEqual(harness.upstream.calls, 0)
+        harness.close()
+        self.harness = None
+
+        with (
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(output),
+        ):
+            code = adapter.main(
+                [
+                    "reconcile",
+                    "--state-dir",
+                    str(self.state_dir),
+                    "--confirm-upstream-inspected",
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertFalse(self._marker().exists())
+
+        harness = self._start()
+        status, body, raw, _ = harness.request(
+            "POST", "/chat", self._body("resumed"), token=harness.token()
+        )
+        self.assertEqual(status, 200, raw)
+        self.assertFalse(self._marker().exists())
+
+    def test_reconcile_refuses_while_adapter_holds_the_lock(self):
+        harness = self._start(upstream_delay=0.5, upstream_timeout=0.1)
+        harness.request("POST", "/chat", self._body(), token=harness.token())
+        self.assertTrue(self._marker().exists())
+        output = io.StringIO()
+        with (
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(output),
+        ):
+            code = adapter.main(
+                [
+                    "reconcile",
+                    "--state-dir",
+                    str(self.state_dir),
+                    "--confirm-upstream-inspected",
+                ]
+            )
+        self.assertEqual(code, 2)
+        self.assertTrue(self._marker().exists())
+        self.assertIn("another adapter", output.getvalue())
+
+    def test_competing_adapter_same_state_dir_is_refused(self):
+        harness = self._start()
+        with self.assertRaises(adapter.StateError):
+            adapter.LobbyHTTPServer(
+                harness.config, adapter.make_handler(harness.config)
+            )
+        status, _, _, _ = harness.request(
+            "GET", "/health", token=harness.token()
+        )
+        self.assertEqual(status, 200)
+
+    def test_state_directory_with_group_access_is_rejected(self):
+        self.state_dir.mkdir(parents=True)
+        self.state_dir.chmod(0o755)
+        store = adapter.StateStore(self.state_dir)
+        with self.assertRaises(adapter.ConfigError):
+            store.prepare()
+
+    def test_client_disconnect_after_dispatch_clears_on_known_completion(self):
+        harness = self._start(upstream_delay=0.2)
+        request = self._raw_chat(harness, self._body("disconnect"))
+        with socket.create_connection(
+            ("127.0.0.1", harness.port), timeout=2
+        ) as sock:
+            sock.sendall(request)
+            # Close before reading the reply: the upstream run still completes.
+        self.assertTrue(
+            self._await(
+                lambda: harness.upstream.calls == 1 and not self._marker().exists()
+            ),
+            "known completion did not clear the marker",
+        )
+        self.assertFalse(self._marker().exists())
 
 
 if __name__ == "__main__":

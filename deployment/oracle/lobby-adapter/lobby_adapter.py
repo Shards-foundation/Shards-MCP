@@ -9,6 +9,7 @@ returns either credential.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import hmac
 import http.client
@@ -47,6 +48,11 @@ REQUEST_TIMEOUT = 10.0
 UPSTREAM_TIMEOUT = 30.0
 MAX_SECRET_BYTES = 512
 MAX_CONFIG_BYTES = 64 * 1024
+MAX_MARKER_BYTES = 4 * 1024
+
+STATE_SCHEMA = 1
+PENDING_MARKER_NAME = "pending-dispatch.json"
+STATE_LOCK_NAME = "adapter.lock"
 
 _UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -61,6 +67,14 @@ _GATEWAY_TOKEN_PATHS = (("gateway", "auth", "token"), ("gateway", "token"))
 
 class ConfigError(RuntimeError):
     """Startup failure whose message never includes a credential value."""
+
+
+class StateError(ConfigError):
+    """Local pending-dispatch state failure; the message is sanitised."""
+
+
+class StateBlocked(StateError):
+    """A pending dispatch marker already exists; chat must stay blocked."""
 
 
 class RequestRejected(Exception):
@@ -84,6 +98,10 @@ def default_secret_file() -> Path:
 
 def default_openclaw_config() -> Path:
     return Path.home() / ".openclaw" / "openclaw.json"
+
+
+def default_state_dir() -> Path:
+    return Path.home() / ".openclaw" / "lobby-adapter-state"
 
 
 def _read_private_file(path: Path, *, max_bytes: int, label: str) -> bytes:
@@ -218,8 +236,225 @@ def load_gateway_token(path: Path | str) -> str:
     return token
 
 
+class StateStore:
+    """Owner-only durable pending-dispatch gate.
+
+    A marker is recorded durably before an upstream dispatch and removed only
+    after a validated completion or a definitive not-dispatched result. Every
+    other outcome keeps the marker so later chats fail closed until a local
+    operator reconciles the upstream run explicitly. No prompt, raw
+    conversation UUID, or credential is stored.
+    """
+
+    def __init__(self, directory: Path | None):
+        self.enabled = directory is not None
+        self.directory = Path(directory) if directory is not None else None
+        self._marker_path = (
+            self.directory / PENDING_MARKER_NAME if self.directory is not None else None
+        )
+        self._lock_path = (
+            self.directory / STATE_LOCK_NAME if self.directory is not None else None
+        )
+        self._lock_fd: int | None = None
+
+    def prepare(self) -> None:
+        if not self.enabled:
+            return
+        assert self.directory is not None
+        try:
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            info = os.lstat(self.directory)
+        except OSError:
+            raise ConfigError("cannot create the adapter state directory") from None
+        if not stat.S_ISDIR(info.st_mode):
+            raise ConfigError("adapter state directory must be a real directory")
+        if info.st_uid != os.geteuid():
+            raise ConfigError(
+                "adapter state directory must be owned by the current user"
+            )
+        if info.st_mode & 0o077:
+            raise ConfigError(
+                "adapter state directory must not be accessible by group or others "
+                "(chmod 700)"
+            )
+
+    def acquire_process_lock(self) -> None:
+        if not self.enabled or self._lock_fd is not None:
+            return
+        assert self._lock_path is not None
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            fd = os.open(self._lock_path, flags, 0o600)
+        except OSError:
+            raise ConfigError("cannot open the adapter state lock file") from None
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise ConfigError("adapter state lock must be a regular file")
+            if info.st_uid != os.geteuid():
+                raise ConfigError(
+                    "adapter state lock must be owned by the current user"
+                )
+            if info.st_mode & 0o077:
+                raise ConfigError(
+                    "adapter state lock must not be accessible by group or others "
+                    "(chmod 600)"
+                )
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise StateError(
+                    "another adapter or reconcile process is using the state "
+                    "directory"
+                ) from None
+        except BaseException:
+            os.close(fd)
+            raise
+        self._lock_fd = fd
+
+    def release_process_lock(self) -> None:
+        fd, self._lock_fd = self._lock_fd, None
+        if fd is None:
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+    def is_pending(self) -> bool:
+        if not self.enabled:
+            return False
+        assert self._marker_path is not None
+        try:
+            os.lstat(self._marker_path)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            # An uninspectable marker must fail closed, never allow chat.
+            return True
+        return True
+
+    def read_marker(self) -> dict[str, Any] | None:
+        if not self.is_pending():
+            return None
+        assert self._marker_path is not None
+        try:
+            data = _read_private_file(
+                self._marker_path,
+                max_bytes=MAX_MARKER_BYTES,
+                label="pending dispatch marker",
+            )
+            record = json.loads(
+                data.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_pairs,
+                parse_constant=_reject_constant,
+            )
+        except (ConfigError, UnicodeDecodeError, ValueError, RecursionError):
+            return {"state": "pending_dispatch", "unreadable": True}
+        if not isinstance(record, dict):
+            return {"state": "pending_dispatch", "unreadable": True}
+        return record
+
+    def begin(self, namespace: str) -> dict[str, Any]:
+        if not self.enabled:
+            return {}
+        assert self.directory is not None and self._marker_path is not None
+        record = {
+            "schema": STATE_SCHEMA,
+            "state": "pending_dispatch",
+            "dispatch_id": secrets.token_hex(16),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "conversation_namespace": namespace,
+        }
+        raw = json.dumps(record, ensure_ascii=True, separators=(",", ":")).encode(
+            "ascii"
+        )
+        temporary = self.directory / (".pending-" + secrets.token_hex(8) + ".tmp")
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            fd = os.open(temporary, flags, 0o600)
+        except OSError:
+            raise StateError("cannot create the pending dispatch marker") from None
+        try:
+            written = 0
+            while written < len(raw):
+                written += os.write(fd, raw[written:])
+            os.fsync(fd)
+        except OSError:
+            os.close(fd)
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise StateError("cannot write the pending dispatch marker") from None
+        os.close(fd)
+        try:
+            # link() is atomic and create-if-absent, so a crash cannot publish
+            # a partial marker and a second writer cannot clobber a pending one.
+            os.link(temporary, self._marker_path)
+        except FileExistsError:
+            raise StateBlocked("a pending dispatch marker already exists") from None
+        except OSError:
+            raise StateError("cannot publish the pending dispatch marker") from None
+        finally:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+        self._fsync_directory()
+        return record
+
+    def clear(self) -> None:
+        if not self.enabled:
+            return
+        assert self._marker_path is not None
+        try:
+            os.unlink(self._marker_path)
+        except FileNotFoundError:
+            return
+        except OSError:
+            raise StateError("cannot clear the pending dispatch marker") from None
+        self._fsync_directory()
+
+    def _fsync_directory(self) -> None:
+        assert self.directory is not None
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            fd = os.open(self.directory, flags)
+        except OSError:
+            raise StateError("cannot open the adapter state directory") from None
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
 @dataclass(frozen=True)
 class AdapterConfig:
+    """Immutable adapter limits.
+
+    ``state_dir`` defaults to the owner-only pending-dispatch directory so the
+    gate is on by default. ``None`` disables it and is reserved for isolated
+    in-process tests that never dispatch through a real deployment entry point.
+    """
+
     adapter_secret: bytes = field(repr=False)
     gateway_token: str = field(repr=False)
     bind_host: str = BIND_HOST
@@ -234,8 +469,13 @@ class AdapterConfig:
     max_message_bytes: int = MAX_MESSAGE_BYTES
     max_response_bytes: int = MAX_RESPONSE_BYTES
     max_concurrency: int = MAX_CONCURRENCY
+    state_dir: Path | None = field(default_factory=default_state_dir)
 
     def __post_init__(self) -> None:
+        if self.state_dir is not None:
+            if not isinstance(self.state_dir, (str, os.PathLike)):
+                raise ValueError("state_dir must be a filesystem path")
+            object.__setattr__(self, "state_dir", Path(self.state_dir))
         if self.bind_host != BIND_HOST:
             raise ValueError("bind host is fixed to 127.0.0.1")
         if self.upstream_host != UPSTREAM_HOST:
@@ -701,6 +941,18 @@ def make_handler(config: AdapterConfig):
             if self.path == "/health":
                 if not self._authorized():
                     return self._reject(401, "unauthorized")
+                if (
+                    self.server.state.is_pending()
+                    and not self.server.dispatch_inflight.is_set()
+                ):
+                    return self._respond(
+                        503,
+                        {
+                            "status": "blocked",
+                            "model": MODEL,
+                            "reason": "pending upstream dispatch requires local reconciliation",
+                        },
+                    )
                 return self._respond(200, {"status": "ok", "model": MODEL})
             if self.path == "/chat":
                 return self._reject(405, "method not allowed")
@@ -764,19 +1016,36 @@ def make_handler(config: AdapterConfig):
             namespace = conversation_namespace(conversation_id)
             if not self.server.slots.acquire(blocking=False):
                 raise RequestRejected(503, "busy")
+            state = self.server.state
             try:
-                reply = call_upstream(config, namespace, message)
-            except UpstreamFailure:
-                raise
-            except Exception:
-                raise UpstreamFailure(502, "upstream unavailable") from None
+                # A marker observed while holding the single chat slot belongs
+                # to an earlier ambiguous or crashed dispatch, never to this one.
+                if state.is_pending():
+                    raise RequestRejected(503, "reconciliation required")
+                try:
+                    state.begin(namespace)
+                except StateBlocked:
+                    raise RequestRejected(503, "reconciliation required") from None
+                self.server.dispatch_inflight.set()
+                try:
+                    reply = call_upstream(config, namespace, message)
+                    if any(
+                        credential in reply or credential in conversation_id
+                        for credential in known_credentials
+                    ):
+                        raise UpstreamFailure(502, "invalid upstream response")
+                except UpstreamFailure as exc:
+                    if exc.outcome == "not_dispatched":
+                        state.clear()
+                    raise
+                except Exception:
+                    raise UpstreamFailure(502, "upstream unavailable") from None
+                # Completion is known here, before any client delivery, so a
+                # later client disconnect cannot leave a false pending marker.
+                state.clear()
             finally:
+                self.server.dispatch_inflight.clear()
                 self.server.slots.release()
-            if any(
-                credential in reply or credential in conversation_id
-                for credential in known_credentials
-            ):
-                raise UpstreamFailure(502, "invalid upstream response")
             self._respond(
                 200, {"conversation_id": conversation_id, "reply": reply}
             )
@@ -793,7 +1062,21 @@ class LobbyHTTPServer(ThreadingHTTPServer):
         self.config = config
         self.slots = threading.BoundedSemaphore(config.max_concurrency)
         self.connection_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
-        super().__init__((config.bind_host, config.bind_port), handler_class)
+        self.dispatch_inflight = threading.Event()
+        self.state = StateStore(config.state_dir)
+        self.state.prepare()
+        self.state.acquire_process_lock()
+        try:
+            super().__init__((config.bind_host, config.bind_port), handler_class)
+        except BaseException:
+            self.state.release_process_lock()
+            raise
+
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            self.state.release_process_lock()
 
     def process_request(self, request, client_address) -> None:
         if not self.connection_slots.acquire(blocking=False):
@@ -829,13 +1112,87 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--openclaw-config", type=Path, default=default_openclaw_config()
     )
+    serve.add_argument(
+        "--state-dir", type=Path, default=default_state_dir()
+    )
     init_secret = subparsers.add_parser(
         "init-secret", help="create a new mode-0600 adapter secret"
     )
     init_secret.add_argument(
         "--secret-file", type=Path, default=default_secret_file()
     )
+    reconcile = subparsers.add_parser(
+        "reconcile",
+        help="clear a pending dispatch marker after a local operator inspection",
+    )
+    reconcile.add_argument(
+        "--state-dir", type=Path, default=default_state_dir()
+    )
+    reconcile.add_argument(
+        "--confirm-upstream-inspected",
+        action="store_true",
+        help="confirm the upstream run and its effects were checked locally",
+    )
     return parser
+
+
+def _safe_field(value: Any, pattern: str) -> str:
+    if isinstance(value, str) and re.fullmatch(pattern, value):
+        return value
+    return "unavailable"
+
+
+def reconcile_pending_dispatch(state_dir: Path, confirmed: bool) -> int:
+    """Local-only recovery. It refuses to run while an adapter holds the lock."""
+    store = StateStore(state_dir)
+    try:
+        store.prepare()
+        store.acquire_process_lock()
+    except ConfigError as exc:
+        print(f"lobby-adapter: {exc}", file=sys.stderr)
+        return 2
+    try:
+        if not store.is_pending():
+            print("no pending dispatch marker; nothing to reconcile")
+            return 0
+        record = store.read_marker() or {}
+        print("pending upstream dispatch marker present")
+        if record.get("unreadable"):
+            print("  marker content is unreadable; treating it as an ambiguous dispatch")
+        else:
+            print(
+                "  dispatch_id: "
+                + _safe_field(record.get("dispatch_id"), r"[0-9a-f]{32}")
+            )
+            print(
+                "  created_at: "
+                + _safe_field(record.get("created_at"), r"[0-9T:Z-]{10,32}")
+            )
+            print(
+                "  conversation_namespace: "
+                + _safe_field(
+                    record.get("conversation_namespace"), r"lobby-[0-9a-f]{32}"
+                )
+            )
+        print("  Inspect the upstream run and its effects before clearing this marker.")
+        print(
+            "  The adapter cannot prove that an ambiguous upstream run was "
+            "cancelled or had no effect."
+        )
+        if not confirmed:
+            print(
+                "  Re-run with --confirm-upstream-inspected to clear the marker.",
+                file=sys.stderr,
+            )
+            return 2
+        store.clear()
+        print("pending dispatch marker cleared")
+        return 0
+    except ConfigError as exc:
+        print(f"lobby-adapter: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        store.release_process_lock()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -848,10 +1205,15 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(f"created {path} with mode 0600; secret value not printed")
         return 0
+    if args.command == "reconcile":
+        return reconcile_pending_dispatch(
+            args.state_dir, args.confirm_upstream_inspected
+        )
     try:
         config = AdapterConfig(
             adapter_secret=load_adapter_secret(args.secret_file),
             gateway_token=load_gateway_token(args.openclaw_config),
+            state_dir=args.state_dir,
         )
         server = LobbyHTTPServer(config, make_handler(config))
     except (ConfigError, ValueError, OSError) as exc:
@@ -864,6 +1226,13 @@ def main(argv: list[str] | None = None) -> int:
         f"model {MODEL}",
         flush=True,
     )
+    if server.state.is_pending():
+        print(
+            "lobby-adapter: pending upstream dispatch requires local "
+            "reconciliation; chat is blocked",
+            file=sys.stderr,
+            flush=True,
+        )
     try:
         server.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:
