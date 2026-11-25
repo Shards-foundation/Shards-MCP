@@ -987,7 +987,7 @@ async function hubRegistryBridge(request, env) {
     return pub({error:'Agent Hub operator access is not configured'}, 503);
   }
   const action = request.method + ' ' + path;
-  if (action === 'GET /session' || action === 'GET /runtime-ticket' || action === 'POST /rotate') {
+  if (action === 'GET /session' || action === 'GET /runtime-ticket' || action === 'GET /dashboard' || action === 'POST /rotate') {
     let claims;
     try { claims = await accessClaims(request, env, aud); }
     catch { return pub({error:'Sign in to the Agent Hub again'}, 401); }
@@ -996,6 +996,16 @@ async function hubRegistryBridge(request, env) {
         .bind(await digest(claims.sub)).first();
       if (account?.deleted_at) return pub({error:'Operator account deleted'},410);
       if (action === 'GET /session') return pub({authenticated:true});
+      if (action === 'GET /dashboard') {
+        const owner = await digest(claims.sub);
+        const [directory, work] = await Promise.all([
+          env.EDGE_DB.prepare("SELECT a.id,a.name,a.client,a.scopes,a.created_at,a.disabled_at,c.last_authenticated_at,(SELECT MAX(k.expires_at) FROM access_tokens k WHERE k.agent_id=a.id AND k.revoked_at IS NULL) AS credential_expires_at FROM agents a LEFT JOIN agent_connection_activity c ON c.agent_id=a.id WHERE a.tenant_id='shards-internal' AND a.created_by=? AND a.client!='operator-ui' ORDER BY a.created_at DESC,a.id LIMIT 101").bind(owner).all(),
+          env.EDGE_DB.prepare("SELECT t.id,t.title,t.state,t.created_at,t.claimed_at,t.completed_at,t.assignee_id,a.name AS assignee_name FROM agent_tasks t LEFT JOIN agents a ON a.id=t.assignee_id AND a.tenant_id=t.tenant_id WHERE t.tenant_id='shards-internal' AND EXISTS (SELECT 1 FROM agents own WHERE own.tenant_id=t.tenant_id AND own.created_by=? AND (own.id=t.creator_id OR own.id=t.assignee_id)) ORDER BY t.created_at DESC,t.id LIMIT 101").bind(owner).all()
+        ]);
+        if(directory.success!==true||work.success!==true||!Array.isArray(directory.results)||!Array.isArray(work.results))return pub({error:'Dashboard data unavailable'},503);
+        const agents=directory.results.slice(0,100).map(a=>({...a,scopes:(()=>{try{const x=JSON.parse(a.scopes);return Array.isArray(x)?x.filter(v=>typeof v==='string'):[]}catch{return []}})()}));
+        return pub({agents,tasks:work.results.slice(0,100),limits:{agents:100,tasks:100,agents_truncated:directory.results.length>100,tasks_truncated:work.results.length>100},checked_at:new Date().toISOString(),presence:'unverified'});
+      }
       if (action === 'GET /runtime-ticket') return await issueSystemsTicket(env);
       if (request.headers.get('origin') !== 'https://agents.shardsinc.co.uk') return pub({error:'Invalid origin'},403);
       if (request.headers.get('content-type')?.split(';')[0] !== 'application/json') return pub({error:'Expected JSON'},415);
