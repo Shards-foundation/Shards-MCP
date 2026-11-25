@@ -17,6 +17,9 @@ This is a small, stdlib-only Python process that lets a local Lobby client call 
 | Forwarded caller headers | None |
 | Proxies and redirects | Not used; any non-200 upstream response is rejected |
 | Automatic retries | None |
+| Durable state | `~/.openclaw/lobby-adapter-state` only, mode `0700` |
+| Pending-dispatch gate | Fail closed until explicit local reconciliation |
+| Remote or HTTP clear route | None |
 
 The command-line interface has no bind-host, bind-port, upstream-host, upstream-path, or model override. `AdapterConfig` rejects a non-loopback bind or upstream host and any upstream path other than the fixed one.
 
@@ -71,7 +74,44 @@ The value is stable for one UUID and sent as the OpenAI-compatible `user` field.
 - `http.client.HTTPConnection` connects directly to the fixed loopback address. It does not read proxy environment variables, and the adapter does not follow redirects.
 - Up to eight connections can enter request handling, including unauthenticated connections. The adapter closes excess connections. A 10-second wall-clock deadline covers the request line, headers, and body. The body limit is 16 KiB.
 - A single chat can be active, including requests for the same conversation. Excess authenticated chat requests receive `503 busy`. The upstream connect, send, headers, and body share a 30-second wall-clock deadline and a 256 KiB body cap.
-- An upstream connect failure returns `outcome: not_dispatched`. A failure after sending begins returns `outcome: unknown`. The adapter makes one attempt. A disconnect or timeout leaves OpenClaw free to finish work already started. Check the original conversation and any effects before submitting another request.
+- An upstream connect failure returns `outcome: not_dispatched`. A failure after sending begins returns `outcome: unknown`. The adapter makes one attempt. A disconnect or timeout leaves OpenClaw free to finish work already started. The pending-dispatch gate below then blocks further chats until a local operator reconciles.
+
+## Pending-dispatch ambiguity gate
+
+A chat can time out after the request has already reached OpenClaw. The upstream run may then continue while the adapter is free to accept another chat, so two runs could overlap in different conversations. The adapter therefore keeps a durable local gate:
+
+1. Before accepting requests, the adapter syncs the parent directory entries that make the state directory reachable after a crash. Before connecting upstream, it writes a marker at `~/.openclaw/lobby-adapter-state/pending-dispatch.json` (mode `0600`) by syncing a temporary file, publishing it with an atomic create-if-absent `link`, and syncing the state directory. It contains a schema version, a dispatch ID, a UTC timestamp, and the derived conversation namespace. It never contains the prompt, the raw conversation UUID, the adapter secret, or the gateway token.
+2. The marker is cleared only after a validated completed response or a definitive `outcome: not_dispatched` result.
+3. It is retained after any `outcome: unknown`, upstream error, invalid response, unexpected exception, or crash. While it exists, every `POST /chat` for any conversation returns `503 {"error":"reconciliation required"}` and the adapter makes no upstream call. The block survives an adapter restart.
+4. There is no automatic time-based clearing, no automatic retry, and no remote or HTTP clear route.
+
+A client disconnect after dispatch does not change the outcome. If the adapter later validates a completed reply, the marker is cleared because completion is known; if the result stays ambiguous, the marker is retained.
+
+If syncing a marker removal fails after a known outcome, the running adapter keeps chat blocked. Resolve the filesystem error before restarting or reconciling. After a restart, any marker that remains on disk still blocks chat.
+
+`GET /health` returns `503` with a fixed sanitised body while the gate is closed:
+
+```json
+{"status":"blocked","model":"openclaw/shards","reason":"pending upstream dispatch requires local reconciliation"}
+```
+
+It contains no conversation data or credentials. A healthy adapter still returns `{"status":"ok","model":"openclaw/shards"}`. A dispatch that is merely in progress is not reported as blocked; only a retained marker with no dispatch in flight is.
+
+### Manual recovery
+
+The adapter holds an exclusive `fcntl.flock` on `~/.openclaw/lobby-adapter-state/adapter.lock` until all request handlers finish, including during shutdown. A second adapter or reconciliation process using the same state directory is refused while the lock is held. Stop the adapter first (`Ctrl-C`), wait for it to exit, then inspect the upstream run and its effects.
+
+```sh
+python3 deployment/oracle/lobby-adapter/lobby_adapter.py reconcile
+```
+
+Without `--confirm-upstream-inspected` this only prints the marker summary and exits `2` without clearing anything. After you have checked the original conversation and any side effects, run:
+
+```sh
+python3 deployment/oracle/lobby-adapter/lobby_adapter.py reconcile --confirm-upstream-inspected
+```
+
+Only then does the next chat proceed. **The adapter cannot prove that an ambiguous upstream run was cancelled or had no effect.** If the upstream run may still be active, do not clear the marker: wait for it to finish or stop it in OpenClaw, then reconcile. Clearing the marker is an operator assertion, not evidence of cancellation.
 
 ## Prompt-only "no tools" does not enforce policy
 
@@ -100,7 +140,7 @@ Start the adapter:
 python3 deployment/oracle/lobby-adapter/lobby_adapter.py serve
 ```
 
-The startup line reports the fixed listener, upstream URL, and model, and contains no credential. If the bind fails or a credential file fails validation, the process exits with status `2` and a sanitised message.
+The startup line reports the fixed listener, upstream URL, and model, and contains no credential. If the bind fails or a credential file fails validation, the process exits with status `2` and a sanitised message. The adapter creates `~/.openclaw/lobby-adapter-state` with mode `0700` and takes an exclusive lock there; a second adapter for the same state directory exits with status `2`. If a pending dispatch marker is present at startup, the process prints a fixed warning and starts with chat blocked; use the manual recovery steps above.
 
 Optional local smoke test, with the gateway already running:
 
@@ -117,6 +157,7 @@ The chat command performs real local inference if the gateway is live. The clien
 
 - Stop the process with `Ctrl-C`. No service manager, boot hook, or scheduled task is installed.
 - Remove the adapter credential with `rm ~/.openclaw/lobby-adapter.secret`. Existing clients then receive `401`.
+- Remove the state directory with `rm -r ~/.openclaw/lobby-adapter-state` only when you have reconciled or do not need its pending-dispatch history. Removing a pending marker without checking the upstream run discards the only local evidence that the dispatch was ambiguous.
 - No repository file, gateway configuration, tunnel, Access policy, DNS record, or production state is changed by setup or cleanup.
 
 ## Tests
@@ -137,7 +178,8 @@ The suite starts a fake upstream and a real loopback adapter, then covers:
 - upstream error, redirect, malformed framing or JSON, oversize response, and wall-clock response deadlines;
 - proxy environment variables being ignored;
 - secret/config file permissions, symlinks, conflicts, and CLI output redaction;
-- handling of successful replies containing synthetic credentials, sanitized errors and private client credential loading.
+- handling of successful replies containing synthetic credentials, sanitized errors and private client credential loading;
+- the pending-dispatch gate: marker cleared on success and on a definitive not-dispatched connect failure, retained on unknown timeout, blocking every conversation and surviving restart/crash, marker file and state directory permissions, marker contents free of prompts and credentials, concurrent requests returning `busy` rather than a false block, client disconnect after dispatch clearing on known completion, competing adapters refused, and explicit local reconciliation refusing to run while the adapter holds the lock.
 
 No test contacts the live gateway, a host service, Cloudflare, or an external provider. A green local suite is evidence for this adapter's code paths only; it is not hosted acceptance, OpenClaw compatibility certification, or a production claim.
 
@@ -147,7 +189,8 @@ No test contacts the live gateway, a host service, Cloudflare, or an external pr
 - The gateway revision, `/v1/chat/completions` behaviour, `user` namespace semantics, and model availability are assumed from the stated environment; the automated tests do not prove them.
 - Single-turn transport: the adapter sends one user message per request. Conversation continuity depends on the gateway's handling of the derived `user` value; the adapter stores no history.
 - Text only, no streaming, no files, images, audio, tools, or tool approval changes.
-- An ambiguous upstream result requires reconciliation before retry. The adapter cannot confirm cancellation or prevent a later manual request from overlapping with unfinished upstream work.
+- An ambiguous upstream result closes a persistent local gate. Chats stay blocked across conversations and restarts until a local operator runs `reconcile --confirm-upstream-inspected`. The adapter cannot confirm cancellation, so clearing the marker does not prove the upstream run stopped or had no effect.
+- The gate is local to one state directory and one host. It is not a distributed lock and does not coordinate with other adapters, the Hub, or the Edge gateway.
 - An unauthenticated local process can occupy all connection slots temporarily.
 - Browser clients are rejected by the `Origin` rule; use a local CLI or desktop client.
 - The adapter refuses group/other-accessible credential files. It does not repair host permissions.
