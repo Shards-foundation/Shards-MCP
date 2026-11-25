@@ -18,8 +18,9 @@ Public tools:
 - `shards_skill_read` — read an exact first-party Shards skill instruction file from the public repository.
 - `shards_repo_document` — read an approved public Shards repository's README, AGENTS or SECURITY document.
 - `shards_open_prs` — list up to ten live public GitHub pull requests for approved Shards repositories.
+- `shards_issue_read` — read one live public GitHub issue by exact number from an approved Shards repository, with a bounded 6,000-character body excerpt and an explicit untrusted-content note; pull requests are flagged, not mislabelled.
 
-The four additional research tools remain **source-only until deployed**. They read fixed public GitHub origins and are not GitHub write permissions, private repository access, skill installation or agent authentication.
+The five additional research tools remain **source-only until deployed**. They read fixed public GitHub origins and are not GitHub write permissions, private repository access, skill installation or agent authentication.
 
 ### Claude Desktop / Claude.ai
 
@@ -103,7 +104,7 @@ curl -sS https://mcp.shardsinc.co.uk/mcp \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"example","version":"1.0"}}}'
 ```
 
-Then call `tools/list`, then `tools/call` with `name` `shards_gateway_status`. The proposed source supports **16 tools total**, 7 public and 9 credential-protected. The currently deployed Worker still exposes 3 public tools until the reviewed change is rolled out. MCP `tools/list` is authoritative.
+Then call `tools/list`, then `tools/call` with `name` `shards_gateway_status`. The proposed source supports **17 tools total**, 8 public and 9 credential-protected. The currently deployed Worker still exposes 3 public tools until the reviewed change is rolled out. MCP `tools/list` is authoritative.
 
 ## Operator-issued agent identity — real authentication
 
@@ -141,7 +142,7 @@ The edge does not execute tasks, relay other providers' private APIs or move mon
 
 - Protected methods always require valid scoped identity, even when discoverable to anonymous MCP clients. D1 queries derive tenant and agent IDs exclusively from the validated bearer credential.
 - No arbitrary URL fetching: DNS tools use a fixed Cloudflare DNS-over-HTTPS endpoint, strict domain/type validation and response size limits.
-- Proposed public skill/repository tools use allowlisted Shards Foundation GitHub public origins only; redirects are denied, reads have a seven-second timeout, streaming response-size bounds and per-caller/global quotas. `shards_skill_read` returns a bounded 20,000-character preview and a `truncated` flag; imported third-party catalogue results are metadata-only.
+- Proposed public skill/repository tools use allowlisted Shards Foundation GitHub public origins only; redirects are denied, reads have a seven-second timeout, streaming response-size bounds and per-caller/global quotas. `shards_skill_read` returns a bounded 20,000-character preview and a `truncated` flag; imported third-party catalogue results are metadata-only. `shards_issue_read` reads only `api.github.com/repos/Shards-foundation/<approved repo>/issues/<number>`, returns a bounded 6,000-character body excerpt, and reports GitHub 404 and upstream rate limiting as explicit errors rather than success.
 - Token values are never stored in plaintext in D1. Keys expire in 30 days and can be revoked.
 - This initial edge prototype enforces global and per-agent daily quotas but has **no independent per-IP WAF rules, zero-trust posture requirements or automated retention cron** yet.
 - Task claims do not have leasing, reconciliation of external effects, dual approval, signed audit anchor, or multi-host worker execution. The edge must not be marketed as a production-certified autonomous agent controller.

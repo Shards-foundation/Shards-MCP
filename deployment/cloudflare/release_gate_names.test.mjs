@@ -54,7 +54,7 @@ test('enabled mode rejects a status missing the bridge', () => {
   );
 });
 
-test('both modes always enforce seven public names and hide every private tool from anonymous discovery', () => {
+test('both modes always enforce eight public names and hide every private tool from anonymous discovery', () => {
   for (const mode of ['disabled', 'enabled']) {
     const expected = expectedPrivateNames(mode);
     assertExactNames(declared(expected), discovered(PUBLIC_NAMES), mode);

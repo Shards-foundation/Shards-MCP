@@ -2,7 +2,7 @@ name: Shards MCP post-deployment release gate
 # This workflow is deliberately NOT part of source-only PR CI. Invoke after
 # deploying a reviewed, pinned Worker version; three-tool production MUST fail.
 # bridge_mode defaults to disabled (9 protected tools); enabled expects 10,
-# including shards_kernel_issue_label. Anonymous discovery is always 7 public.
+# including shards_kernel_issue_label. Anonymous discovery is always 8 public.
 on:
   workflow_dispatch:
     inputs:
@@ -21,7 +21,7 @@ on:
 permissions:
   contents: read
 jobs:
-  live-seven-tool-release:
+  live-eight-tool-release:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -58,10 +58,10 @@ jobs:
             const {assertExactNames}=await import('./deployment/cloudflare/release_gate_names.mjs');
             if(status.db!=='connected')throw Error('Production D1 not connected');
             const result=assertExactNames(status.tools||[], response.result?.tools||[], process.env.EXPECTED_BRIDGE_MODE);
-            console.log(`PASS: seven exact public names, ${result.expectedPrivate.length} exact private names (bridge ${result.bridgeMode}), no anonymous privileged discovery`);
+            console.log(`PASS: eight exact public names, ${result.expectedPrivate.length} exact private names (bridge ${result.bridgeMode}), no anonymous privileged discovery`);
           })().catch(err=>{console.error(err);process.exitCode=1});
           NODE
-      - name: Check four real public operations and private-tool denial
+      - name: Check five real public operations and private-tool denial
         run: |
           set -euo pipefail
           node <<'NODE'
@@ -75,7 +75,8 @@ jobs:
             ['shards_skill_search',{query:'security',limit:2}],
             ['shards_skill_read',{slug:'shards-sec-vibecoding-gate'}],
             ['shards_repo_document',{repository:'Shards-MCP',document:'README.md'}],
-            ['shards_open_prs',{repository:'Shards-MCP'}]
+            ['shards_open_prs',{repository:'Shards-MCP'}],
+            ['shards_issue_read',{repository:'Shards-MCP',issue_number:53}]
           ];
           (async()=>{
             for(const [name,args] of tests){
