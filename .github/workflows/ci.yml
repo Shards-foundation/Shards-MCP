@@ -39,9 +39,9 @@ jobs:
         with:
           node-version: '24.22.1'
           package-manager-cache: false
-      - name: Agent Hub dashboard contract tests
+      - name: Agent Hub dashboard and Lobby contract tests
         if: matrix.python-version == '3.12'
-        run: node --test deployment/cloudflare/agent-hub/control.test.mjs
+        run: node --test deployment/cloudflare/agent-hub/control.test.mjs deployment/cloudflare/agent-hub/lobby.test.mjs
       - name: Compile
         run: python -m compileall -q src tests
       - name: Verify official MCP SDK imports

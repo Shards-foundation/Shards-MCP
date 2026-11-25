@@ -190,6 +190,307 @@ async function agentRegistryApi(request,env) {
   } catch {return agentJson({error:'Cannot reach the Shards agent registry. Try again.'},503);}
 }
 
+const LOBBY_TRANSPORT_ORIGIN='https://lobby-transport.shardsinc.co.uk';
+const LOBBY_MESSAGE_MAX_CHARS=8000;
+const LOBBY_MESSAGE_MAX_BYTES=12*1024;
+const LOBBY_BODY_MAX_BYTES=16*1024;
+const LOBBY_RESPONSE_MAX_BYTES=64*1024;
+const LOBBY_HEALTH_MAX_BYTES=4096;
+const LOBBY_ADAPTER_MODEL='openclaw/shards';
+const LOBBY_BODY_TIMEOUT_MS=10000;
+const LOBBY_TIMEOUT_MS=45000;
+const LOBBY_UUID_RE=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const LOBBY_UNKNOWN='The Lobby outcome is unknown. Reconcile the local adapter before resubmitting.';
+const LOBBY_BLOCKED='Lobby chat is blocked until an operator reconciles the local adapter.';
+class LobbyConfigError extends Error {}
+class LobbyAuthError extends Error {}
+const lobbyEncoder=new TextEncoder(),lobbyDecoder=new TextDecoder('utf-8',{fatal:true});
+
+function lobbyJwtPart(value){
+  if(typeof value!=='string'||!/^[A-Za-z0-9_-]+$/.test(value)||value.length>9000)throw new Error('bad');
+  const b=atob(value.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-value.length%4)%4));
+  return Uint8Array.from(b,x=>x.charCodeAt(0));
+}
+
+function lobbyClaims(assertion){
+  if(typeof assertion!=='string'||assertion.length>13000)return null;
+  const parts=assertion.split('.');
+  if(parts.length!==3)return null;
+  try{
+    const header=JSON.parse(lobbyDecoder.decode(lobbyJwtPart(parts[0])));
+    const claims=JSON.parse(lobbyDecoder.decode(lobbyJwtPart(parts[1])));
+    if(!header||header.alg!=='RS256'||typeof header.kid!=='string')return null;
+    return claims&&typeof claims==='object'&&!Array.isArray(claims)?claims:null;
+  }catch{return null}
+}
+
+function lobbyHeaderSafe(value){
+  return typeof value==='string'&&value.length>=1&&value.length<=4096&&/^[\x21-\x7E]+$/.test(value);
+}
+
+function lobbyTransportConfig(env){
+  const id=env.LOBBY_CF_ACCESS_CLIENT_ID;
+  const secret=env.LOBBY_CF_ACCESS_CLIENT_SECRET;
+  const token=env.LOBBY_ADAPTER_TOKEN;
+  if(!lobbyHeaderSafe(id)||!lobbyHeaderSafe(secret)||!lobbyHeaderSafe(token))throw new LobbyConfigError();
+  return {id,secret,token};
+}
+
+function lobbySecrets(env){
+  return [env.LOBBY_CF_ACCESS_CLIENT_ID,env.LOBBY_CF_ACCESS_CLIENT_SECRET,env.LOBBY_ADAPTER_TOKEN]
+    .filter(value=>typeof value==='string'&&value.length>0);
+}
+
+async function lobbyDigest(value){
+  return new Uint8Array(await crypto.subtle.digest('SHA-256',lobbyEncoder.encode(value)));
+}
+
+async function lobbyConversationId(owner,conversationId){
+  const ownerKey=Array.from(await lobbyDigest('shards-lobby-owner-v1\0'+owner),x=>x.toString(16).padStart(2,'0')).join('');
+  const derived=await lobbyDigest('shards-lobby-conversation-v1\0'+ownerKey+'\0'+conversationId);
+  const b=derived.slice(0,16);
+  b[6]=(b[6]&0x0f)|0x50;
+  b[8]=(b[8]&0x3f)|0x80;
+  const h=Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');
+  return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
+}
+
+// The private registry verifies this exact assertion with the Hub-specific
+// Access audience. Read its claims only after that verification succeeds.
+async function lobbySession(env,assertion){
+  if(!env.MCP_GATEWAY)throw new LobbyConfigError();
+  let response;
+  try{
+    response=await env.MCP_GATEWAY.fetch(new Request(REGISTRY_ORIGIN+'/session',{
+      method:'GET',headers:{'Cf-Access-Jwt-Assertion':assertion},redirect:'manual'
+    }));
+  }catch{throw new LobbyConfigError()}
+  if(response.status>=300&&response.status<400)throw new LobbyConfigError();
+  if(response.status===401||response.status===410)throw new LobbyAuthError();
+  if(!response.ok)throw new LobbyConfigError();
+  const data=await response.json().catch(()=>null);
+  if(!data||data.authenticated!==true)throw new LobbyAuthError();
+}
+
+async function lobbyOwner(request,env){
+  const assertion=request.headers.get('Cf-Access-Jwt-Assertion');
+  if(!assertion)throw new LobbyAuthError();
+  await lobbySession(env,assertion);
+  const claims=lobbyClaims(assertion);
+  const sub=claims?.sub;
+  if(!Number.isFinite(claims?.exp)||claims.exp<=Math.floor(Date.now()/1000))throw new LobbyAuthError();
+  if(typeof sub!=='string'||sub.length<1||sub.length>512||/[\x00-\x1F\x7F]/.test(sub))throw new LobbyAuthError();
+  return sub;
+}
+
+async function lobbyRequest(env,path,method,maxBytes,body){
+  const config=lobbyTransportConfig(env);
+  const headers=new Headers({
+    accept:'application/json',
+    'cf-access-client-id':config.id,
+    'cf-access-client-secret':config.secret,
+    authorization:'Bearer '+config.token
+  });
+  const signal=AbortSignal.timeout(LOBBY_TIMEOUT_MS);
+  const init={method,headers,redirect:'manual',cache:'no-store',signal};
+  if(body!==undefined){headers.set('content-type','application/json');init.body=JSON.stringify(body)}
+  try{
+    const response=await fetch(LOBBY_TRANSPORT_ORIGIN+path,init);
+    if((response.status>=300&&response.status<400)||!lobbyIsJson(response.headers)){
+      void response.body?.cancel().catch(()=>{});
+      return null;
+    }
+    const data=await lobbyReadJson(response.body,maxBytes,signal);
+    return {status:response.status,data};
+  }catch{return null}
+}
+
+function lobbyIsJson(headers){
+  return (headers.get('content-type')||'').split(';')[0].trim().toLowerCase()==='application/json';
+}
+
+async function lobbyReadJson(body,maxBytes,signal){
+  if(!body)throw new Error('invalid');
+  const reader=body.getReader();
+  const cancel=()=>{void reader.cancel().catch(()=>{})};
+  signal.addEventListener('abort',cancel,{once:true});
+  const chunks=[];let bytes=0;
+  try{
+    signal.throwIfAborted();
+    while(true){
+      const {done,value}=await reader.read();
+      signal.throwIfAborted();
+      if(done)break;
+      bytes+=value.byteLength;
+      if(bytes>maxBytes)throw new Error('large');
+      chunks.push(value);
+    }
+  }catch(error){
+    cancel();
+    throw error;
+  }finally{
+    signal.removeEventListener('abort',cancel);
+    reader.releaseLock();
+  }
+  const out=new Uint8Array(bytes);let pos=0;
+  for(const chunk of chunks){out.set(chunk,pos);pos+=chunk.byteLength}
+  return JSON.parse(lobbyDecoder.decode(out));
+}
+
+function lobbyUnknown(){return agentJson({error:LOBBY_UNKNOWN,outcome:'unknown',reconcile:true},502)}
+function lobbyNotDispatched(error,status,retryable=false){
+  const response=agentJson({error,outcome:'not_dispatched',...(retryable?{retryable:true}:{})},status);
+  response.headers.set('x-shards-lobby-outcome','not_dispatched');
+  return response;
+}
+
+async function lobbyChat(env,owner,conversationId,message){
+  const upstreamId=await lobbyConversationId(owner,conversationId);
+  const response=await lobbyRequest(env,'/chat','POST',LOBBY_RESPONSE_MAX_BYTES,{conversation_id:upstreamId,message});
+  if(!response)return lobbyUnknown();
+  const {status,data}=response;
+  if(!data||typeof data!=='object'||Array.isArray(data))return lobbyUnknown();
+  if(status===200){
+    if(typeof data.reply!=='string'||!data.reply.trim()||data.conversation_id!==upstreamId)return lobbyUnknown();
+    if(data.reply.length>LOBBY_MESSAGE_MAX_CHARS)return lobbyUnknown();
+    if(lobbyEncoder.encode(data.reply).byteLength>LOBBY_MESSAGE_MAX_BYTES)return lobbyUnknown();
+    if(!data.reply.isWellFormed()||lobbyHasControlChars(data.reply))return lobbyUnknown();
+    if(lobbySecrets(env).some(secret=>data.reply.includes(secret)))return lobbyUnknown();
+    return agentJson({reply:data.reply},200);
+  }
+  const {error,outcome}=data;
+  const fields=Object.keys(data).length;
+  if(status===503&&fields===1&&error==='reconciliation required')
+    return agentJson({error:LOBBY_BLOCKED,outcome:'blocked',reconcile:true},503);
+  if(status===503&&fields===1&&error==='busy')
+    return lobbyNotDispatched('The Lobby is busy. Try again shortly.',503,true);
+  // Only the merged adapter's connect failure responses confirm non-dispatch.
+  if(fields===2&&outcome==='not_dispatched'&&(
+    (status===502&&error==='upstream unavailable')||(status===504&&error==='upstream timeout')
+  ))return lobbyNotDispatched('The Lobby transport did not dispatch the message. You may try again.',502);
+  return lobbyUnknown();
+}
+
+async function lobbyHealth(env){
+  const response=await lobbyRequest(env,'/health','GET',LOBBY_HEALTH_MAX_BYTES);
+  if(!response)return agentJson({status:'unavailable'},503);
+  const {data}=response;
+  if(data?.model!==LOBBY_ADAPTER_MODEL)return agentJson({status:'unavailable'},503);
+  if(response.status===200&&data.status==='ok')return agentJson({status:'ok'},200);
+  if(response.status===503&&data.status==='blocked')return agentJson({status:'blocked',reconcile:true},503);
+  return agentJson({status:'unavailable'},503);
+}
+
+function lobbyHasControlChars(value){
+  for(const ch of value){
+    const code=ch.codePointAt(0);
+    if((code<0x20&&ch!=='\n'&&ch!=='\r'&&ch!=='\t')||code===0x7f)return true;
+  }
+  return false;
+}
+
+function lobbyMessage(value){
+  if(typeof value!=='string'||!value.trim()||!value.isWellFormed())throw new Error('message');
+  if(value.length>LOBBY_MESSAGE_MAX_CHARS)throw new Error('large');
+  if(lobbyEncoder.encode(value).byteLength>LOBBY_MESSAGE_MAX_BYTES)throw new Error('large');
+  if(lobbyHasControlChars(value))throw new Error('message');
+  return value;
+}
+
+const LOBBY_HTML=`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0b0f10"><title>Shards Lobby · Owner chat</title><style>
+:root{color-scheme:dark;--bg:#0a0e10;--panel:#111719;--line:#283630;--ink:#e7f1e9;--muted:#849a91;--accent:#c2ffca;--warn:#ffd28a;--bad:#ffb3b7;font-family:Inter,system-ui,sans-serif}*{box-sizing:border-box}html,body{height:100%}body{margin:0;background:var(--bg);color:var(--ink);font-size:15px;display:flex;flex-direction:column;min-height:100dvh}header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line);background:#0d1315;position:sticky;top:0;z-index:1}header b{letter-spacing:.14em;font-size:13px}header nav a{color:var(--accent);text-decoration:none;font-size:13px;margin-left:14px}main{flex:1;display:flex;flex-direction:column;min-height:0;max-width:820px;width:100%;margin:0 auto;padding:0 12px}.intro{padding:18px 4px 10px}.intro h1{font-size:clamp(22px,5vw,30px);letter-spacing:-.04em;margin:0 0 6px}.intro p{color:var(--muted);font-size:12px;line-height:1.6;margin:0}.status{margin:10px 4px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);font-size:12px;color:var(--muted)}.status.ok{color:var(--accent);border-color:#41624d}.status.warn{color:var(--warn);border-color:#6d5730}.status.bad{color:var(--bad);border-color:#6d3a3e}#transcript{flex:1;overflow:auto;padding:8px 4px 14px;display:flex;flex-direction:column;gap:10px;overscroll-behavior:contain}.msg{max-width:92%;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55;font-size:14px;padding:11px 13px;border-radius:13px;border:1px solid var(--line)}.msg.user{align-self:flex-end;background:#20382a;border-color:#466a4d;border-bottom-right-radius:4px}.msg.agent{align-self:flex-start;background:var(--panel);border-bottom-left-radius:4px}.msg .who{display:block;font-size:10px;letter-spacing:.1em;color:var(--muted);margin-bottom:4px}form{position:sticky;bottom:0;background:linear-gradient(#0a0e10cc,#0a0e10);padding:8px 0 max(12px,env(safe-area-inset-bottom));border-top:1px solid var(--line)}textarea{width:100%;min-height:64px;max-height:160px;resize:vertical;border:1px solid #4a644e;border-radius:12px;background:#151d1a;color:var(--ink);padding:12px;font:inherit;outline:none}textarea:focus{border-color:var(--accent)}.actions{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:8px}.actions small{color:var(--muted);font-size:11px}button{font:inherit;cursor:pointer;border:0;border-radius:10px;padding:11px 16px;background:var(--accent);color:#16301d;font-weight:700;min-height:44px}button:disabled{opacity:.55;cursor:not-allowed}.notice{font-size:11px;color:var(--muted);line-height:1.55;padding:10px 4px 18px}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}@media(max-width:520px){header{padding:12px}header nav a{margin-left:10px;font-size:12px}main{padding:0 10px}.intro{padding-top:14px}}
+</style></head><body><header><b>◇ SHARDS / LOBBY</b><nav aria-label="Lobby navigation"><a href="/control">Control centre</a><a href="/">Workspace</a></nav></header><main><section class="intro"><h1>Owner Lobby</h1><p>Owner-only text chat through the fixed Lobby transport. Replies are model output, not proof that an agent is online.</p></section><div id="status" class="status" role="status" aria-live="polite">Checking transport…</div><div id="transcript" aria-live="polite" aria-label="Lobby transcript"></div><form id="composer" novalidate><label class="sr-only" for="message">Message</label><textarea id="message" name="message" maxlength="8000" placeholder="Write a message…" autocomplete="off" required></textarea><div class="actions"><small>Text chat · OpenClaw tool policy applies</small><button id="send" type="submit" disabled>Send</button></div></form><p class="notice"><button id="reconciled" type="button" hidden>I reconciled the adapter</button> If the outcome is unknown or blocked, reconcile the local adapter before sending again. The browser never contacts the transport directly and holds no transport secret.</p></main><script src="/lobby.js" defer></script></body></html>`;
+
+const LOBBY_JS=`'use strict';(()=>{
+const $=id=>document.getElementById(id);
+const transcript=$('transcript'),status=$('status'),form=$('composer'),input=$('message'),send=$('send'),reconciled=$('reconciled');
+const pendingKey='shards-lobby-pending';
+let ready=false,busy=false,pending=false;
+try{pending=sessionStorage.getItem(pendingKey)==='1'}catch{}
+const updateControls=()=>{send.disabled=!ready||busy||pending;reconciled.hidden=!pending||busy};
+const setPending=value=>{
+ pending=value;
+ try{if(value)sessionStorage.setItem(pendingKey,'1');else sessionStorage.removeItem(pendingKey)}catch{}
+ updateControls();
+};
+const make=(tag,text,cls)=>{const el=document.createElement(tag);if(text!==undefined)el.textContent=String(text);if(cls)el.className=cls;return el};
+const setStatus=(text,kind)=>{status.textContent=text;status.className='status'+(kind?' '+kind:'')};
+const appendMessage=(role,text)=>{const article=make('article',undefined,'msg '+role);article.append(make('span',role==='user'?'You':'Lobby','who'),make('div',text));transcript.append(article);transcript.scrollTop=transcript.scrollHeight};
+const newUuid=()=>{
+ if(crypto.randomUUID)return crypto.randomUUID();
+ const b=new Uint8Array(16);crypto.getRandomValues(b);b[6]=(b[6]&0x0f)|0x40;b[8]=(b[8]&0x3f)|0x80;
+ const h=Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');
+ return h.slice(0,8)+'-'+h.slice(8,12)+'-'+h.slice(12,16)+'-'+h.slice(16,20)+'-'+h.slice(20);
+};
+// Random conversation key, not a credential; it contains no token or secret.
+const conversationId=()=>{
+ const key='shards-lobby-conversation';
+ try{const saved=sessionStorage.getItem(key);if(saved&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(saved))return saved}catch{}
+ const id=newUuid();try{sessionStorage.setItem(key,id)}catch{}
+ return id;
+};
+const uuid=conversationId();
+const readJson=async response=>{try{return await response.json()}catch{return null}};
+const lobbyFetch=(path,init={})=>fetch(path,{
+ cache:'no-store',credentials:'same-origin',redirect:'error',
+ signal:AbortSignal.timeout(55000),headers:{accept:'application/json'},...init
+});
+const health=async confirmed=>{
+ if(busy)return;
+ if(pending&&!confirmed){
+  setStatus('Outcome unresolved. Reconcile the local adapter before sending.','warn');
+  return;
+ }
+ busy=true;ready=false;updateControls();
+ try{
+  const response=await lobbyFetch('/api/lobby/health');
+  const data=await readJson(response);
+  if(response.status===200&&data?.status==='ok'){
+   setPending(false);ready=true;
+   setStatus('Transport reachable. This is not an agent liveness check.','ok');
+  }else if(response.status===503&&data?.status==='blocked'){
+   setPending(true);
+   setStatus('Transport blocked. Reconcile the local adapter before sending.','warn');
+  }else{
+   setStatus('Transport unavailable. Check the session and adapter before sending.','bad');
+  }
+ }catch{setStatus('Transport unavailable. Check the session and adapter before sending.','bad')}
+ finally{busy=false;updateControls()}
+};
+reconciled.addEventListener('click',()=>health(true));
+form.addEventListener('submit',async event=>{
+ event.preventDefault();
+ if(!ready||busy||pending)return;
+ const message=input.value;
+ if(!message.trim())return setStatus('Write a message first.','warn');
+ if(message.length>8000)return setStatus('Messages are limited to 8,000 characters.','warn');
+ busy=true;setPending(true);setStatus('Sending…','');
+ try{
+  const response=await lobbyFetch('/api/lobby/chat',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({conversation_id:uuid,message})});
+  const data=await readJson(response);
+  if(response.status===200&&typeof data?.reply==='string'&&data.reply.trim()){
+   appendMessage('user',message);appendMessage('agent',data.reply);input.value='';
+   setPending(false);setStatus('Reply received.','ok');return;
+  }
+  if(!response.ok&&data?.outcome==='not_dispatched'&&response.headers.get('x-shards-lobby-outcome')==='not_dispatched'){
+   setPending(false);
+   if(response.status===401){ready=false;setStatus('Session expired. Reload the page and sign in again.','bad');return}
+   if(response.status===413){setStatus('The message is too large.','warn');return}
+   setStatus(data.retryable?'The Lobby is busy. Try again shortly.':'The message was not sent. Check the request or transport before trying again.','warn');
+   return;
+  }
+  if(data?.outcome==='blocked'){
+   setStatus('Chat is blocked. Reconcile the local adapter first.','warn');return;
+  }
+  setStatus('Outcome unknown. Reconcile the local adapter before sending again.','bad');
+ }catch{setStatus('Connection lost. Reconcile the local adapter before sending again.','bad')}
+ finally{busy=false;updateControls()}
+});
+updateControls();
+health(false);
+})();`;
+
 export default {async fetch(req,env){
  const u=new URL(req.url);
  
@@ -198,6 +499,39 @@ export default {async fetch(req,env){
  if(!req.headers.get('Cf-Access-Jwt-Assertion'))return fail('Cloudflare Access is required',401);
  if(u.protocol!=='https:')return fail('TLS required',403);
  if(u.pathname==='/api/agents'||u.pathname.startsWith('/api/agents/'))return agentRegistryApi(req,env);
+ if(u.pathname==='/lobby'||u.pathname==='/lobby.js'){
+  if(req.method!=='GET'||u.origin!==HUB_ORIGIN)return fail('Not found',404);
+  try{await lobbyOwner(req,env)}
+  catch(e){return e instanceof LobbyConfigError?fail('Lobby is not configured',503):fail('Operator authentication required',401)}
+  return new Response(u.pathname==='/lobby'?LOBBY_HTML:LOBBY_JS,{headers:{'content-type':u.pathname==='/lobby'?'text/html; charset=utf-8':'application/javascript; charset=utf-8','cache-control':'private, no-store','x-content-type-options':'nosniff','content-security-policy':"default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; object-src 'none'",'referrer-policy':'no-referrer'}});
+ }
+ if(u.pathname==='/api/lobby/chat'||u.pathname==='/api/lobby/health'){
+  if(u.origin!==HUB_ORIGIN)return agentJson({error:'Not found'},404);
+  const origin=req.headers.get('origin'),site=req.headers.get('sec-fetch-site');
+  if(u.pathname==='/api/lobby/health'){
+   if(req.method!=='GET')return agentJson({error:'Method not allowed'},405);
+   if((origin!==null&&origin!==HUB_ORIGIN)||(site!==null&&site!=='same-origin'))return agentJson({error:'Cross-origin Lobby request denied'},403);
+   try{await lobbyOwner(req,env)}
+   catch(e){return e instanceof LobbyConfigError?agentJson({error:'Lobby is not configured'},503):agentJson({error:'Signed Cloudflare Access login required'},401)}
+   try{lobbyTransportConfig(env)}catch{return agentJson({status:'unavailable'},503)}
+   try{return await lobbyHealth(env)}catch{return agentJson({status:'unavailable'},503)}
+  }
+  if(req.method!=='POST')return lobbyNotDispatched('Method not allowed',405);
+  if(origin!==HUB_ORIGIN||(site!==null&&site!=='same-origin'))return lobbyNotDispatched('Cross-origin Lobby request denied',403);
+  let owner;
+  try{owner=await lobbyOwner(req,env)}
+  catch(e){return e instanceof LobbyConfigError?lobbyNotDispatched('Lobby is not configured',503):lobbyNotDispatched('Signed Cloudflare Access login required',401)}
+  try{lobbyTransportConfig(env)}catch{return lobbyNotDispatched('Lobby transport is not configured',503)}
+  if(!lobbyIsJson(req.headers))return lobbyNotDispatched('Expected application/json',415);
+  let input;
+  try{input=await lobbyReadJson(req.body,LOBBY_BODY_MAX_BYTES,AbortSignal.timeout(LOBBY_BODY_TIMEOUT_MS))}
+  catch(e){return e.message==='large'?lobbyNotDispatched('Request too large',413):lobbyNotDispatched('Invalid request',400)}
+  if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).length!==2||!Object.hasOwn(input,'conversation_id')||!Object.hasOwn(input,'message'))return lobbyNotDispatched('Request must contain exactly conversation_id and message',400);
+  if(typeof input.conversation_id!=='string'||!LOBBY_UUID_RE.test(input.conversation_id))return lobbyNotDispatched('conversation_id must be a canonical lowercase UUID',400);
+  let message;
+  try{message=lobbyMessage(input.message)}catch(e){return e.message==='large'?lobbyNotDispatched('Message too large',413):lobbyNotDispatched('Invalid message',400)}
+  try{return await lobbyChat(env,owner,input.conversation_id,message)}catch{return lobbyUnknown()}
+ }
  if(['/control','/control.js','/api/control'].includes(u.pathname)){
  if(req.method!=='GET'||u.origin!==HUB_ORIGIN||!env.MCP_GATEWAY)return fail('Not found',404);
  try {
@@ -216,7 +550,7 @@ export default {async fetch(req,env){
    return new Response(u.pathname==='/control'?CONTROL_HTML:CONTROL_JS,{headers:{'content-type':u.pathname==='/control'?'text/html; charset=utf-8':'application/javascript; charset=utf-8','cache-control':'private, no-store','x-content-type-options':'nosniff','content-security-policy':"default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",'referrer-policy':'no-referrer'}});
  }catch{return fail('Control centre unavailable',503)}
 }
- if(req.method==='GET'&&u.pathname==='/')return new Response(renderWorkspace().replace('<span class="pill">● OWNER ACCESS</span>','<a class="pill" href="/control">Control centre ↗</a>'),{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store','content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'","referrer-policy":'no-referrer','x-content-type-options':'nosniff'}});
+ if(req.method==='GET'&&u.pathname==='/')return new Response(renderWorkspace().replace('<span class="pill">● OWNER ACCESS</span>','<a class="pill" href="/control">Control centre ↗</a> <a class="pill" href="/lobby">Lobby ↗</a>'),{headers:{'content-type':'text/html; charset=utf-8','cache-control':'no-store','content-security-policy':"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'","referrer-policy":'no-referrer','x-content-type-options':'nosniff'}});
  if(req.method==='GET'&&u.pathname==='/api/health')return Response.json({status:env.AI?'live':'unready',service:'shards-agent-hub-edge',modelsAvailable:env.AI?availableModels().length:0},{headers:{'cache-control':'no-store'}});
  if(req.method==='GET'&&u.pathname==='/api/models')return Response.json({models:availableModels()},{headers:{'cache-control':'no-store'}});
  if(req.method==='POST'&&u.pathname==='/api/chat'){
@@ -241,5 +575,5 @@ export default {async fetch(req,env){
  return fail('Not found',404);
 }};
 
-const CONTROL_HTML="<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"theme-color\" content=\"#08101d\"><title>Shards / Control centre</title><style>\n:root{color-scheme:dark;font-family:system-ui,sans-serif;--bg:#08101d;--panel:#102636;--line:#294a5b;--text:#effbfc;--muted:#a0bac7;--accent:#84e4d1}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);line-height:1.5}a{color:var(--accent)}header{position:sticky;top:0;background:#0a1b2a;border-bottom:1px solid var(--line);z-index:2}header>div,main{max-width:1180px;margin:auto;padding:18px 22px}header>div{display:flex;justify-content:space-between;align-items:center;gap:12px}nav{display:flex;gap:10px;flex-wrap:wrap}nav a{text-decoration:none;font-size:13px}h1{font-size:clamp(27px,5vw,43px);letter-spacing:-.05em;margin:20px 0 6px}h2{font-size:20px;margin:0}p{color:var(--muted);margin:6px 0 18px}button,input,select{font:inherit;color:var(--text);background:#0b1d2c;border:1px solid #416474;border-radius:9px;padding:10px 13px;min-height:44px}button{cursor:pointer}button:disabled{opacity:.5;cursor:wait}:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:10px;margin:20px 0}.metric,.panel,.item{border:1px solid var(--line);background:var(--panel);border-radius:13px;padding:15px}.metric strong{display:block;font-size:28px;font-weight:650}.muted,small{color:var(--muted);font-size:12px}.panel{margin:16px 0}.controls{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.controls input{flex:1;min-width:120px}.list{display:grid;gap:8px}.item{background:#0a1c2b;overflow-wrap:anywhere}.item strong{font-size:16px}.item p{margin:5px 0}.tag{font-size:11px;border:1px solid #3a6373;border-radius:20px;padding:4px 9px;display:inline-block;color:var(--accent)}.warn{color:#f2d08f}.error{color:#ffb3b7}.scope{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.scope span{font-size:11px;background:#182d3b;padding:3px 7px;border-radius:6px}.empty{padding:12px;color:var(--muted)}#status{min-height:24px}footer{color:var(--muted);font-size:12px;margin:24px 0}@media(max-width:560px){header>div,main{padding:13px}header>div{align-items:flex-start;flex-direction:column}.panel{padding:12px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.controls select{max-width:100%}}</style></head><body><header><div><strong>◇ SHARDS / AGENTS</strong><nav aria-label=\"Workspace navigation\"><a href=\"/\">AI workspace</a><a href=\"#agents\">Agents</a><a href=\"#tasks\">Tasks</a><a href=\"https://mcp.shardsinc.co.uk/manage/workspace\">MCP workspace ↗</a></nav></div></header><main><div class=\"bar\"><div><div class=\"muted\">PRIVATE OPERATOR CONTROL PLANE</div><h1>Control centre</h1><p>Real registrations, authenticated receipts and task records. Read-only.</p></div><button id=\"refresh\" type=\"button\">Refresh data</button></div><div id=\"status\" role=\"status\" aria-live=\"polite\">Awaiting data</div><div class=\"metrics\"><div class=\"metric\"><small>Registered (shown)</small><strong id=\"registered\">—</strong></div><div class=\"metric\"><small>Auth observed</small><strong id=\"verified\">—</strong></div><div class=\"metric\"><small>Tasks (shown)</small><strong id=\"task-count\">—</strong></div><div class=\"metric\"><small>Queued / claimed</small><strong id=\"pending\">—</strong></div></div><section class=\"panel\" id=\"agents\"><div class=\"bar\"><h2>Agent directory</h2><small>Registration does not establish liveness</small></div><div class=\"controls\"><input id=\"search\" placeholder=\"Search agents\" aria-label=\"Search agents\"><select id=\"agent-filter\" aria-label=\"Agent status filter\"><option value=\"all\">All registrations</option><option value=\"verified\">Auth observed</option><option value=\"unverified\">Awaiting authentication</option><option value=\"revoked\">Revoked</option><option value=\"expired\">Expired / no valid key</option></select></div><div id=\"agent-list\" class=\"list\"></div></section><section class=\"panel\" id=\"tasks\"><div class=\"bar\"><h2>Tasks</h2><small>Recorded state, not proof of execution</small></div><div class=\"controls\"><select id=\"task-filter\" aria-label=\"Task state\"><option value=\"all\">All states</option><option value=\"queued\">Queued</option><option value=\"claimed\">Claimed</option><option value=\"completed\">Completed</option></select><select id=\"assignee\" aria-label=\"Task assignee\"><option value=\"all\">All assignees</option></select></div><div id=\"task-list\" class=\"list\"></div></section><section class=\"panel\"><h2>Runtime connections</h2><p>Hosted open-weight inference is available in the existing AI workspace. Lobby chat and external execution adapters are not configured in this release.</p><a href=\"/\">Open AI workspace ↗</a></section><footer>Read-only snapshot · credentials, task inputs and message bodies excluded · no automatic dispatch.</footer></main><script src=\"/control.js\" defer></script></body></html>";
+const CONTROL_HTML="<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"theme-color\" content=\"#08101d\"><title>Shards / Control centre</title><style>\n:root{color-scheme:dark;font-family:system-ui,sans-serif;--bg:#08101d;--panel:#102636;--line:#294a5b;--text:#effbfc;--muted:#a0bac7;--accent:#84e4d1}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);line-height:1.5}a{color:var(--accent)}header{position:sticky;top:0;background:#0a1b2a;border-bottom:1px solid var(--line);z-index:2}header>div,main{max-width:1180px;margin:auto;padding:18px 22px}header>div{display:flex;justify-content:space-between;align-items:center;gap:12px}nav{display:flex;gap:10px;flex-wrap:wrap}nav a{text-decoration:none;font-size:13px}h1{font-size:clamp(27px,5vw,43px);letter-spacing:-.05em;margin:20px 0 6px}h2{font-size:20px;margin:0}p{color:var(--muted);margin:6px 0 18px}button,input,select{font:inherit;color:var(--text);background:#0b1d2c;border:1px solid #416474;border-radius:9px;padding:10px 13px;min-height:44px}button{cursor:pointer}button:disabled{opacity:.5;cursor:wait}:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:10px;margin:20px 0}.metric,.panel,.item{border:1px solid var(--line);background:var(--panel);border-radius:13px;padding:15px}.metric strong{display:block;font-size:28px;font-weight:650}.muted,small{color:var(--muted);font-size:12px}.panel{margin:16px 0}.controls{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.controls input{flex:1;min-width:120px}.list{display:grid;gap:8px}.item{background:#0a1c2b;overflow-wrap:anywhere}.item strong{font-size:16px}.item p{margin:5px 0}.tag{font-size:11px;border:1px solid #3a6373;border-radius:20px;padding:4px 9px;display:inline-block;color:var(--accent)}.warn{color:#f2d08f}.error{color:#ffb3b7}.scope{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.scope span{font-size:11px;background:#182d3b;padding:3px 7px;border-radius:6px}.empty{padding:12px;color:var(--muted)}#status{min-height:24px}footer{color:var(--muted);font-size:12px;margin:24px 0}@media(max-width:560px){header>div,main{padding:13px}header>div{align-items:flex-start;flex-direction:column}.panel{padding:12px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.controls select{max-width:100%}}</style></head><body><header><div><strong>◇ SHARDS / AGENTS</strong><nav aria-label=\"Workspace navigation\"><a href=\"/\">AI workspace</a><a href=\"#agents\">Agents</a><a href=\"#tasks\">Tasks</a><a href=\"https://mcp.shardsinc.co.uk/manage/workspace\">MCP workspace ↗</a></nav></div></header><main><div class=\"bar\"><div><div class=\"muted\">PRIVATE OPERATOR CONTROL PLANE</div><h1>Control centre</h1><p>Real registrations, authenticated receipts and task records. Read-only.</p></div><button id=\"refresh\" type=\"button\">Refresh data</button></div><div id=\"status\" role=\"status\" aria-live=\"polite\">Awaiting data</div><div class=\"metrics\"><div class=\"metric\"><small>Registered (shown)</small><strong id=\"registered\">—</strong></div><div class=\"metric\"><small>Auth observed</small><strong id=\"verified\">—</strong></div><div class=\"metric\"><small>Tasks (shown)</small><strong id=\"task-count\">—</strong></div><div class=\"metric\"><small>Queued / claimed</small><strong id=\"pending\">—</strong></div></div><section class=\"panel\" id=\"agents\"><div class=\"bar\"><h2>Agent directory</h2><small>Registration does not establish liveness</small></div><div class=\"controls\"><input id=\"search\" placeholder=\"Search agents\" aria-label=\"Search agents\"><select id=\"agent-filter\" aria-label=\"Agent status filter\"><option value=\"all\">All registrations</option><option value=\"verified\">Auth observed</option><option value=\"unverified\">Awaiting authentication</option><option value=\"revoked\">Revoked</option><option value=\"expired\">Expired / no valid key</option></select></div><div id=\"agent-list\" class=\"list\"></div></section><section class=\"panel\" id=\"tasks\"><div class=\"bar\"><h2>Tasks</h2><small>Recorded state, not proof of execution</small></div><div class=\"controls\"><select id=\"task-filter\" aria-label=\"Task state\"><option value=\"all\">All states</option><option value=\"queued\">Queued</option><option value=\"claimed\">Claimed</option><option value=\"completed\">Completed</option></select><select id=\"assignee\" aria-label=\"Task assignee\"><option value=\"all\">All assignees</option></select></div><div id=\"task-list\" class=\"list\"></div></section><section class=\"panel\"><h2>Runtime connections</h2><p>Hosted open-weight inference is available in the existing AI workspace. Lobby chat is owner-only and routed through the fixed Lobby transport. External execution adapters are not configured in this release.</p><a href=\"/\">Open AI workspace ↗</a> · <a href=\"/lobby\">Open Lobby ↗</a></section><footer>Read-only snapshot · credentials, task inputs and message bodies excluded · no automatic dispatch.</footer></main><script src=\"/control.js\" defer></script></body></html>";
 const CONTROL_JS="'use strict';(()=>{\nconst $=id=>document.getElementById(id);let data=null;let busy=false;\nconst make=(tag,text,cls)=>{const el=document.createElement(tag);if(text!==undefined)el.textContent=String(text);if(cls)el.className=cls;return el};\nconst fmt=v=>v&&Number.isFinite(Date.parse(v))?new Date(v).toLocaleString():'Not observed';\nfunction state(a){\n if(a.disabled_at)return 'revoked';\n const expires=Date.parse(a.credential_expires_at);\n if(!Number.isFinite(expires)||expires<=Date.now())return 'expired';\n return Date.parse(a.last_authenticated_at)>=Date.parse(a.credential_issued_at)?'verified':'unverified';\n}\nconst labels={revoked:'Revoked',expired:'Expired / no valid key',verified:'Auth observed',unverified:'Awaiting authentication'};\nfunction render(){\n if(!data)return;const list=$('agent-list'),tasks=$('task-list'),q=$('search').value.toLowerCase().trim(),f=$('agent-filter').value;\n list.replaceChildren();tasks.replaceChildren();\n const agents=data.agents.filter(a=>(f==='all'||state(a)===f)&&[a.name,a.client].join(' ').toLowerCase().includes(q));\n for(const a of agents){const el=make('article',undefined,'item'),row=make('div',undefined,'bar');row.append(make('strong',a.name),make('span',labels[state(a)],'tag'));el.append(row,make('p',a.client+' · last authentication: '+fmt(a.last_authenticated_at),'muted'),make('small','Credential expiry: '+fmt(a.credential_expires_at)));const sc=make('div',undefined,'scope');for(const s of a.scopes||[])sc.append(make('span',s));el.append(sc);list.append(el)}\n if(!agents.length)list.append(make('p','No matching agent records.','empty'));\n const tf=$('task-filter').value,af=$('assignee').value;\n for(const t of data.tasks.filter(t=>(tf==='all'||t.state===tf)&&(af==='all'||t.assignee_id===af))){const el=make('article',undefined,'item'),row=make('div',undefined,'bar');row.append(make('strong',t.title),make('span',t.state,'tag'));el.append(row,make('p','Assignee: '+(t.assignee_name||'Unknown')+' · created '+fmt(t.created_at),'muted'),make('small','Task '+t.id));tasks.append(el)}\n if(!tasks.childElementCount)tasks.append(make('p','No matching task records in this snapshot.','empty'));\n}\nfunction renderAssignees(){\n const select=$('assignee'),previous=select.value;\n const options=new Map((data?.agents||[]).map(a=>[a.id,a.name]));\n for(const task of data?.tasks||[]){\n  if(task.assignee_id&&!options.has(task.assignee_id))options.set(task.assignee_id,task.assignee_name||'Unknown assignee');\n }\n const all=make('option','All assignees');all.value='all';\n select.replaceChildren(all);\n for(const [id,name] of options){const option=make('option',name);option.value=id;select.append(option)}\n select.value=options.has(previous)?previous:'all';\n}\nasync function refresh(){if(busy)return;busy=true;$('refresh').disabled=true;$('status').className='muted';$('status').textContent='Reading the authenticated registry…';try{\n const r=await fetch('/api/control',{cache:'no-store',credentials:'same-origin'});if(!r.ok)throw Error('HTTP '+r.status);const next=await r.json();\n if(!Array.isArray(next.agents)||!Array.isArray(next.tasks)||!next.limits||!next.checked_at)throw Error('Invalid snapshot');\n data=next;$('registered').textContent=data.agents.length;$('verified').textContent=data.agents.filter(a=>state(a)==='verified').length;$('task-count').textContent=data.tasks.length;$('pending').textContent=data.tasks.filter(t=>['queued','claimed'].includes(t.state)).length;\n renderAssignees();\n $('status').textContent='Checked '+fmt(data.checked_at)+(data.limits.agents_truncated||data.limits.tasks_truncated?' · Showing at most 100 records per list; results are truncated.':' · Snapshot loaded.');render();\n }catch(e){data=null;renderAssignees();for(const id of ['registered','verified','task-count','pending'])$(id).textContent='—';$('agent-list').replaceChildren(make('p','Agent data unavailable.','empty'));$('task-list').replaceChildren(make('p','Task data unavailable.','empty'));$('status').className='error';$('status').textContent='Live data unavailable ('+e.message+'). No cached or simulated records shown.'}finally{busy=false;$('refresh').disabled=false}}\n $('refresh').addEventListener('click',refresh);$('search').addEventListener('input',render);for(const id of ['agent-filter','task-filter','assignee'])$(id).addEventListener('change',render);refresh();\n})();";
