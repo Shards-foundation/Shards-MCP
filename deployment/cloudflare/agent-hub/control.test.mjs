@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { generateKeyPairSync, sign, createHash, webcrypto } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import hub from './worker.mjs';
 
 // Import the actual gateway module without relying on repository-wide module settings.
@@ -14,8 +15,8 @@ const issuer='https://dashboard-test.cloudflareaccess.com';
 const audience='hub-test-audience';
 const envBase={ACCESS_TEAM:'dashboard-test',HUB_REGISTRY_AUD:audience,ACCESS_AUD:'mcp-audience',CONNECT_ACCESS_AUD:'connect-audience'};
 const encode=o=>Buffer.from(JSON.stringify(o)).toString('base64url');
-function token(overrides={}, key=privateKey) {
- const p=encode({alg:'RS256',kid:'test-key'})+'.'+encode({iss:issuer,aud:[audience],sub:'owner-a',exp:Math.floor(Date.now()/1000)+300,...overrides});
+function token(overrides={}, key=privateKey, header={}) {
+ const p=encode({alg:'RS256',kid:'test-key',...header})+'.'+encode({iss:issuer,aud:[audience],sub:'owner-a',exp:Math.floor(Date.now()/1000)+300,...overrides});
  return p+'.'+sign('RSA-SHA256',Buffer.from(p),key).toString('base64url');
 }
 const originalFetch=globalThis.fetch;
@@ -106,4 +107,59 @@ test('upstream redirect or invalid response never becomes successful data',async
   const res=await hub.fetch(request(dashboard,token()),{MCP_GATEWAY:{fetch:async()=>response()}});
   assert.ok(res.status>=400);
  }
+});
+
+test('reject equal or missing Hub audience, public route and invalid JWT claims',async()=>{
+ const {calls,db}=fakeDB();
+ for(const aud of [undefined,envBase.ACCESS_AUD,envBase.CONNECT_ACCESS_AUD]){
+  assert.equal((await edge.fetch(request(internal,token()),{...envBase,HUB_REGISTRY_AUD:aud,EDGE_DB:db})).status,503);
+ }
+ const now=Math.floor(Date.now()/1000);
+ for(const jwt of [token({},privateKey,{alg:'none'}),token({nbf:now+300}),token({exp:now+86401})]){
+  assert.equal((await edge.fetch(request(internal,jwt),{...envBase,EDGE_DB:db})).status,401);
+ }
+ assert.equal((await edge.fetch(request('https://mcp.shardsinc.co.uk/dashboard',token()),{...envBase,EDGE_DB:db})).status,404);
+ assert.equal(calls.length,0);
+});
+test('cross-origin requests cannot reach private dashboard binding',async()=>{
+ let calls=0;
+ const binding={fetch:async()=>{calls++;return Response.json({agents:[],tasks:[],limits:{}})}};
+ for(const headers of [{origin:'https://evil.example'},{'sec-fetch-site':'cross-site'},{'sec-fetch-site':'same-site'},{origin:'null'}]){
+  const req=new Request(dashboard,{headers:{'Cf-Access-Jwt-Assertion':token(),...headers}});
+  assert.equal((await hub.fetch(req,{MCP_GATEWAY:binding})).status,403);
+ }
+ assert.equal(calls,0);
+ const req=new Request(dashboard,{headers:{'Cf-Access-Jwt-Assertion':token(),origin:'https://agents.shardsinc.co.uk','sec-fetch-site':'same-origin'}});
+ assert.equal((await hub.fetch(req,{MCP_GATEWAY:binding})).status,200);
+ assert.equal(calls,1);
+});
+test('real SQLite schema isolates two owners, excludes other tenants and private fields',async()=>{
+ const sql=new DatabaseSync(':memory:');
+ try {
+  sql.exec(await readFile(new URL('../schema.sql',import.meta.url),'utf8'));
+  const now='2026-11-25T00:00:00Z';
+  sql.prepare('INSERT INTO tenants VALUES(?,?,?)').run('other-tenant','Other',now);
+  const insert=sql.prepare('INSERT INTO agents(id,tenant_id,name,client,scopes,created_by,created_at) VALUES(?,?,?,?,?,?,?)');
+  for(const [id,tenant,owner,client] of [
+   ['a','shards-internal','owner-a','custom-mcp'],['b','shards-internal','owner-b','custom-mcp'],
+   ['foreign','other-tenant','owner-a','custom-mcp'],['operator','shards-internal','owner-a','operator-ui']
+  ])insert.run(id,tenant,id,client,'["message:read"]',digest(owner),now);
+  const task=sql.prepare('INSERT INTO agent_tasks(id,tenant_id,creator_id,assignee_id,title,input_json,state,created_at,result_json) VALUES(?,?,?,?,?,?,?,?,?)');
+  for(const [id,tenant,creator,assignee] of [['aa','shards-internal','a','a'],['bb','shards-internal','b','b'],['ab','shards-internal','a','b'],['ff','other-tenant','foreign','foreign']]){
+   task.run(id,tenant,creator,assignee,id,'{"private":"input"}','queued',now,'{"private":"result"}');
+  }
+  const db={prepare(query){assert.match(query,/^SELECT /i);return {bind(...args){return {
+   first:async()=>sql.prepare(query).get(...args)??null,
+   all:async()=>({success:true,results:sql.prepare(query).all(...args)})
+  }}}}};
+  for(const [owner,agent,expected] of [['owner-a','a',['aa','ab']],['owner-b','b',['ab','bb']],['owner-c',null,[]]]){
+   const res=await edge.fetch(request(internal,token({sub:owner})),{...envBase,EDGE_DB:db});
+   assert.equal(res.status,200);
+   const result=await res.json();
+   assert.deepEqual(result.agents.map(a=>a.id),agent?[agent]:[]);
+   assert.deepEqual(result.tasks.map(t=>t.id).sort(),expected);
+   assert.doesNotMatch(JSON.stringify(result),/input_json|result_json|"private"|token_sha256/);
+  }
+  assert.equal(sql.prepare('SELECT COUNT(*) AS n FROM agent_tasks').get().n,4);
+ }finally{sql.close()}
 });
