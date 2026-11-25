@@ -1,5 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { generateKeyPairSync, sign } from 'node:crypto';
+import { once } from 'node:events';
+import { readFile } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
+import { runInNewContext } from 'node:vm';
 import hub from './worker.mjs';
 
 const HUB = 'https://agents.shardsinc.co.uk';
@@ -121,7 +127,8 @@ test('lobby page and script require a verified owner session and keep strict hea
     for (const secret of SECRET_VALUES) assert.equal(body.includes(secret), false);
     if (path === '/lobby') {
       assert.match(body, /Owner Lobby/);
-      assert.match(body, /Reconcile the local adapter/);
+      assert.match(body, /reconcile the local adapter/i);
+      assert.match(body, /OpenClaw tool policy applies/);
       assert.match(body, /not proof that an agent is online/);
       assert.doesNotMatch(body, /online now/i);
       assert.match(body, /href="\/control"/);
@@ -328,6 +335,101 @@ test('lobby derives stable owner-namespaced UUIDs and separates owners', async (
   assert.notEqual(seen[0], UUID_B);
 });
 
+test('the actual private session bridge rejects forged and unauthorized owners', async t => {
+  const source = await readFile(new URL('../worker.js', import.meta.url));
+  const {default: edge} = await import('data:text/javascript;base64,' + source.toString('base64'));
+  const {privateKey, publicKey} = generateKeyPairSync('rsa', {modulusLength:2048});
+  const issuer = 'https://lobby-test.cloudflareaccess.com';
+  const audience = 'lobby-hub-test';
+  const jwt = (claims = {}, key = privateKey) => {
+    const header = b64({alg:'RS256', kid:'lobby-test'});
+    const payload = b64({iss:issuer, aud:[audience], sub:'owner-a', exp:Math.floor(Date.now()/1000)+300, ...claims});
+    const data = header + '.' + payload;
+    return data + '.' + sign('RSA-SHA256', Buffer.from(data), key).toString('base64url');
+  };
+  const namespaces = [];
+  let deleted = false;
+  const binding = {fetch: req => {
+    assert.equal(req.url, 'https://agent-hub-registry.internal/session');
+    return edge.fetch(req, {
+      ACCESS_TEAM:'lobby-test', HUB_REGISTRY_AUD:audience, ACCESS_AUD:'operator-test',
+      CONNECT_ACCESS_AUD:'connect-test', EDGE_DB:{prepare(sql) {
+        assert.match(sql, /^SELECT deleted_at FROM operator_accounts WHERE id=\?$/);
+        return {bind: () => ({first: async () => deleted ? {deleted_at:'2026-11-25'} : null})};
+      }}
+    });
+  }};
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    if (String(url) === issuer + '/cdn-cgi/access/certs') {
+      return Response.json({keys:[{...publicKey.export({format:'jwk'}), kid:'lobby-test'}]});
+    }
+    assert.equal(String(url), TRANSPORT + '/chat');
+    const payload = JSON.parse(init.body);
+    namespaces.push(payload.conversation_id);
+    return Response.json({conversation_id:payload.conversation_id, reply:'sample reply'});
+  });
+  const send = assertion => hub.fetch(chat({conversation_id:UUID_A, message:'sample'}, {jwt:assertion}), env(binding));
+  const forged = generateKeyPairSync('rsa', {modulusLength:2048}).privateKey;
+  for (const assertion of [jwt({}, forged), jwt({aud:['operator-test']}), jwt({iss:'https://other.example'}), jwt({exp:1})]) {
+    assert.equal((await send(assertion)).status, 401);
+  }
+  assert.equal(namespaces.length, 0);
+  assert.equal((await send(jwt())).status, 200);
+  assert.equal((await send(jwt())).status, 200);
+  assert.equal((await send(jwt({sub:'owner-b'}))).status, 200);
+  assert.equal(namespaces[0], namespaces[1]);
+  assert.notEqual(namespaces[0], namespaces[2]);
+  deleted = true;
+  assert.equal((await send(jwt())).status, 401);
+  assert.equal(namespaces.length, 3);
+});
+
+test('Lobby transport JSON and outcome mapping work with the merged loopback adapter', {timeout:10000}, async t => {
+  const child = spawn('python3', ['-u', '-c', `
+import sys, tempfile
+from pathlib import Path
+from test_lobby_adapter import Harness
+with tempfile.TemporaryDirectory() as root:
+    harness = Harness(state_dir=Path(root) / "state")
+    try:
+        print(harness.port, harness.token(), flush=True)
+        for line in sys.stdin:
+            harness.upstream.server.mode = "error"
+            print("ready", flush=True)
+    finally:
+        harness.close()
+`], {cwd:new URL('../../oracle/lobby-adapter/', import.meta.url), stdio:['pipe','pipe','pipe']});
+  const exited = once(child, 'exit');
+  const lines = createInterface({input:child.stdout});
+  t.after(async () => {child.stdin.end(); await exited;});
+  const [ready] = await once(lines, 'line');
+  const [port, token] = ready.split(' ');
+  assert.match(port, /^\d+$/);
+  const loopback = 'http://127.0.0.1:' + port;
+  const actualFetch = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', (url, init) => {
+    const target = new URL(url);
+    assert.equal(target.origin, TRANSPORT);
+    // Node supplies the local Host and Content-Length. The external tunnel
+    // still has to preserve equivalent framing and strip external headers.
+    const headers = new Headers(init.headers);
+    headers.delete('cf-access-client-id');
+    headers.delete('cf-access-client-secret');
+    return actualFetch(loopback + target.pathname, {...init, headers});
+  });
+  const config = env(session().binding, {LOBBY_ADAPTER_TOKEN:token});
+  const send = () => hub.fetch(chat({conversation_id:UUID_A, message:'sample 🌲'}), config);
+  const health = () => hub.fetch(request('/api/lobby/health'), config);
+  assert.deepEqual(await (await health()).json(), {status:'ok'});
+  assert.deepEqual(await (await send()).json(), {reply:'fake upstream reply'});
+  const changed = once(lines, 'line');
+  child.stdin.write('error\n');
+  await changed;
+  assert.equal((await (await send()).json()).outcome, 'unknown');
+  assert.equal((await (await send()).json()).outcome, 'blocked');
+  assert.deepEqual(await (await health()).json(), {status:'blocked', reconcile:true});
+});
+
 test('lobby rejects caller owner input, unknown fields and invalid text/UUID/size', async () => {
   const {binding} = session(() => true);
   const cases = [
@@ -380,7 +482,11 @@ test('lobby maps adapter outcomes conservatively and never retries', async () =>
     {status: 503, body: {error: 'busy'}, expectStatus: 503, outcome: 'not_dispatched', retryable: true},
     {status: 503, body: {error: 'dispatch state unavailable'}, expectStatus: 502, outcome: 'unknown', reconcile: true},
     {status: 500, body: {error: 'internal error'}, expectStatus: 502, outcome: 'unknown', reconcile: true},
-    {status: 401, body: {error: 'unauthorized'}, expectStatus: 502, outcome: 'not_dispatched'},
+    {status: 504, body: {error: 'upstream timeout', outcome: 'not_dispatched'}, expectStatus: 502, outcome: 'not_dispatched'},
+    {status: 401, body: {error: 'unauthorized'}, expectStatus: 502, outcome: 'unknown', reconcile: true},
+    {status: 429, body: {error: 'proxy rate limited'}, expectStatus: 502, outcome: 'unknown', reconcile: true},
+    {status: 403, body: {error: 'proxy denied', outcome: 'not_dispatched'}, expectStatus: 502, outcome: 'unknown', reconcile: true},
+    {status: 503, body: {error: 'busy', outcome: 'unknown'}, expectStatus: 502, outcome: 'unknown', reconcile: true},
     {status: 302, body: null, headers: {location: 'https://evil.example'}, expectStatus: 502, outcome: 'unknown', reconcile: true},
     {status: 200, body: {conversation_id: 'wrong', reply: 'x'}, expectStatus: 502, outcome: 'unknown', reconcile: true}
   ];
@@ -393,11 +499,137 @@ test('lobby maps adapter outcomes conservatively and never retries', async () =>
     assert.equal(response.status, entry.expectStatus, JSON.stringify(entry));
     const data = await response.json();
     assert.equal(data.outcome, entry.outcome, JSON.stringify(entry));
+    assert.equal(response.headers.get('x-shards-lobby-outcome'), entry.outcome === 'not_dispatched' ? 'not_dispatched' : null);
     if (entry.reconcile) assert.equal(data.reconcile, true, JSON.stringify(entry));
     if (entry.retryable) assert.equal(data.retryable, true, JSON.stringify(entry));
     assert.equal(mock.calls.length, 1, 'exactly one attempt');
     mock.restore();
   }
+});
+
+async function loadLobby(fetch, storage = new Map()) {
+  const response = await hub.fetch(request('/lobby.js'), env(session().binding));
+  assert.equal(response.status, 200);
+  const element = () => ({
+    value: '', disabled: false, hidden: false, listeners: {},
+    append() {},
+    addEventListener(name, listener) { this.listeners[name] = listener; }
+  });
+  const nodes = new Map();
+  const get = name => {
+    if (!nodes.has(name)) nodes.set(name, element());
+    return nodes.get(name);
+  };
+  runInNewContext(await response.text(), {
+    document: {getElementById: get, createElement: element}, fetch, crypto, AbortSignal,
+    sessionStorage: {
+      getItem: key => storage.get(key),
+      setItem: (key, value) => storage.set(key, value),
+      removeItem: key => storage.delete(key)
+    }
+  });
+  await new Promise(setImmediate);
+  return get;
+}
+
+test('Lobby requires explicit reconciliation after unknown, blocked or disconnected sends', async () => {
+  for (const failure of [
+    () => Response.json({outcome:'unknown'}, {status:502}),
+    () => Response.json({outcome:'blocked'}, {status:503}),
+    () => Response.json({outcome:'not_dispatched'}, {status:429}),
+    () => { throw Error('connection lost'); }
+  ]) {
+    const storage = new Map();
+    let sends = 0, blocked = false;
+    const fetch = async path => {
+      if (path === '/api/lobby/health') {
+        return blocked ? Response.json({status:'blocked'}, {status:503}) : Response.json({status:'ok'});
+      }
+      assert.equal(path, '/api/lobby/chat');
+      sends++;
+      return failure();
+    };
+    const get = await loadLobby(fetch, storage);
+    const submit = () => get('composer').listeners.submit({preventDefault() {}});
+    assert.equal(get('send').disabled, false);
+    get('message').value = 'sample';
+    await submit();
+    assert.equal(get('send').disabled, true);
+    await submit();
+    assert.equal(sends, 1);
+    const reloaded = await loadLobby(fetch, storage);
+    assert.equal(reloaded('send').disabled, true, 'a healthy transport alone cannot unlock a reload');
+    blocked = true;
+    await reloaded('reconciled').listeners.click();
+    assert.equal(reloaded('send').disabled, true);
+    blocked = false;
+    await reloaded('reconciled').listeners.click();
+    assert.equal(reloaded('send').disabled, false);
+    assert.equal(sends, 1, 'checking recovery does not resend');
+  }
+});
+
+test('Lobby re-enables Send after a confirmed non-dispatch from the Hub', async () => {
+  const get = await loadLobby(async path => path === '/api/lobby/health'
+    ? Response.json({status:'ok'})
+    : Response.json({outcome:'not_dispatched', retryable:true}, {
+      status:503, headers:{'x-shards-lobby-outcome':'not_dispatched'}
+    }));
+  get('message').value = 'sample';
+  await get('composer').listeners.submit({preventDefault() {}});
+  assert.equal(get('send').disabled, false);
+  assert.equal(get('reconciled').hidden, true);
+});
+
+test('Lobby refuses malformed UTF-8 response bodies and unpaired Unicode in requests', async () => {
+  const invalid = await runChat({conversation_id:UUID_A, message:'\ud800'});
+  assert.equal(invalid.response.status, 400);
+  assert.equal(invalid.calls.length, 0);
+  const reply = await runChat({conversation_id:UUID_A, message:'sample'}, {handler:({body}) =>
+    new Response(Buffer.concat([
+      Buffer.from('{"conversation_id":"' + body.conversation_id + '","reply":"'),
+      Buffer.from([0xff]), Buffer.from('"}')
+    ]), {headers:{'content-type':'application/json'}})
+  });
+  assert.equal(reply.data.outcome, 'unknown');
+});
+
+test('Lobby transport deadline also bounds reading a stalled response body', async t => {
+  const controller = new AbortController();
+  const timeout = AbortSignal.timeout;
+  t.mock.method(AbortSignal, 'timeout', ms => ms === 45000 ? controller.signal : timeout(ms));
+  const mock = transport(() => new Response(new ReadableStream({
+    pull() { controller.abort(); }
+  }), {headers:{'content-type':'application/json'}}));
+  try {
+    const response = await Promise.race([
+      hub.fetch(chat({conversation_id:UUID_A, message:'sample'}), env(session().binding)),
+      new Promise(resolve => setTimeout(() => resolve(null), 300))
+    ]);
+    assert.ok(response, 'response must terminate when its transport deadline expires');
+    assert.equal((await response.json()).outcome, 'unknown');
+    assert.equal(mock.calls.length, 1);
+  } finally { mock.restore(); }
+});
+
+test('Lobby bounds reading a stalled inbound request before dispatch', async t => {
+  const controller = new AbortController();
+  t.mock.method(AbortSignal, 'timeout', () => controller.signal);
+  const req = new Request(HUB + '/api/lobby/chat', {
+    method:'POST', duplex:'half',
+    headers:{'Cf-Access-Jwt-Assertion':assertion(), origin:HUB, 'content-type':'application/json'},
+    body:new ReadableStream({pull() { controller.abort(); }})
+  });
+  const mock = transport(() => { throw Error('unexpected transport call'); });
+  try {
+    const response = await Promise.race([
+      hub.fetch(req, env(session().binding)),
+      new Promise(resolve => setTimeout(() => resolve(null), 300))
+    ]);
+    assert.ok(response, 'an expired request body must be rejected');
+    assert.equal(response.status, 400);
+    assert.equal(mock.calls.length, 0);
+  } finally { mock.restore(); }
 });
 
 test('lobby treats malformed, oversized, secret-bearing and failed responses as unknown', async () => {
@@ -475,6 +707,12 @@ test('lobby health reports transport state without liveness or internal details'
   assert.equal(mock.calls.length, 1);
   mock.restore();
 
+  mock = transport(() => Response.json({status:'ok'}));
+  response = await hub.fetch(health(), env(binding));
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {status:'unavailable'});
+  mock.restore();
+
   mock = transport(() => new Response(null, {status: 401}));
   response = await hub.fetch(health(), env(binding));
   assert.equal(response.status, 503);
@@ -544,6 +782,20 @@ test('existing control, workspace and public hub routes are unchanged', async ()
   response = await hub.fetch(request('/api/models', {jwt}), envObj);
   assert.equal(response.status, 200);
   assert.equal((await response.json()).models.length, 4);
+
+  const inference = {run: async (model, options) => {
+    assert.equal(model, '@cf/qwen/qwen3.8-27b');
+    assert.equal(options.stream, true);
+    assert.deepEqual(options.messages.at(-1), {role:'user', content:'sample'});
+    return new Response('data: {"response":"sample reply"}\n\n').body;
+  }};
+  response = await hub.fetch(request('/api/chat', {
+    jwt, method:'POST', headers:{origin:HUB, 'content-type':'application/json'},
+    body:{model:'qwen', messages:[{role:'user', content:'sample'}]}
+  }), {...envObj, AI:inference});
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /^text\/event-stream/);
+  assert.match(await response.text(), /sample reply/);
 
   assert.equal((await hub.fetch(request('/nope', {jwt}), envObj)).status, 404);
 });

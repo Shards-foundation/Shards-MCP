@@ -196,13 +196,15 @@ const LOBBY_MESSAGE_MAX_BYTES=12*1024;
 const LOBBY_BODY_MAX_BYTES=16*1024;
 const LOBBY_RESPONSE_MAX_BYTES=64*1024;
 const LOBBY_HEALTH_MAX_BYTES=4096;
+const LOBBY_ADAPTER_MODEL='openclaw/shards';
+const LOBBY_BODY_TIMEOUT_MS=10000;
 const LOBBY_TIMEOUT_MS=45000;
 const LOBBY_UUID_RE=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const LOBBY_UNKNOWN='The Lobby outcome is unknown. Reconcile the local adapter before resubmitting.';
 const LOBBY_BLOCKED='Lobby chat is blocked until an operator reconciles the local adapter.';
 class LobbyConfigError extends Error {}
 class LobbyAuthError extends Error {}
-const lobbyEncoder=new TextEncoder(),lobbyDecoder=new TextDecoder();
+const lobbyEncoder=new TextEncoder(),lobbyDecoder=new TextDecoder('utf-8',{fatal:true});
 
 function lobbyJwtPart(value){
   if(typeof value!=='string'||!/^[A-Za-z0-9_-]+$/.test(value)||value.length>9000)throw new Error('bad');
@@ -281,7 +283,7 @@ async function lobbyOwner(request,env){
   return sub;
 }
 
-async function lobbyRequest(env,path,method,body){
+async function lobbyRequest(env,path,method,maxBytes,body){
   const config=lobbyTransportConfig(env);
   const headers=new Headers({
     accept:'application/json',
@@ -289,82 +291,94 @@ async function lobbyRequest(env,path,method,body){
     'cf-access-client-secret':config.secret,
     authorization:'Bearer '+config.token
   });
-  const init={method,headers,redirect:'manual',cache:'no-store',signal:AbortSignal.timeout(LOBBY_TIMEOUT_MS)};
+  const signal=AbortSignal.timeout(LOBBY_TIMEOUT_MS);
+  const init={method,headers,redirect:'manual',cache:'no-store',signal};
   if(body!==undefined){headers.set('content-type','application/json');init.body=JSON.stringify(body)}
-  try{return await fetch(LOBBY_TRANSPORT_ORIGIN+path,init)}catch{return null}
+  try{
+    const response=await fetch(LOBBY_TRANSPORT_ORIGIN+path,init);
+    if((response.status>=300&&response.status<400)||!lobbyIsJson(response.headers)){
+      void response.body?.cancel().catch(()=>{});
+      return null;
+    }
+    const data=await lobbyReadJson(response.body,maxBytes,signal);
+    return {status:response.status,data};
+  }catch{return null}
 }
 
-async function lobbyReadJson(response,maxBytes){
-  if(!response.body)return null;
-  const reader=response.body.getReader();
+function lobbyIsJson(headers){
+  return (headers.get('content-type')||'').split(';')[0].trim().toLowerCase()==='application/json';
+}
+
+async function lobbyReadJson(body,maxBytes,signal){
+  if(!body)throw new Error('invalid');
+  const reader=body.getReader();
+  const cancel=()=>{void reader.cancel().catch(()=>{})};
+  signal.addEventListener('abort',cancel,{once:true});
   const chunks=[];let bytes=0;
   try{
+    signal.throwIfAborted();
     while(true){
       const {done,value}=await reader.read();
+      signal.throwIfAborted();
       if(done)break;
       bytes+=value.byteLength;
-      if(bytes>maxBytes){try{await reader.cancel()}catch{}return null}
+      if(bytes>maxBytes)throw new Error('large');
       chunks.push(value);
     }
-  }catch{return null}
+  }catch(error){
+    cancel();
+    throw error;
+  }finally{
+    signal.removeEventListener('abort',cancel);
+    reader.releaseLock();
+  }
   const out=new Uint8Array(bytes);let pos=0;
   for(const chunk of chunks){out.set(chunk,pos);pos+=chunk.byteLength}
-  try{return JSON.parse(lobbyDecoder.decode(out))}catch{return null}
+  return JSON.parse(lobbyDecoder.decode(out));
 }
 
 function lobbyUnknown(){return agentJson({error:LOBBY_UNKNOWN,outcome:'unknown',reconcile:true},502)}
+function lobbyNotDispatched(error,status,retryable=false){
+  const response=agentJson({error,outcome:'not_dispatched',...(retryable?{retryable:true}:{})},status);
+  response.headers.set('x-shards-lobby-outcome','not_dispatched');
+  return response;
+}
 
 async function lobbyChat(env,owner,conversationId,message){
   const upstreamId=await lobbyConversationId(owner,conversationId);
-  const response=await lobbyRequest(env,'/chat','POST',{conversation_id:upstreamId,message});
+  const response=await lobbyRequest(env,'/chat','POST',LOBBY_RESPONSE_MAX_BYTES,{conversation_id:upstreamId,message});
   if(!response)return lobbyUnknown();
-  if(response.status>=300&&response.status<400)return lobbyUnknown();
-  const data=await lobbyReadJson(response,LOBBY_RESPONSE_MAX_BYTES);
+  const {status,data}=response;
   if(!data||typeof data!=='object'||Array.isArray(data))return lobbyUnknown();
-  if(response.status===200){
+  if(status===200){
     if(typeof data.reply!=='string'||!data.reply.trim()||data.conversation_id!==upstreamId)return lobbyUnknown();
     if(data.reply.length>LOBBY_MESSAGE_MAX_CHARS)return lobbyUnknown();
     if(lobbyEncoder.encode(data.reply).byteLength>LOBBY_MESSAGE_MAX_BYTES)return lobbyUnknown();
-    if(lobbyHasControlChars(data.reply))return lobbyUnknown();
+    if(!data.reply.isWellFormed()||lobbyHasControlChars(data.reply))return lobbyUnknown();
     if(lobbySecrets(env).some(secret=>data.reply.includes(secret)))return lobbyUnknown();
     return agentJson({reply:data.reply},200);
   }
-  const error=typeof data.error==='string'?data.error:'';
-  if(response.status===503&&error==='reconciliation required')
+  const {error,outcome}=data;
+  const fields=Object.keys(data).length;
+  if(status===503&&fields===1&&error==='reconciliation required')
     return agentJson({error:LOBBY_BLOCKED,outcome:'blocked',reconcile:true},503);
-  if(response.status===503&&error==='busy')
-    return agentJson({error:'The Lobby is busy. Try again shortly.',outcome:'not_dispatched',retryable:true},503);
-  if(response.status===503&&error==='dispatch state unavailable')return lobbyUnknown();
-  if(data.outcome==='not_dispatched')
-    return agentJson({error:'The Lobby transport did not dispatch the message. You may try again.',outcome:'not_dispatched'},502);
-  if(response.status>=400&&response.status<500&&data.outcome!=='unknown')
-    return agentJson({error:'The Lobby transport rejected the request.',outcome:'not_dispatched'},502);
+  if(status===503&&fields===1&&error==='busy')
+    return lobbyNotDispatched('The Lobby is busy. Try again shortly.',503,true);
+  // Only the merged adapter's connect failure responses confirm non-dispatch.
+  if(fields===2&&outcome==='not_dispatched'&&(
+    (status===502&&error==='upstream unavailable')||(status===504&&error==='upstream timeout')
+  ))return lobbyNotDispatched('The Lobby transport did not dispatch the message. You may try again.',502);
   return lobbyUnknown();
 }
 
 async function lobbyHealth(env){
-  const response=await lobbyRequest(env,'/health','GET');
+  const response=await lobbyRequest(env,'/health','GET',LOBBY_HEALTH_MAX_BYTES);
   if(!response)return agentJson({status:'unavailable'},503);
-  const data=await lobbyReadJson(response,LOBBY_HEALTH_MAX_BYTES);
-  if(response.status===200&&data?.status==='ok')return agentJson({status:'ok'},200);
-  if(response.status===503&&data?.status==='blocked')return agentJson({status:'blocked',reconcile:true},503);
+  const {data}=response;
+  if(data?.model!==LOBBY_ADAPTER_MODEL)return agentJson({status:'unavailable'},503);
+  if(response.status===200&&data.status==='ok')return agentJson({status:'ok'},200);
+  if(response.status===503&&data.status==='blocked')return agentJson({status:'blocked',reconcile:true},503);
   return agentJson({status:'unavailable'},503);
-}
-
-async function lobbyBody(request){
-  const reader=request.body?.getReader();
-  if(!reader)throw new Error('invalid');
-  const chunks=[];let bytes=0;
-  while(true){
-    const {done,value}=await reader.read();
-    if(done)break;
-    bytes+=value.byteLength;
-    if(bytes>LOBBY_BODY_MAX_BYTES){try{await reader.cancel()}catch{}throw new Error('large')}
-    chunks.push(value);
-  }
-  const out=new Uint8Array(bytes);let pos=0;
-  for(const chunk of chunks){out.set(chunk,pos);pos+=chunk.byteLength}
-  try{return JSON.parse(lobbyDecoder.decode(out))}catch{throw new Error('invalid')}
 }
 
 function lobbyHasControlChars(value){
@@ -376,7 +390,7 @@ function lobbyHasControlChars(value){
 }
 
 function lobbyMessage(value){
-  if(typeof value!=='string'||!value.trim())throw new Error('message');
+  if(typeof value!=='string'||!value.trim()||!value.isWellFormed())throw new Error('message');
   if(value.length>LOBBY_MESSAGE_MAX_CHARS)throw new Error('large');
   if(lobbyEncoder.encode(value).byteLength>LOBBY_MESSAGE_MAX_BYTES)throw new Error('large');
   if(lobbyHasControlChars(value))throw new Error('message');
@@ -386,12 +400,20 @@ function lobbyMessage(value){
 const LOBBY_HTML=`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0b0f10"><title>Shards Lobby · Owner chat</title><style>
 :root{color-scheme:dark;--bg:#0a0e10;--panel:#111719;--line:#283630;--ink:#e7f1e9;--muted:#849a91;--accent:#c2ffca;--warn:#ffd28a;--bad:#ffb3b7;font-family:Inter,system-ui,sans-serif}*{box-sizing:border-box}html,body{height:100%}body{margin:0;background:var(--bg);color:var(--ink);font-size:15px;display:flex;flex-direction:column;min-height:100dvh}header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line);background:#0d1315;position:sticky;top:0;z-index:1}header b{letter-spacing:.14em;font-size:13px}header nav a{color:var(--accent);text-decoration:none;font-size:13px;margin-left:14px}main{flex:1;display:flex;flex-direction:column;min-height:0;max-width:820px;width:100%;margin:0 auto;padding:0 12px}.intro{padding:18px 4px 10px}.intro h1{font-size:clamp(22px,5vw,30px);letter-spacing:-.04em;margin:0 0 6px}.intro p{color:var(--muted);font-size:12px;line-height:1.6;margin:0}.status{margin:10px 4px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);font-size:12px;color:var(--muted)}.status.ok{color:var(--accent);border-color:#41624d}.status.warn{color:var(--warn);border-color:#6d5730}.status.bad{color:var(--bad);border-color:#6d3a3e}#transcript{flex:1;overflow:auto;padding:8px 4px 14px;display:flex;flex-direction:column;gap:10px;overscroll-behavior:contain}.msg{max-width:92%;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55;font-size:14px;padding:11px 13px;border-radius:13px;border:1px solid var(--line)}.msg.user{align-self:flex-end;background:#20382a;border-color:#466a4d;border-bottom-right-radius:4px}.msg.agent{align-self:flex-start;background:var(--panel);border-bottom-left-radius:4px}.msg .who{display:block;font-size:10px;letter-spacing:.1em;color:var(--muted);margin-bottom:4px}form{position:sticky;bottom:0;background:linear-gradient(#0a0e10cc,#0a0e10);padding:8px 0 max(12px,env(safe-area-inset-bottom));border-top:1px solid var(--line)}textarea{width:100%;min-height:64px;max-height:160px;resize:vertical;border:1px solid #4a644e;border-radius:12px;background:#151d1a;color:var(--ink);padding:12px;font:inherit;outline:none}textarea:focus{border-color:var(--accent)}.actions{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:8px}.actions small{color:var(--muted);font-size:11px}button{font:inherit;cursor:pointer;border:0;border-radius:10px;padding:11px 16px;background:var(--accent);color:#16301d;font-weight:700;min-height:44px}button:disabled{opacity:.55;cursor:not-allowed}.notice{font-size:11px;color:var(--muted);line-height:1.55;padding:10px 4px 18px}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}@media(max-width:520px){header{padding:12px}header nav a{margin-left:10px;font-size:12px}main{padding:0 10px}.intro{padding-top:14px}}
-</style></head><body><header><b>◇ SHARDS / LOBBY</b><nav aria-label="Lobby navigation"><a href="/control">Control centre</a><a href="/">Workspace</a></nav></header><main><section class="intro"><h1>Owner Lobby</h1><p>Owner-only text chat through the fixed Lobby transport. Replies are model output, not proof that an agent is online.</p></section><div id="status" class="status" role="status" aria-live="polite">Checking transport…</div><div id="transcript" aria-live="polite" aria-label="Lobby transcript"></div><form id="composer" novalidate><label class="sr-only" for="message">Message</label><textarea id="message" name="message" maxlength="8000" placeholder="Write a message…" autocomplete="off" required></textarea><div class="actions"><small>Text only · no files, tools, tasks or approvals</small><button id="send" type="submit">Send</button></div></form><p class="notice">If the Hub reports an unknown or blocked outcome, do not resubmit. Reconcile the local adapter first. The browser never contacts the transport directly and holds no transport secret.</p></main><script src="/lobby.js" defer></script></body></html>`;
+</style></head><body><header><b>◇ SHARDS / LOBBY</b><nav aria-label="Lobby navigation"><a href="/control">Control centre</a><a href="/">Workspace</a></nav></header><main><section class="intro"><h1>Owner Lobby</h1><p>Owner-only text chat through the fixed Lobby transport. Replies are model output, not proof that an agent is online.</p></section><div id="status" class="status" role="status" aria-live="polite">Checking transport…</div><div id="transcript" aria-live="polite" aria-label="Lobby transcript"></div><form id="composer" novalidate><label class="sr-only" for="message">Message</label><textarea id="message" name="message" maxlength="8000" placeholder="Write a message…" autocomplete="off" required></textarea><div class="actions"><small>Text chat · OpenClaw tool policy applies</small><button id="send" type="submit" disabled>Send</button></div></form><p class="notice"><button id="reconciled" type="button" hidden>I reconciled the adapter</button> If the outcome is unknown or blocked, reconcile the local adapter before sending again. The browser never contacts the transport directly and holds no transport secret.</p></main><script src="/lobby.js" defer></script></body></html>`;
 
 const LOBBY_JS=`'use strict';(()=>{
 const $=id=>document.getElementById(id);
-const transcript=$('transcript'),status=$('status'),form=$('composer'),input=$('message'),send=$('send');
-let busy=false;
+const transcript=$('transcript'),status=$('status'),form=$('composer'),input=$('message'),send=$('send'),reconciled=$('reconciled');
+const pendingKey='shards-lobby-pending';
+let ready=false,busy=false,pending=false;
+try{pending=sessionStorage.getItem(pendingKey)==='1'}catch{}
+const updateControls=()=>{send.disabled=!ready||busy||pending;reconciled.hidden=!pending||busy};
+const setPending=value=>{
+ pending=value;
+ try{if(value)sessionStorage.setItem(pendingKey,'1');else sessionStorage.removeItem(pendingKey)}catch{}
+ updateControls();
+};
 const make=(tag,text,cls)=>{const el=document.createElement(tag);if(text!==undefined)el.textContent=String(text);if(cls)el.className=cls;return el};
 const setStatus=(text,kind)=>{status.textContent=text;status.className='status'+(kind?' '+kind:'')};
 const appendMessage=(role,text)=>{const article=make('article',undefined,'msg '+role);article.append(make('span',role==='user'?'You':'Lobby','who'),make('div',text));transcript.append(article);transcript.scrollTop=transcript.scrollHeight};
@@ -410,40 +432,63 @@ const conversationId=()=>{
 };
 const uuid=conversationId();
 const readJson=async response=>{try{return await response.json()}catch{return null}};
-const health=async()=>{
+const lobbyFetch=(path,init={})=>fetch(path,{
+ cache:'no-store',credentials:'same-origin',redirect:'error',
+ signal:AbortSignal.timeout(55000),headers:{accept:'application/json'},...init
+});
+const health=async confirmed=>{
+ if(busy)return;
+ if(pending&&!confirmed){
+  setStatus('Outcome unresolved. Reconcile the local adapter before sending.','warn');
+  return;
+ }
+ busy=true;ready=false;updateControls();
  try{
-  const response=await fetch('/api/lobby/health',{cache:'no-store',credentials:'same-origin',headers:{accept:'application/json'}});
+  const response=await lobbyFetch('/api/lobby/health');
   const data=await readJson(response);
-  if(response.ok&&data&&data.status==='ok')return setStatus('Transport reachable. This is not an agent liveness check.','ok');
-  if(response.status===503&&data&&data.status==='blocked')return setStatus('Transport blocked. Reconcile the local adapter before sending.','warn');
-  if(response.status===401)return setStatus('Session expired. Reload the page and sign in again.','bad');
-  return setStatus('Transport unavailable. No messages were sent.','bad');
- }catch{setStatus('Transport unavailable. No messages were sent.','bad')}
+  if(response.status===200&&data?.status==='ok'){
+   setPending(false);ready=true;
+   setStatus('Transport reachable. This is not an agent liveness check.','ok');
+  }else if(response.status===503&&data?.status==='blocked'){
+   setPending(true);
+   setStatus('Transport blocked. Reconcile the local adapter before sending.','warn');
+  }else{
+   setStatus('Transport unavailable. Check the session and adapter before sending.','bad');
+  }
+ }catch{setStatus('Transport unavailable. Check the session and adapter before sending.','bad')}
+ finally{busy=false;updateControls()}
 };
+reconciled.addEventListener('click',()=>health(true));
 form.addEventListener('submit',async event=>{
  event.preventDefault();
- if(busy)return;
+ if(!ready||busy||pending)return;
  const message=input.value;
  if(!message.trim())return setStatus('Write a message first.','warn');
  if(message.length>8000)return setStatus('Messages are limited to 8,000 characters.','warn');
- busy=true;send.disabled=true;setStatus('Sending…','');
+ busy=true;setPending(true);setStatus('Sending…','');
  try{
-  const response=await fetch('/api/lobby/chat',{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({conversation_id:uuid,message})});
+  const response=await lobbyFetch('/api/lobby/chat',{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({conversation_id:uuid,message})});
   const data=await readJson(response);
-  if(response.ok&&data&&typeof data.reply==='string'){appendMessage('user',message);appendMessage('agent',data.reply);input.value='';setStatus('Reply received.','ok');return}
-  if(response.status===401)return setStatus('Session expired. Reload the page and sign in again.','bad');
-  if(data&&data.outcome==='unknown')return setStatus('Outcome unknown. Do not resubmit. Reconcile the local adapter first.','bad');
-  if(data&&data.outcome==='blocked')return setStatus('Chat is blocked. Reconcile the local adapter first.','warn');
-  if(data&&data.outcome==='not_dispatched')return setStatus(typeof data.error==='string'?data.error:'The message was not sent.','warn');
-  if(response.status===403)return setStatus('Cross-origin request denied. Reload the page.','bad');
-  if(response.status===415)return setStatus('The Lobby rejected the request format.','bad');
-  if(response.status===413)return setStatus('The message is too large.','warn');
-  if(response.status===503)return setStatus(typeof data?.error==='string'?data.error:'The Lobby is unavailable.','warn');
-  return setStatus(typeof data?.error==='string'?data.error:'The Lobby request failed.','bad');
- }catch{setStatus('The Lobby request failed. No automatic retry was made.','bad')}
- finally{busy=false;send.disabled=false}
+  if(response.status===200&&typeof data?.reply==='string'&&data.reply.trim()){
+   appendMessage('user',message);appendMessage('agent',data.reply);input.value='';
+   setPending(false);setStatus('Reply received.','ok');return;
+  }
+  if(!response.ok&&data?.outcome==='not_dispatched'&&response.headers.get('x-shards-lobby-outcome')==='not_dispatched'){
+   setPending(false);
+   if(response.status===401){ready=false;setStatus('Session expired. Reload the page and sign in again.','bad');return}
+   if(response.status===413){setStatus('The message is too large.','warn');return}
+   setStatus(data.retryable?'The Lobby is busy. Try again shortly.':'The message was not sent. Check the request or transport before trying again.','warn');
+   return;
+  }
+  if(data?.outcome==='blocked'){
+   setStatus('Chat is blocked. Reconcile the local adapter first.','warn');return;
+  }
+  setStatus('Outcome unknown. Reconcile the local adapter before sending again.','bad');
+ }catch{setStatus('Connection lost. Reconcile the local adapter before sending again.','bad')}
+ finally{busy=false;updateControls()}
 });
-health();
+updateControls();
+health(false);
 })();`;
 
 export default {async fetch(req,env){
@@ -471,19 +516,20 @@ export default {async fetch(req,env){
    try{lobbyTransportConfig(env)}catch{return agentJson({status:'unavailable'},503)}
    try{return await lobbyHealth(env)}catch{return agentJson({status:'unavailable'},503)}
   }
-  if(req.method!=='POST')return agentJson({error:'Method not allowed'},405);
-  if(origin!==HUB_ORIGIN||(site!==null&&site!=='same-origin'))return agentJson({error:'Cross-origin Lobby request denied'},403);
+  if(req.method!=='POST')return lobbyNotDispatched('Method not allowed',405);
+  if(origin!==HUB_ORIGIN||(site!==null&&site!=='same-origin'))return lobbyNotDispatched('Cross-origin Lobby request denied',403);
   let owner;
   try{owner=await lobbyOwner(req,env)}
-  catch(e){return e instanceof LobbyConfigError?agentJson({error:'Lobby is not configured'},503):agentJson({error:'Signed Cloudflare Access login required'},401)}
-  try{lobbyTransportConfig(env)}catch{return agentJson({error:'Lobby transport is not configured'},503)}
-  if((req.headers.get('content-type')||'').split(';')[0].trim().toLowerCase()!=='application/json')return agentJson({error:'Expected application/json'},415);
+  catch(e){return e instanceof LobbyConfigError?lobbyNotDispatched('Lobby is not configured',503):lobbyNotDispatched('Signed Cloudflare Access login required',401)}
+  try{lobbyTransportConfig(env)}catch{return lobbyNotDispatched('Lobby transport is not configured',503)}
+  if(!lobbyIsJson(req.headers))return lobbyNotDispatched('Expected application/json',415);
   let input;
-  try{input=await lobbyBody(req)}catch(e){return agentJson({error:e.message==='large'?'Request too large':'Invalid request'},e.message==='large'?413:400)}
-  if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).length!==2||!Object.hasOwn(input,'conversation_id')||!Object.hasOwn(input,'message'))return agentJson({error:'Request must contain exactly conversation_id and message'},400);
-  if(typeof input.conversation_id!=='string'||!LOBBY_UUID_RE.test(input.conversation_id))return agentJson({error:'conversation_id must be a canonical lowercase UUID'},400);
+  try{input=await lobbyReadJson(req.body,LOBBY_BODY_MAX_BYTES,AbortSignal.timeout(LOBBY_BODY_TIMEOUT_MS))}
+  catch(e){return e.message==='large'?lobbyNotDispatched('Request too large',413):lobbyNotDispatched('Invalid request',400)}
+  if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).length!==2||!Object.hasOwn(input,'conversation_id')||!Object.hasOwn(input,'message'))return lobbyNotDispatched('Request must contain exactly conversation_id and message',400);
+  if(typeof input.conversation_id!=='string'||!LOBBY_UUID_RE.test(input.conversation_id))return lobbyNotDispatched('conversation_id must be a canonical lowercase UUID',400);
   let message;
-  try{message=lobbyMessage(input.message)}catch(e){return agentJson({error:e.message==='large'?'Message too large':'Invalid message'},e.message==='large'?413:400)}
+  try{message=lobbyMessage(input.message)}catch(e){return e.message==='large'?lobbyNotDispatched('Message too large',413):lobbyNotDispatched('Invalid message',400)}
   try{return await lobbyChat(env,owner,input.conversation_id,message)}catch{return lobbyUnknown()}
  }
  if(['/control','/control.js','/api/control'].includes(u.pathname)){
