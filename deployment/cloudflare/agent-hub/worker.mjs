@@ -202,6 +202,9 @@ export default {async fetch(req,env){
  if(req.method!=='GET'||u.origin!==HUB_ORIGIN||!env.MCP_GATEWAY)return fail('Not found',404);
  try {
    if(u.pathname==='/api/control'){
+     // Browser-only defence in depth; signed JWT verification remains authoritative.
+     const origin=req.headers.get('origin'),site=req.headers.get('sec-fetch-site');
+     if((origin!==null&&origin!==HUB_ORIGIN)||(site!==null&&site!=='same-origin'))return agentJson({error:'Cross-origin dashboard request denied'},403);
      const reply=await registryCall(env,req,'/dashboard');
      if(!reply.ok)return agentJson({error:'Dashboard unavailable'},reply.status===401?401:reply.status===410?410:503);
      const payload=await reply.json();
