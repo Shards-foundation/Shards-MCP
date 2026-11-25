@@ -138,7 +138,8 @@ test("Lab diagnostics do not require credentials; protected MCP tools still fail
   const listed = (await discovery.json()).result.tools.map(x => x.name);
   assert.deepEqual(Array.from(listed), [
     "shards_gateway_status", "shards_systems_catalog", "shards_dns_lookup",
-    "shards_skill_search", "shards_skill_read", "shards_repo_document", "shards_open_prs"
+    "shards_skill_search", "shards_skill_read", "shards_repo_document", "shards_open_prs",
+    "shards_pr_read", "shards_commit_read"
   ]);
   const forbidden = await worker.fetch(post("tools/call", {name:"shards_task_create", arguments:{}}), {});
   const body = await forbidden.json();
@@ -328,7 +329,7 @@ test("Managed OAuth endpoint fails closed without configuration or signed Access
   const fake=await worker.fetch(new Request(target,{headers:{"cf-access-jwt-assertion":"invalid.jwt.token"}}),configured);
   assert.equal(fake.status,401);
   const oldPublic=await worker.fetch(post("tools/list"),configured);
-  assert.equal((await oldPublic.json()).result.tools.length,7);
+  assert.equal((await oldPublic.json()).result.tools.length,9);
 });
 
 test("Separate signed Cloudflare identity can discover only public and session tools", async () => {
@@ -379,7 +380,7 @@ test("Separate signed Cloudflare identity can discover only public and session t
     const visible=(await list.json()).result.tools.map(x=>x.name);
     assert.deepEqual(Array.from(visible),[
       "shards_gateway_status","shards_systems_catalog","shards_dns_lookup",
-      "shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs","shards_user_identity"
+      "shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs","shards_pr_read","shards_commit_read","shards_user_identity"
     ]);
     const identity=await worker.fetch(signedPost("tools/call",{name:"shards_user_identity",arguments:{}},good),env);
     const own=(await identity.json()).result.structuredContent;
@@ -500,8 +501,8 @@ test("Unauthenticated connect origin exposes discoverable metadata without grant
 test("Public research tools are discoverable, and private task tools remain hidden", async () => {
   const response=await worker.fetch(post("tools/list"),{});
   const names=(await response.json()).result.tools.map(t=>t.name);
-  for(const name of ["shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs"])assert.ok(names.includes(name),name);
-  assert.equal(names.length,7);
+  for(const name of ["shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs","shards_pr_read","shards_commit_read"])assert.ok(names.includes(name),name);
+  assert.equal(names.length,9);
   assert.equal(names.includes("shards_task_create"),false);
 });
 
@@ -513,7 +514,22 @@ test("Public research rejects traversal, arbitrary repos and malformed searches 
     {name:"shards_skill_search",arguments:{query:"security",limit:100}},
     {name:"shards_repo_document",arguments:{repository:"other-org/private",document:"README.md"}},
     {name:"shards_repo_document",arguments:{repository:"Shards-MCP",document:"../../.env"}},
-    {name:"shards_open_prs",arguments:{repository:"somebody-else"}}
+    {name:"shards_open_prs",arguments:{repository:"somebody-else"}},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:0}},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:"1"}},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:1.5}},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:1000001}},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:1,extra:true}},
+    {name:"shards_pr_read",arguments:{repository:"other-org/private",number:1}},
+    {name:"shards_commit_read",arguments:{repository:"Shards-MCP",sha:"ABC"}},
+    {name:"shards_commit_read",arguments:{repository:"Shards-MCP",sha:"A".repeat(40)}},
+    {name:"shards_commit_read",arguments:{repository:"Shards-MCP",sha:"a".repeat(39)}},
+    {name:"shards_commit_read",arguments:{repository:"Shards-MCP",sha:"a".repeat(40),extra:1}},
+    {name:"shards_commit_read",arguments:{repository:"somebody-else",sha:"a".repeat(40)}},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP"}},
+    {name:"shards_pr_read",arguments:{number:1}},
+    {name:"shards_commit_read",arguments:{repository:"Shards-MCP"}},
+    {name:"shards_commit_read",arguments:{sha:"a".repeat(40)}}
   ];
   let dbHits=0;
   const env={EDGE_DB:{prepare(){dbHits++;throw Error("Malformed arguments must not consume D1 quota");}}};
@@ -537,6 +553,8 @@ test("Public research returns bounded live-source results from fixed GitHub orig
     if(String(url).endsWith("/skills/shards-sec-vibecoding-gate/SKILL.md"))return new Response("# Real instructions, not executed",{status:200,headers:{"content-type":"text/plain"}});
     if(String(url).endsWith("/skills/"+longSlug+"/SKILL.md"))return new Response("# Readable long first-party slug\n"+"x".repeat(24000),{status:200,headers:{"content-type":"text/plain"}});
     if(String(url).endsWith("/Shards-MCP/main/AGENTS.md"))return new Response("# Agent rules",{status:200,headers:{"content-type":"text/plain"}});
+    if(String(url).endsWith("/pulls/42"))return new Response(JSON.stringify({number:42,state:"open",draft:false,merged:false,merged_at:null,title:"Add tests 0",created_at:"2026-11-14T00:00:00Z",updated_at:"2026-11-15T00:00:00Z",head:{sha:"a".repeat(40)},base:{sha:"b".repeat(40)}}),{status:200,headers});
+    if(String(url).endsWith("/git/commits/cccccccccccccccccccccccccccccccccccccccc"))return new Response(JSON.stringify({sha:"cccccccccccccccccccccccccccccccccccccccc",message:"Bounded commit message",author:{date:"2026-11-14T00:00:00Z"},committer:{date:"2026-11-14T00:00:00Z"},parents:[{sha:"d".repeat(40)}]}),{status:200,headers});
     if(String(url).includes("/pulls?"))return new Response(JSON.stringify(Array.from({length:11},(_,i)=>({number:42+i,title:"Add tests "+i,body:"long-review-description".repeat(1200),html_url:"https://github.com/Shards-foundation/Shards-MCP/pull/"+(42+i),updated_at:"2026-11-15T00:00:00Z",draft:false}))),{status:200,headers});
     throw Error("Unexpected upstream URL: "+url);
   };
@@ -579,13 +597,27 @@ test("Public research returns bounded live-source results from fixed GitHub orig
   assert.equal(prs.pull_requests[0].number,42);
   assert.equal(prs.pull_requests.length,10,"GitHub responses with eleven PRs must truncate to ten metadata entries");
   assert.equal('body' in prs.pull_requests[0],false,"PR bodies must never be returned");
+  const pr=await call("shards_pr_read",{repository:"Shards-MCP",number:42});
+  assert.equal(pr.number,42);
+  assert.equal(pr.head.sha,"a".repeat(40));
+  assert.equal(pr.base.sha,"b".repeat(40));
+  assert.equal(pr.state,"open");
+  assert.equal(pr.draft,false);
+  assert.equal(pr.merged,false);
+  assert.equal(pr.merged_at,null);
+  assert.equal('changes' in pr,false,"PR read must not return file changes");
+  const commit=await call("shards_commit_read",{repository:"Shards-MCP",sha:"cccccccccccccccccccccccccccccccccccccccc"});
+  assert.equal(commit.sha,"cccccccccccccccccccccccccccccccccccccccc","Commit response SHA must equal the requested immutable SHA");
+  assert.equal(commit.message,"Bounded commit message");
+  assert.deepEqual(commit.parents,["d".repeat(40)]);
+  assert.equal('files' in commit,false,"Commit read must not return file patches");
   assert.ok(calls.every(c=>c.url.startsWith("https://raw.githubusercontent.com/Shards-foundation/")||c.url.startsWith("https://api.github.com/repos/Shards-foundation/")));
   assert.ok(calls.every(c=>c.options.redirect==="manual"),"Cloudflare Workers supports manual redirects; all 3xx responses must fail closed");
   assert.ok(calls.every(c=>c.options.signal instanceof AbortSignal),"Each upstream request requires a timeout signal");
   assert.ok(calls.every(c=>c.options.cf?.cacheEverything===true&&c.options.cf?.cacheTtl===300),"All public reads must enable bounded caching");
-  assert.equal(budgetWrites.length,16,"Eight valid public calls must each charge caller and global D1 budgets");
-  assert.equal(budgetWrites.filter(v=>String(v[1]).startsWith("public:")).length,8);
-  assert.equal(budgetWrites.filter(v=>["shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs"].includes(v[1])).length,8);
+  assert.equal(budgetWrites.length,20,"Ten valid public calls must each charge caller and global D1 budgets");
+  assert.equal(budgetWrites.filter(v=>String(v[1]).startsWith("public:")).length,10);
+  assert.equal(budgetWrites.filter(v=>["shards_skill_search","shards_skill_read","shards_repo_document","shards_open_prs","shards_pr_read","shards_commit_read"].includes(v[1])).length,10);
 });
 
 
@@ -624,7 +656,7 @@ test("supplied invalid credentials cannot downgrade handshake or discovery to an
   }
   const anonymous=await worker.fetch(post("tools/list"),{});
   assert.equal(anonymous.status,200);
-  assert.equal((await anonymous.json()).result.tools.length,7);
+  assert.equal((await anonymous.json()).result.tools.length,9);
 });
 
 test("bearer discovery is scoped, refreshed per request, and storage failure denies", async () => {
@@ -683,5 +715,167 @@ test("/mcp 401 metadata fallback never advertises /connect or an Access issuer",
         assert.doesNotMatch(await response.text(),/connect|cloudflareaccess|authorization_servers/);
       }
     }
+  }
+});
+
+
+test("Public PR and commit reads fail closed on upstream status, redirect and shape mismatch", async () => {
+  const SHA="c".repeat(40);
+  const prBody=(over={})=>({number:7,state:"open",draft:false,merged:false,merged_at:null,title:"Bounded title",created_at:"2026-01-01T00:00:00Z",updated_at:"2026-01-02T00:00:00Z",head:{sha:"a".repeat(40)},base:{sha:"b".repeat(40)},...over});
+  const commitBody=(over={})=>({sha:SHA,message:"Bounded message",author:{date:"2026-01-01T00:00:00Z"},committer:{date:"2026-01-01T00:00:00Z"},parents:[{sha:"d".repeat(40)}],...over});
+  const json=body=>new Response(JSON.stringify(body),{status:200,headers:{"content-type":"application/json"}});
+  const cases=[
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:7},response:()=>new Response("missing",{status:404}),match:/HTTP 404/},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:7},response:()=>new Response(null,{status:302,headers:{location:"https://evil.example/pr"}}),match:/HTTP 302/},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:7},response:()=>new Response("limited",{status:429}),match:/HTTP 429/},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:7},response:()=>json(prBody({number:8})),match:/number mismatch/},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:7},response:()=>json(prBody({head:{sha:"A".repeat(40)}})),match:/head/},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:7},response:()=>json(prBody({head:{sha:"a".repeat(39)}})),match:/head/},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:7},response:()=>json(prBody({state:"merged"})),match:/state/},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:7},response:()=>json(prBody({draft:"false"})),match:/flags/},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:7},response:()=>json(prBody({title:1})),match:/title/},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:7},response:()=>json(prBody({created_at:undefined})),match:/created_at/},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:7},response:()=>json([prBody()]),match:/Unexpected public pull request/},
+    {name:"shards_commit_read",arguments:{repository:"Shards-MCP",sha:SHA},response:()=>new Response("forbidden",{status:403}),match:/HTTP 403/},
+    {name:"shards_commit_read",arguments:{repository:"Shards-MCP",sha:SHA},response:()=>new Response(null,{status:301,headers:{location:"https://evil.example/c"}}),match:/HTTP 301/},
+    {name:"shards_commit_read",arguments:{repository:"Shards-MCP",sha:SHA},response:()=>json(commitBody({sha:"e".repeat(40)})),match:/SHA mismatch/},
+    {name:"shards_commit_read",arguments:{repository:"Shards-MCP",sha:SHA},response:()=>json(commitBody({message:1})),match:/commit payload/},
+    {name:"shards_commit_read",arguments:{repository:"Shards-MCP",sha:SHA},response:()=>json(commitBody({parents:"nope"})),match:/parents/},
+    {name:"shards_commit_read",arguments:{repository:"Shards-MCP",sha:SHA},response:()=>json(commitBody({parents:[{sha:"nope"}]})),match:/parent/},
+    {name:"shards_commit_read",arguments:{repository:"Shards-MCP",sha:SHA},response:()=>json(commitBody({author:{date:"x"},committer:{}})),match:/timestamp/},
+    {name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:7},response:()=>new Response("x",{status:200,headers:{"content-length":"999999999"}}),match:/too large/},
+  ];
+  for(const c of cases){
+    let fetched=0;
+    const mock=async()=>{fetched++;return c.response();};
+    const fake={Request,Response,Headers,URL,TextEncoder,TextDecoder,crypto:webcrypto,AbortSignal,atob,fetch:mock};
+    vm.runInNewContext(src.replace("export default {","globalThis.__edge = {"),fake,{filename:"worker.js"});
+    const writes=[];
+    const env={EDGE_DB:{prepare(sql){assert.match(sql,/route_budgets/);return{bind(...v){return{run:async()=>{writes.push(v);return{meta:{changes:1}}}}}}}}};
+    const r=await fake.__edge.fetch(post("tools/call",{name:c.name,arguments:c.arguments}),env);
+    const j=await r.json();
+    assert.equal(j.result.isError,true,JSON.stringify({args:c.arguments,result:j.result}));
+    assert.match(j.result.content[0].text,c.match,JSON.stringify({args:c.arguments,text:j.result.content[0].text}));
+    assert.equal(fetched,1,"Each allowed public read performs exactly one bounded upstream request");
+    assert.equal(writes.length,2,"Caller and global budgets are charged before the upstream request");
+  }
+});
+
+
+test("shards_task_get enforces tenant and creator-or-assignee participation with uniform denial", async () => {
+  const TASK="11111111-1111-4111-8111-111111111111";
+  const header={authorization:"Bearer smcp_"+"b".repeat(43)};
+  const actor=(over={})=>({id:"creator-agent-01",tenant_id:"tenant-a",name:"creator",client:"test",scopes:JSON.stringify(["agent:identity","task:read"]),...over});
+  const row=(over={})=>({tenant_id:"tenant-a",id:TASK,title:"Bounded task",input_json:JSON.stringify({canary:"task-input"}),state:"claimed",creator_id:"creator-agent-01",assignee_id:"worker-agent-01",created_at:"2026-01-01T00:00:00Z",claimed_at:"2026-01-02T00:00:00Z",completed_at:null,result_json:null,...over});
+  function makeEnv({who=actor(),store=[row()]}={}){
+    const queries=[],writes=[];
+    const EDGE_DB={
+      prepare(sql){
+        return {
+          bind(...values){
+            return {
+              async first(){
+                if(/FROM access_tokens/.test(sql))return who;
+                if(/FROM agent_tasks/.test(sql)){
+                  queries.push({sql,values});
+                  const [id,tenant,caller]=values;
+                  const found=store.find(x=>x.id===id&&x.tenant_id===tenant&&(x.creator_id===caller||x.assignee_id===caller));
+                  if(!found)return null;
+                  const {tenant_id,...selected}=found;
+                  return selected;
+                }
+                return null;
+              },
+              async run(){writes.push({sql,values});return{meta:{changes:1}}},
+              async all(){return{results:[]}}
+            };
+          }
+        };
+      }
+    };
+    return {queries,writes,EDGE_DB};
+  }
+  const callWith=async(env,args,auth=true)=>{const r=await worker.fetch(post("tools/call",{name:"shards_task_get",arguments:args},auth?header:{}),env);return (await r.json()).result;};
+
+  let env=makeEnv();
+  let out=await callWith(env,{task_id:TASK},false);
+  assert.equal(out.isError,true);
+  assert.match(out.content[0].text,/AUTH_REQUIRED/);
+  assert.equal(env.queries.length,0,"Anonymous calls must not query task rows");
+
+  env=makeEnv({who:actor({scopes:JSON.stringify(["agent:identity"])})});
+  out=await callWith(env,{task_id:TASK});
+  assert.equal(out.isError,true);
+  assert.match(out.content[0].text,/AUTH_REQUIRED/);
+  assert.equal(env.queries.length,0,"Missing task:read must deny before any task query");
+  assert.equal(env.writes.some(w=>/route_budgets/.test(w.sql)),false,"Scope denial must not charge a task budget");
+
+  env=makeEnv();
+  out=await callWith(env,{task_id:TASK});
+  assert.equal(out.isError,false);
+  assert.equal(out.structuredContent.task.id,TASK);
+  assert.equal(out.structuredContent.task.state,"claimed");
+  assert.deepEqual(out.structuredContent.task.input,{canary:"task-input"});
+  assert.equal(out.structuredContent.task.result,null);
+  assert.equal('input_json' in out.structuredContent.task,false,"Raw stored JSON must not be returned");
+  assert.equal(env.queries.length,1);
+  assert.match(env.queries[0].sql,/tenant_id=\?/);
+  assert.match(env.queries[0].sql,/\(creator_id=\? OR assignee_id=\?\)/);
+  assert.deepEqual(Array.from(env.queries[0].values),[TASK,"tenant-a","creator-agent-01","creator-agent-01"]);
+  assert.equal(env.writes.some(w=>/(UPDATE agent_tasks|DELETE FROM agent_tasks|INSERT INTO agent_tasks)/i.test(w.sql)),false,"Exact task read must not mutate state");
+
+  env=makeEnv({who:actor({id:"worker-agent-01"})});
+  out=await callWith(env,{task_id:TASK});
+  assert.equal(out.isError,false,"The assignee may read the same task");
+
+  env=makeEnv({store:[row({tenant_id:"tenant-b"})]});
+  const otherTenant=await callWith(env,{task_id:TASK});
+  env=makeEnv({store:[row({creator_id:"someone-else",assignee_id:"another-agent"})]});
+  const unrelated=await callWith(env,{task_id:TASK});
+  env=makeEnv({store:[]});
+  const absent=await callWith(env,{task_id:TASK});
+  for(const denial of [otherTenant,unrelated,absent]){
+    assert.equal(denial.isError,true);
+    assert.equal(denial.content[0].text,"DENIED: Task unavailable","Absent, other-tenant and unrelated callers get identical denial");
+  }
+
+  env=makeEnv();
+  for(const args of [{task_id:TASK,extra:1},{task_id:"../../etc/passwd"},{task_id:"short"},{}]){
+    const malformed=await callWith(env,args);
+    assert.equal(malformed.isError,true);
+    assert.match(malformed.content[0].text,/Invalid task ID/);
+  }
+  assert.equal(env.queries.length,0,"Malformed task IDs must not query task rows");
+
+  env=makeEnv({store:[row({input_json:JSON.stringify("x".repeat(20001))})]});
+  out=await callWith(env,{task_id:TASK});
+  assert.equal(out.isError,true);
+  assert.match(out.content[0].text,/bounded read limit/);
+
+  env=makeEnv({store:[row({result_json:"{bad"})]});
+  out=await callWith(env,{task_id:TASK});
+  assert.equal(out.isError,true);
+  assert.match(out.content[0].text,/Task result unreadable/);
+
+  env=makeEnv({store:[row({result_json:JSON.stringify({ok:true})})]});
+  out=await callWith(env,{task_id:TASK});
+  assert.equal(out.isError,false);
+  assert.deepEqual(out.structuredContent.task.result,{ok:true});
+});
+
+
+test("Public reads stop before network when caller or global budget is exhausted", async () => {
+  for(const exhausted of [1,2]){
+    let fetched=0,writes=0;
+    const mock=async()=>{fetched++;return new Response("{}",{status:200,headers:{"content-type":"application/json"}});};
+    const fake={Request,Response,Headers,URL,TextEncoder,TextDecoder,crypto:webcrypto,AbortSignal,atob,fetch:mock};
+    vm.runInNewContext(src.replace("export default {","globalThis.__edge = {"),fake,{filename:"worker.js"});
+    const env={EDGE_DB:{prepare(sql){assert.match(sql,/route_budgets/);return{bind(){return{run:async()=>{writes++;return{meta:{changes:writes===exhausted?0:1}}}}}}}}};
+    const r=await fake.__edge.fetch(post("tools/call",{name:"shards_pr_read",arguments:{repository:"Shards-MCP",number:7}}),env);
+    const j=await r.json();
+    assert.equal(j.result.isError,true);
+    assert.match(j.result.content[0].text,exhausted===1?/Caller daily quota/:/Global daily quota/);
+    assert.equal(fetched,0,"No upstream fetch when a budget is exhausted");
+    assert.equal(writes,exhausted,"Budget checks stop at the first denial");
   }
 });

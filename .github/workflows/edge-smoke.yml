@@ -70,12 +70,11 @@ jobs:
           set -euo pipefail
           npm install --prefix deployment/cloudflare --no-save --no-package-lock --ignore-scripts --audit=false --fund=false @modelcontextprotocol/sdk@1 zod@4
           node --test deployment/cloudflare/sdk.test.mjs
-      # Staged rollout: production still has 3 tools before this PR is deployed.
-      # After rollout, pin the live checks to 7 and verify the four added tools by name.
-      # This live probe expects the currently deployed disabled bridge (9
-      # protected tools). The mode-aware post-deployment release gate is the
-      # authority after enabling the 10th tool; update this probe in the same
-      # approved rollout.
+      # Staged rollout: production still exposes 3 public tools before a reviewed
+      # deployment. This probe accepts the exact deployed surface (3 or 7 public,
+      # 9 protected) or the source-reviewed surface (9 public, 10 protected), so a
+      # source-only PR never claims undeployed tools are live. The mode-aware
+      # post-deployment release gate remains the authority for the final surface.
       - name: Verify real website and database status
         run: |
           set -euo pipefail
@@ -86,7 +85,7 @@ jobs:
           curl -fsS https://mcp.shardsinc.co.uk/app.js -o /tmp/live-client.js
           node --check /tmp/live-client.js
           curl -fsS https://mcp.shardsinc.co.uk/api/status -o /tmp/status.json
-          node -e "const v=require('/tmp/status.json'),a=['shards_gateway_status','shards_systems_catalog','shards_dns_lookup'],b=[...a,'shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'],names=v.tools.filter(t=>t.public).map(t=>t.name).sort(),eq=x=>JSON.stringify(names)===JSON.stringify([...x].sort());if(v.db!=='connected'||!(eq(a)||eq(b))||v.tools.filter(t=>!t.public).length!==9||!String(v.authentication.oauth).startsWith('not yet available'))process.exit(1)"
+          node -e "const v=require('/tmp/status.json'),p3=['shards_gateway_status','shards_systems_catalog','shards_dns_lookup'],p7=[...p3,'shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'],p9=[...p7,'shards_pr_read','shards_commit_read'],q9=['shards_agent_identity','shards_agents_list','shards_message_send','shards_message_inbox','shards_task_create','shards_task_inbox','shards_task_claim','shards_task_complete','shards_audit_tail'],q10=[...q9,'shards_task_get'],names=v.tools.filter(t=>t.public).map(t=>t.name).sort(),priv=v.tools.filter(t=>!t.public).map(t=>t.name).sort(),eq=(x,s)=>JSON.stringify(x)===JSON.stringify([...s].sort());if(v.db!=='connected'||![p3,p7,p9].some(s=>eq(names,s))||![q9,q10].some(s=>eq(priv,s))||!String(v.authentication.oauth).startsWith('not yet available'))process.exit(1)"
       - name: Verify MCP initialize and tool discovery
         run: |
           set -euo pipefail
@@ -99,7 +98,7 @@ jobs:
           test "$code" = 202
           curl -fsS -X POST "$URL" -H 'Content-Type: application/json' \
             --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' -o /tmp/tools.json
-          node -e "const t=require('/tmp/tools.json').result.tools,a=['shards_gateway_status','shards_systems_catalog','shards_dns_lookup'],b=[...a,'shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'],n=t.map(x=>x.name).sort(),eq=x=>JSON.stringify(n)===JSON.stringify([...x].sort());if(!(eq(a)||eq(b)))process.exit(1);console.log(t.length+' exact public MCP tools discovered; private tools hidden')"
+          node -e "const t=require('/tmp/tools.json').result.tools,p3=['shards_gateway_status','shards_systems_catalog','shards_dns_lookup'],p7=[...p3,'shards_skill_search','shards_skill_read','shards_repo_document','shards_open_prs'],p9=[...p7,'shards_pr_read','shards_commit_read'],n=t.map(x=>x.name).sort(),eq=s=>JSON.stringify(n)===JSON.stringify([...s].sort());if(![p3,p7,p9].some(eq))process.exit(1);console.log(t.length+' exact public MCP tools discovered; private tools hidden')"
       - name: Verify authenticated tools refuse anonymous access
         run: |
           set -euo pipefail

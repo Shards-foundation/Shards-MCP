@@ -222,12 +222,12 @@ test("kernel bridge is disabled by default and hidden from discovery", async () 
   const { worker } = loadWorker(fetchStub);
   const env = { EDGE_DB: makeDB(makeActor()) };
 
-  assert.equal((await listTools(worker, env)).length, 7);
+  assert.equal((await listTools(worker, env)).length, 9);
   assert.equal((await listTools(worker, env, authHeaders())).includes(BRIDGE_TOOL), false);
 
   const status = await worker.fetch(new Request("https://mcp.shardsinc.co.uk/api/status"), env);
   const body = await status.json();
-  assert.equal(body.tools.filter((tool) => !tool.public).length, 9);
+  assert.equal(body.tools.filter((tool) => !tool.public).length, 10);
 
   const call = await callTool(worker, env, validArgs());
   assertDeniedWithoutDispatch(call.result, "BRIDGE_DISABLED");
@@ -242,14 +242,14 @@ test("kernel bridge is discoverable only for a verified actor with the new scope
   assert.equal((await listTools(worker, scoped, authHeaders())).includes(BRIDGE_TOOL), true);
   const status = await worker.fetch(new Request("https://mcp.shardsinc.co.uk/api/status"), scoped);
   const body = await status.json();
-  assert.equal(body.tools.filter((tool) => !tool.public).length, 10);
+  assert.equal(body.tools.filter((tool) => !tool.public).length, 11);
   assert.ok(body.tools.some((tool) => tool.name === BRIDGE_TOOL && tool.public === false));
 
   const unscoped = bridgeEnv({}, makeActor({ scopes: JSON.stringify(["agent:identity"]) }));
   assert.equal((await listTools(worker, unscoped, authHeaders())).includes(BRIDGE_TOOL), false);
 
   const anonymous = await listTools(worker, scoped);
-  assert.equal(anonymous.length, 7);
+  assert.equal(anonymous.length, 9);
   assert.equal(anonymous.includes(BRIDGE_TOOL), false);
   assert.equal(fetchStub.calls.length, 0);
 });
@@ -1110,6 +1110,7 @@ test("existing public and protected tools remain unchanged when the bridge is en
   assert.deepEqual(anonymous, [
     "shards_gateway_status", "shards_systems_catalog", "shards_dns_lookup",
     "shards_skill_search", "shards_skill_read", "shards_repo_document", "shards_open_prs",
+    "shards_pr_read", "shards_commit_read",
   ]);
 
   const observer = bridgeEnv({}, makeActor({ scopes: JSON.stringify(["agent:identity"]) }));

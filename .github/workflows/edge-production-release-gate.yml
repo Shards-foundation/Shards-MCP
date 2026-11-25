@@ -1,8 +1,8 @@
 name: Shards MCP post-deployment release gate
 # This workflow is deliberately NOT part of source-only PR CI. Invoke after
 # deploying a reviewed, pinned Worker version; three-tool production MUST fail.
-# bridge_mode defaults to disabled (9 protected tools); enabled expects 10,
-# including shards_kernel_issue_label. Anonymous discovery is always 7 public.
+# bridge_mode defaults to disabled (10 protected tools); enabled expects 11,
+# including shards_kernel_issue_label. Anonymous discovery is always 9 public.
 on:
   workflow_dispatch:
     inputs:
@@ -11,7 +11,7 @@ on:
         required: true
         type: string
       bridge_mode:
-        description: "Expected protected-tool mode: disabled (9 tools) or enabled (10 tools, includes shards_kernel_issue_label)"
+        description: "Expected protected-tool mode: disabled (10 tools) or enabled (11 tools, includes shards_kernel_issue_label)"
         required: true
         default: disabled
         type: choice
@@ -21,7 +21,7 @@ on:
 permissions:
   contents: read
 jobs:
-  live-seven-tool-release:
+  live-nine-tool-release:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -58,10 +58,10 @@ jobs:
             const {assertExactNames}=await import('./deployment/cloudflare/release_gate_names.mjs');
             if(status.db!=='connected')throw Error('Production D1 not connected');
             const result=assertExactNames(status.tools||[], response.result?.tools||[], process.env.EXPECTED_BRIDGE_MODE);
-            console.log(`PASS: seven exact public names, ${result.expectedPrivate.length} exact private names (bridge ${result.bridgeMode}), no anonymous privileged discovery`);
+            console.log(`PASS: nine exact public names, ${result.expectedPrivate.length} exact private names (bridge ${result.bridgeMode}), no anonymous privileged discovery`);
           })().catch(err=>{console.error(err);process.exitCode=1});
           NODE
-      - name: Check four real public operations and private-tool denial
+      - name: Check real public operations and private-tool denial
         run: |
           set -euo pipefail
           node <<'NODE'
@@ -83,6 +83,12 @@ jobs:
               if(out?.isError!==false || !out?.structuredContent)throw Error(name+' did not return live structured data');
               console.log('PASS '+name);
             }
+            const commit=await call('shards_commit_read',{repository:'Shards-MCP',sha:process.env.GITHUB_SHA});
+            if(commit?.isError!==false||commit?.structuredContent?.sha!==process.env.GITHUB_SHA)throw Error('shards_commit_read did not return the exact requested SHA');
+            console.log('PASS shards_commit_read');
+            const pr=await call('shards_pr_read',{repository:'Shards-MCP',number:1});
+            if(pr?.isError!==false||pr?.structuredContent?.number!==1||!/^[0-9a-f]{40}$/.test(pr?.structuredContent?.head?.sha||'')||!/^[0-9a-f]{40}$/.test(pr?.structuredContent?.base?.sha||''))throw Error('shards_pr_read did not return exact PR metadata and SHAs');
+            console.log('PASS shards_pr_read');
             const blocked=await call('shards_agent_identity',{});
             if(blocked?.isError!==true||!blocked.content?.[0]?.text?.includes('AUTH_REQUIRED'))throw Error('Private tool exposed anonymously');
             console.log('PASS private tool denial; release verification complete');
