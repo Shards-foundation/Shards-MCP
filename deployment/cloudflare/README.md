@@ -23,7 +23,7 @@ The edge currently supports:
 - 2026-07-28 `server/discover` subset with header routing validation
 - `tools/list`, `tools/call`, `resources/list`, `prompts/list`, `ping`
 - JSON response bodies, no SSE push/subscriptions
-- 3 public read-only tools and 9 bearer-protected tools currently live. The reviewed research-tool change proposes 7 public tools after a separate safe rollout.
+- 3 public read-only tools and 9 bearer-protected tools currently live. The reviewed source declares 9 public read-only tools and 10 bearer-protected tools (11 with the optional bridge) after a separate safe rollout; the live deployment is unchanged until then.
 - same-tenant agent discovery, messaging, tasks with atomic queued → claimed transition and own audit retrieval
 - verified Cloudflare Access operator identity, scoped credentials, expiry and revocation
 - simple daily operation budgets and fixed-target passive DNS
@@ -52,6 +52,28 @@ Credentials are automatically rejected after expiry, user revocation, agent disa
 
 For enterprise multi-tenancy, this first release intentionally provisions **only** the internal Shards tenant. A public self-service customer registration endpoint does not exist.
 
+## Follow-on authority architecture (not in this batch)
+
+This batch adds only two stateless public GitHub reads and one read-only task
+lookup. It deliberately does **not** add checkpoints, evidence records, review
+questions, approval requests, leases or a second D1 task-authority model.
+
+Any follow-on feature in that space must use one of two reviewed routes:
+
+1. the existing Python task lifecycle under `src/shards_mcp/`, with its
+   creator/worker/verifier separation, operator-managed delegation allowlist,
+   signed permits and audit rules; or
+2. a separately governed bridge with its own cross-repo contract, identity
+   mapping, audit chain and release gate.
+
+Do not create a parallel D1 task authority, grant the edge approval or
+verification verdicts, or treat a stored task row as independent review
+evidence. `shards_task_get` returns untrusted task data to a creator or
+assignee only; it is not an approval, verification or checkpoint mechanism.
+See [the task lifecycle skill](../../skills/task-lifecycle/SKILL.md), the
+[Python delegation allowlist](../../docs/task-delegation-allowlist.md) and the
+[architecture overview](../../docs/architecture.md).
+
 ## Opt-in Shards-Kernel GitHub issue-label bridge (source only, disabled)
 
 The Worker source now contains an opt-in authenticated tool, `shards_kernel_issue_label`, that can request one operator-approved GitHub issue label through a separate Shards-Kernel operator on Oracle. It is **disabled by default** and hidden from `tools/list` and `/api/status` unless every Worker binding is present and valid. The live deployment is unchanged and still exposes 9 protected tools.
@@ -60,7 +82,7 @@ The bridge requires the distinct `kernel:github_label` scope, an exact two-agent
 
 Kernel PR #162 merged at `61cc6e82ee25aefa0a9c95ae75aedda42a7090ae`, the source revision reported for the Oracle pilot. The operator reports terminal acceptance for the Kernel, HAProxy and the protected HTTPS route. The bridge sends `User-Agent: Shards-MCP-Kernel-Bridge` on its outbound POST. Acceptance through the deployed MCP Worker is pending. [Kernel PR #162](https://github.com/Shards-foundation/Shards-kernel/pull/162) · [Pilot evidence and Worker acceptance](../../docs/kernel-issue-label-bridge.md#verification)
 
-Every authenticated bridge call writes sanitized `audit_events` rows: when the bridge is enabled and valid, scope/budget denials write one `kernel.issue_label.denied` row, and calls reaching `kernelIssueLabel` write an `attempt` row before forwarding plus an outcome row. A denial or pre-forward audit failure blocks dispatch, and a post-forward audit failure is `UNKNOWN`, never success. When the bridge is disabled or its configuration is invalid, the Edge checks configuration before the scope/budget checks; an unscoped caller gets the generic `AUTH_REQUIRED` text, a scoped caller gets `BRIDGE_DISABLED`/`BRIDGE_NOT_CONFIGURED`, and neither writes a bridge audit or route-budget row; the existing `authenticate()` activity upsert remains. A non-200 response after the POST, including a Cloudflare Access/proxy `403` or `404`, is `UNKNOWN`/`applied:null` and is never treated as proof that no label was added. Anonymous/invalid-token calls write no D1 audit row. When enabled, `/api/status` shows 10 protected tools. The manual production release gate takes `bridge_mode=enabled` (exact 10, including `shards_kernel_issue_label`) and defaults to `disabled` (exact 9). Select `enabled` only in the approved rollout after consulting the deployment gates. [Bridge configuration, provisioning, deployment gates and rollback](../../docs/kernel-issue-label-bridge.md)
+Every authenticated bridge call writes sanitized `audit_events` rows: when the bridge is enabled and valid, scope/budget denials write one `kernel.issue_label.denied` row, and calls reaching `kernelIssueLabel` write an `attempt` row before forwarding plus an outcome row. A denial or pre-forward audit failure blocks dispatch, and a post-forward audit failure is `UNKNOWN`, never success. When the bridge is disabled or its configuration is invalid, the Edge checks configuration before the scope/budget checks; an unscoped caller gets the generic `AUTH_REQUIRED` text, a scoped caller gets `BRIDGE_DISABLED`/`BRIDGE_NOT_CONFIGURED`, and neither writes a bridge audit or route-budget row; the existing `authenticate()` activity upsert remains. A non-200 response after the POST, including a Cloudflare Access/proxy `403` or `404`, is `UNKNOWN`/`applied:null` and is never treated as proof that no label was added. Anonymous/invalid-token calls write no D1 audit row. When enabled, `/api/status` shows 11 protected tools. The manual production release gate takes `bridge_mode=enabled` (exact 11, including `shards_kernel_issue_label`) and defaults to `disabled` (exact 10). Select `enabled` only in the approved rollout after consulting the deployment gates. [Bridge configuration, provisioning, deployment gates and rollback](../../docs/kernel-issue-label-bridge.md)
 
 ## External effect isolation
 
@@ -223,8 +245,8 @@ python3 deployment/cloudflare/schema_migrations_test.py -v
 
 `node --test` must report **zero failed and zero cancelled tests**. The browser's stalled-MCP regression awaits a deliberately pending promise until `AbortSignal.timeout()` fires. Node's abort timer is unref'd; therefore the test must start its referenced 1.5-second failure watchdog **before** awaiting the button handler. An unresolved test is a failure, not a pass. GitHub Actions enforces the full TAP summary using this pinned Node version: the Worker + audit + bridge + release-gate-name combined suite must have **at least 48 tests**, every reported test must pass, and both failed and cancelled counts must equal zero. The additional workspace, SDK, release-verifier and SQLite migration test commands above reproduce the other Edge acceptance steps. Installing the official MCP SDK and Zod in the SDK step requires npm access but no paid service.
 
-**Post-deployment verification:** The separate `.github/workflows/edge-production-release-gate.yml` workflow (manually invoked only *after* an approved release) takes a `deployed_worker_version` UUID. It does **not** trust that UUID as evidence by itself. The workflow calls the read-only Cloudflare Workers Deployments API to check the actual latest `shards-mcp-edge` deployment is assigned to that exact version with 100% traffic. It separately checks Cloudflare's Worker Custom Domains API for `mcp.shardsinc.co.uk` mapped uniquely to the enabled production service. Both checks run before the live MCP tests; the deployment and route IDs are checked a second time afterward to catch a concurrent release. Only then are the exact seven public tools and the operator-selected protected surface accepted: nine by default, or ten including `shards_kernel_issue_label` when `bridge_mode=enabled`. Anonymous discovery must always contain only the seven public tools. An undeployed three-tool site must FAIL the post-deployment workflow.
+**Post-deployment verification:** The separate `.github/workflows/edge-production-release-gate.yml` workflow (manually invoked only *after* an approved release) takes a `deployed_worker_version` UUID. It does **not** trust that UUID as evidence by itself. The workflow calls the read-only Cloudflare Workers Deployments API to check the actual latest `shards-mcp-edge` deployment is assigned to that exact version with 100% traffic. It separately checks Cloudflare's Worker Custom Domains API for `mcp.shardsinc.co.uk` mapped uniquely to the enabled production service. Both checks run before the live MCP tests; the deployment and route IDs are checked a second time afterward to catch a concurrent release. Only then are the exact nine public tools and the operator-selected protected surface accepted: ten by default, or eleven including `shards_kernel_issue_label` when `bridge_mode=enabled`. Anonymous discovery must always contain only the nine public tools. An undeployed three-tool site must FAIL the post-deployment workflow.
 
 **One-time CI authentication prerequisite:** A repository administrator must configure the GitHub Actions secret `SHARDS_CF_WORKERS_READ_TOKEN` with a narrowly scoped Cloudflare API token providing *read-only* access to Workers deployments and custom-domain routing for the existing account. Do not commit the credential, reuse an operator/agent token, or grant Worker/D1 write access merely to satisfy this gate. If the secret is missing, the verification fails closed. The existing account ID in the workflow is not a credential. The workflow does not change deployments, traffic percentages, domains, D1 or Access policies.
 
-**Evidence limitation:** Cloudflare deployment UUID verification identifies the running deployment, but does not independently prove that its uploaded source bytes equal the reviewed Git commit. Source-artifact hashes, D1 migration evidence, rollback capability and authenticated multi-agent E2E checks remain separate release approvals. The source-only PR's permissive three-or-seven-tool smoke tests are intentionally **not** the final release gate.
+**Evidence limitation:** Cloudflare deployment UUID verification identifies the running deployment, but does not independently prove that its uploaded source bytes equal the reviewed Git commit. Source-artifact hashes, D1 migration evidence, rollback capability and authenticated multi-agent E2E checks remain separate release approvals. The source-only PR's staged three-, seven- or nine-tool smoke tests are intentionally **not** the final release gate.

@@ -486,12 +486,12 @@ Keep the production bridge disabled until every gate below is satisfied.
    tenant-wide mapping or self-service enrolment. Agents without a mapping are
    denied even if they hold the scope.
 5. **Release gate update.** When the bridge is enabled, `/api/status` exposes
-   10 protected tools instead of 9. The manual production release gate now takes
-   `bridge_mode`: `disabled` (default) expects exactly 9 and rejects the bridge;
-   `enabled` expects exactly 10 including `shards_kernel_issue_label`. Both modes
-   always require exactly 7 public tools and no protected tool in anonymous
+   11 protected tools instead of 10. The manual production release gate now takes
+   `bridge_mode`: `disabled` (default) expects exactly 10 and rejects the bridge;
+   `enabled` expects exactly 11 including `shards_kernel_issue_label`. Both modes
+   always require exactly 9 public tools and no protected tool in anonymous
    discovery. Select `enabled` only in the approved enablement rollout; leaving
-   the bridge disabled keeps the current 9-tool live gate valid.
+   the bridge disabled keeps the current 10-tool live gate valid.
 6. **No paid resources.** This change provisions no Cloudflare, Oracle, GitHub
    or paid resource. The operator uses existing infrastructure under separate
    approval.

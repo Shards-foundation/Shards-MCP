@@ -26,16 +26,16 @@ test('release gate exposes a default-disabled operator-selectable bridge mode', 
   assert.equal(/const privateNames=\[/.test(workflow), false);
 });
 
-test('disabled mode expects exactly nine protected tools and no bridge', () => {
+test('disabled mode expects exactly ten protected tools and no bridge', () => {
   const expected = expectedPrivateNames('disabled');
-  assert.equal(expected.length, 9);
+  assert.equal(expected.length, 10);
   assert.equal(expected.includes(BRIDGE_TOOL_NAME), false);
   assertExactNames(declared(expected), discovered(PUBLIC_NAMES), 'disabled');
 });
 
-test('enabled mode expects exactly ten protected tools including the bridge', () => {
+test('enabled mode expects exactly eleven protected tools including the bridge', () => {
   const expected = expectedPrivateNames('enabled');
-  assert.equal(expected.length, 10);
+  assert.equal(expected.length, 11);
   assert.equal(expected.includes(BRIDGE_TOOL_NAME), true);
   assertExactNames(declared(expected), discovered(PUBLIC_NAMES), 'enabled');
 });
@@ -43,18 +43,18 @@ test('enabled mode expects exactly ten protected tools including the bridge', ()
 test('disabled mode rejects a status that exposes the bridge', () => {
   assert.throws(
     () => assertExactNames(declared(expectedPrivateNames('enabled')), discovered(PUBLIC_NAMES), 'disabled'),
-    /not exactly 9/,
+    /not exactly 10/,
   );
 });
 
 test('enabled mode rejects a status missing the bridge', () => {
   assert.throws(
     () => assertExactNames(declared(expectedPrivateNames('disabled')), discovered(PUBLIC_NAMES), 'enabled'),
-    /not exactly 10/,
+    /not exactly 11/,
   );
 });
 
-test('both modes always enforce seven public names and hide every private tool from anonymous discovery', () => {
+test('both modes always enforce nine public names and hide every private tool from anonymous discovery', () => {
   for (const mode of ['disabled', 'enabled']) {
     const expected = expectedPrivateNames(mode);
     assertExactNames(declared(expected), discovered(PUBLIC_NAMES), mode);

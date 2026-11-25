@@ -18,12 +18,14 @@ Public tools:
 - `shards_skill_read` — read an exact first-party Shards skill instruction file from the public repository.
 - `shards_repo_document` — read an approved public Shards repository's README, AGENTS or SECURITY document.
 - `shards_open_prs` — list up to ten live public GitHub pull requests for approved Shards repositories.
+- `shards_pr_read` — read one public pull request by number; returns exact head/base commit SHAs and bounded metadata, never a diff or a write.
+- `shards_commit_read` — read one public commit by its full 40-character SHA; returns a bounded message and parent SHAs, never file patches or credentials.
 
-The four additional research tools remain **source-only until deployed**. They read fixed public GitHub origins and are not GitHub write permissions, private repository access, skill installation or agent authentication.
+The six additional research tools remain **source-only until deployed**. They read fixed public GitHub origins and are not GitHub write permissions, private repository access, skill installation or agent authentication.
 
 ### Claude Desktop / Claude.ai
 
-Open **Customize → Connectors → Add → Custom → Web**, name it **Shards MCP**, enter `https://mcp.shardsinc.co.uk/mcp` and select *No sign-in* for public discovery. Review the tool permissions. Claude may vary these controls by account/workspace. For **nine existing protected agent tools**, the operator must first issue a distinct `smcp_...` key at the **Edge operator console** `https://mcp.shardsinc.co.uk/manage` with exactly the needed scopes. In Claude's **Add custom connector** flow, retain the same `https://mcp.shardsinc.co.uk/mcp` URL and use **Request headers** to configure **header name** `Authorization` and **header value** `Bearer <the Edge-issued scoped key>`. Choose the fixed-header/no-sign-in method rather than pretending a bearer token is OAuth. Never put the key in a prompt, screenshot, repository or shared configuration. Verify success by invoking `shards_agent_identity` in a Claude chat: it must return that exact enrolled principal and effective scopes; `shards_agents_list` is a safe second check. The key issued by the **separate Agent Hub** is not proven interchangeable with an Edge `smcp_` key.
+Open **Customize → Connectors → Add → Custom → Web**, name it **Shards MCP**, enter `https://mcp.shardsinc.co.uk/mcp` and select *No sign-in* for public discovery. Review the tool permissions. Claude may vary these controls by account/workspace. For the **protected agent tools**, the operator must first issue a distinct `smcp_...` key at the **Edge operator console** `https://mcp.shardsinc.co.uk/manage` with exactly the needed scopes. In Claude's **Add custom connector** flow, retain the same `https://mcp.shardsinc.co.uk/mcp` URL and use **Request headers** to configure **header name** `Authorization` and **header value** `Bearer <the Edge-issued scoped key>`. Choose the fixed-header/no-sign-in method rather than pretending a bearer token is OAuth. Never put the key in a prompt, screenshot, repository or shared configuration. Verify success by invoking `shards_agent_identity` in a Claude chat: it must return that exact enrolled principal and effective scopes; `shards_agents_list` is a safe second check. The key issued by the **separate Agent Hub** is not proven interchangeable with an Edge `smcp_` key.
 
 **Claude Free single-connector constraint:** to change headers on an existing custom connector, Claude's current Help Center instructs removing and re-adding that **same** connector; do not buy or create a second slot. Only the user can approve connector configuration and enter the secret in Claude's secure header field. See [Claude's current custom connector and request-header guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
 
@@ -103,7 +105,7 @@ curl -sS https://mcp.shardsinc.co.uk/mcp \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"example","version":"1.0"}}}'
 ```
 
-Then call `tools/list`, then `tools/call` with `name` `shards_gateway_status`. The proposed source supports **16 tools total**, 7 public and 9 credential-protected. The currently deployed Worker still exposes 3 public tools until the reviewed change is rolled out. MCP `tools/list` is authoritative.
+Then call `tools/list`, then `tools/call` with `name` `shards_gateway_status`. This source branch declares **19 tools total**, 9 public and 10 credential-protected (20 total when the optional kernel bridge is enabled). The currently deployed Worker still exposes fewer until a reviewed rollout; MCP `tools/list` is authoritative and the deployed count must be verified, not inferred from source.
 
 ## Operator-issued agent identity — real authentication
 
@@ -131,6 +133,7 @@ The source deliberately has **no hardcoded admin API key**. Signed Access identi
 | `shards_message_inbox` | At most 20 latest messages addressed to caller |
 | `shards_task_create` | Create an assigned internal coordination task with JSON input and idempotency key |
 | `shards_task_inbox` | Read only assigned tasks |
+| `shards_task_get` | Read one task the caller created or was assigned, tenant-scoped and read-only |
 | `shards_task_claim` | Atomic queued → claimed transition assigned to caller |
 | `shards_task_complete` | Claimed → completed with recorded JSON result |
 | `shards_audit_tail` | Own recent audit summaries |
