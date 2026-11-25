@@ -53,6 +53,11 @@ MAX_MARKER_BYTES = 4 * 1024
 STATE_SCHEMA = 1
 PENDING_MARKER_NAME = "pending-dispatch.json"
 STATE_LOCK_NAME = "adapter.lock"
+_MARKER_FIELDS = {
+    "dispatch_id": r"[0-9a-f]{32}",
+    "created_at": r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+    "conversation_namespace": r"lobby-[0-9a-f]{32}",
+}
 
 _UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -256,6 +261,7 @@ class StateStore:
             self.directory / STATE_LOCK_NAME if self.directory is not None else None
         )
         self._lock_fd: int | None = None
+        self._clear_unconfirmed = False
 
     def prepare(self) -> None:
         if not self.enabled:
@@ -276,6 +282,10 @@ class StateStore:
                 "adapter state directory must not be accessible by group or others "
                 "(chmod 700)"
             )
+        # A directory fsync persists entries inside it. Persist the links to
+        # newly created directories too, including after an interrupted prepare.
+        for parent in reversed(self.directory.absolute().parents):
+            self._fsync_directory(parent)
 
     def acquire_process_lock(self) -> None:
         if not self.enabled or self._lock_fd is not None:
@@ -327,6 +337,8 @@ class StateStore:
             os.close(fd)
 
     def is_pending(self) -> bool:
+        if self._clear_unconfirmed:
+            return True
         if not self.enabled:
             return False
         try:
@@ -352,9 +364,19 @@ class StateStore:
                 object_pairs_hook=_reject_duplicate_pairs,
                 parse_constant=_reject_constant,
             )
-        except (ConfigError, UnicodeDecodeError, ValueError, RecursionError):
+        except (ConfigError, OSError, ValueError, RecursionError):
             return {"state": "pending_dispatch", "unreadable": True}
-        if not isinstance(record, dict):
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"schema", "state", *_MARKER_FIELDS}
+            or type(record["schema"]) is not int
+            or record["schema"] != STATE_SCHEMA
+            or record["state"] != "pending_dispatch"
+            or any(
+                not isinstance(record[field], str) or not re.fullmatch(pattern, record[field])
+                for field, pattern in _MARKER_FIELDS.items()
+            )
+        ):
             return {"state": "pending_dispatch", "unreadable": True}
         return record
 
@@ -409,7 +431,7 @@ class StateStore:
                 os.unlink(temporary)
             except OSError:
                 pass
-        self._fsync_directory()
+        self._fsync_directory(self.directory)
         return record
 
     def clear(self) -> None:
@@ -421,22 +443,28 @@ class StateStore:
             return
         except OSError:
             raise StateError("cannot clear the pending dispatch marker") from None
-        self._fsync_directory()
+        try:
+            self._fsync_directory(self.directory)
+        except StateError:
+            # unlink already made the marker invisible to this process.
+            self._clear_unconfirmed = True
+            raise
 
-    def _fsync_directory(self) -> None:
+    @staticmethod
+    def _fsync_directory(directory: Path) -> None:
         flags = (
             os.O_RDONLY
             | getattr(os, "O_DIRECTORY", 0)
             | getattr(os, "O_CLOEXEC", 0)
         )
         try:
-            fd = os.open(self.directory, flags)
+            fd = os.open(directory, flags)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
         except OSError:
-            raise StateError("cannot open the adapter state directory") from None
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+            raise StateError("cannot sync the adapter state directory") from None
 
 
 @dataclass(frozen=True)
@@ -968,6 +996,8 @@ def make_handler(config: AdapterConfig):
                 self._reject(exc.status, exc.message)
             except UpstreamFailure as exc:
                 self._error(exc.status, exc.message, outcome=exc.outcome)
+            except StateError:
+                self._error(503, "dispatch state unavailable")
             except Exception:
                 if not self._responded:
                     self._error(500, "internal error")
@@ -1047,7 +1077,8 @@ def make_handler(config: AdapterConfig):
 
 
 class LobbyHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
+    # ThreadingMixIn waits for non-daemon handlers before returning from close.
+    daemon_threads = False
     allow_reuse_address = True
     request_queue_size = 8
 
@@ -1066,10 +1097,8 @@ class LobbyHTTPServer(ThreadingHTTPServer):
             raise
 
     def server_close(self) -> None:
-        try:
-            super().server_close()
-        finally:
-            self.state.release_process_lock()
+        super().server_close()
+        self.state.release_process_lock()
 
     def process_request(self, request, client_address) -> None:
         if not self.connection_slots.acquire(blocking=False):
@@ -1129,12 +1158,6 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _safe_field(value: Any, pattern: str) -> str:
-    if isinstance(value, str) and re.fullmatch(pattern, value):
-        return value
-    return "unavailable"
-
-
 def reconcile_pending_dispatch(state_dir: Path, confirmed: bool) -> int:
     """Local-only recovery. It refuses to run while an adapter holds the lock."""
     store = StateStore(state_dir)
@@ -1145,28 +1168,16 @@ def reconcile_pending_dispatch(state_dir: Path, confirmed: bool) -> int:
         print(f"lobby-adapter: {exc}", file=sys.stderr)
         return 2
     try:
-        if not store.is_pending():
+        record = store.read_marker()
+        if record is None:
             print("no pending dispatch marker; nothing to reconcile")
             return 0
-        record = store.read_marker() or {}
         print("pending upstream dispatch marker present")
         if record.get("unreadable"):
             print("  marker content is unreadable; treating it as an ambiguous dispatch")
         else:
-            print(
-                "  dispatch_id: "
-                + _safe_field(record.get("dispatch_id"), r"[0-9a-f]{32}")
-            )
-            print(
-                "  created_at: "
-                + _safe_field(record.get("created_at"), r"[0-9T:Z-]{10,32}")
-            )
-            print(
-                "  conversation_namespace: "
-                + _safe_field(
-                    record.get("conversation_namespace"), r"lobby-[0-9a-f]{32}"
-                )
-            )
+            for field in _MARKER_FIELDS:
+                print(f"  {field}: {record[field]}")
         print("  Inspect the upstream run and its effects before clearing this marker.")
         print(
             "  The adapter cannot prove that an ambiguous upstream run was "

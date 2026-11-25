@@ -1148,6 +1148,79 @@ class PendingDispatchGateTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, {"status": "ok", "model": adapter.MODEL})
 
+    def test_first_dispatch_syncs_new_directory_entries_and_marker(self):
+        root = self.state_dir.parent
+        self.state_dir = root / "new-parent" / "state"
+        synced = set()
+        fsync = os.fsync
+        observed = []
+
+        def record_sync(fd):
+            info = os.fstat(fd)
+            fsync(fd)
+            synced.add((info.st_dev, info.st_ino))
+
+        def inspect_dispatch(*args):
+            paths = (root, self.state_dir.parent, self.state_dir, self._marker())
+            for path in paths:
+                info = path.stat()
+                if (info.st_dev, info.st_ino) in synced:
+                    observed.append(path)
+            return "completed"
+
+        with (
+            mock.patch.object(os, "fsync", side_effect=record_sync),
+            mock.patch.object(adapter, "call_upstream", side_effect=inspect_dispatch),
+        ):
+            harness = self._start()
+            status, _, _, _ = harness.request(
+                "POST", "/chat", self._body(), token=harness.token()
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(observed, [root, self.state_dir.parent, self.state_dir, self._marker()])
+
+    def test_failed_clear_sync_keeps_running_adapter_closed(self):
+        harness = self._start()
+        fsync = os.fsync
+
+        def fail_clear_sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode) and not self._marker().exists():
+                raise OSError("synthetic filesystem failure after marker removal")
+            fsync(fd)
+
+        with mock.patch.object(os, "fsync", side_effect=fail_clear_sync):
+            status, body, _, _ = harness.request(
+                "POST", "/chat", self._body(), token=harness.token()
+            )
+        self.assertEqual(status, 503)
+        self.assertEqual(body, {"error": "dispatch state unavailable"})
+        self.assertEqual(harness.upstream.calls, 1)
+        self.assertEqual(harness.request("GET", "/health", token=harness.token())[0], 503)
+        status, body, _, _ = harness.request(
+            "POST", "/chat", self._body(), token=harness.token()
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(body, {"error": "reconciliation required"})
+        self.assertEqual(harness.upstream.calls, 1)
+
+    def test_failed_marker_sync_prevents_dispatch(self):
+        harness = self._start()
+        fsync = os.fsync
+
+        def fail_directory_sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError("synthetic directory sync failure")
+            fsync(fd)
+
+        with mock.patch.object(os, "fsync", side_effect=fail_directory_sync):
+            status, body, _, _ = harness.request(
+                "POST", "/chat", self._body(), token=harness.token()
+            )
+        self.assertEqual(status, 503)
+        self.assertEqual(body, {"error": "dispatch state unavailable"})
+        self.assertTrue(self._marker().exists())
+        self.assertEqual(harness.upstream.calls, 0)
+
     def test_unknown_timeout_retains_marker_and_blocks_all_conversations(self):
         harness = self._start(upstream_delay=0.5, upstream_timeout=0.1)
         conversation_id = str(uuid.uuid4())
@@ -1283,11 +1356,20 @@ class PendingDispatchGateTests(unittest.TestCase):
         self.assertEqual(harness.upstream.calls, 1)
 
     def test_crash_marker_blocks_a_new_adapter_until_reconcile(self):
-        store = adapter.StateStore(self.state_dir)
-        store.prepare()
-        store.acquire_process_lock()
-        store.begin(adapter.conversation_namespace(str(uuid.uuid4())))
-        store.release_process_lock()
+        completed = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import os, sys, uuid; from pathlib import Path; import lobby_adapter as adapter\n"
+                "store = adapter.StateStore(Path(sys.argv[1]))\n"
+                "store.prepare()\n"
+                "store.acquire_process_lock()\n"
+                "store.begin(adapter.conversation_namespace(str(uuid.uuid4())))\n"
+                "os._exit(0)\n",
+                str(self.state_dir),
+            ],
+            cwd=HERE, capture_output=True, text=True, timeout=3,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertTrue(self._marker().exists())
 
         harness = self._start()
@@ -1372,6 +1454,76 @@ class PendingDispatchGateTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertTrue(self._marker().exists())
         self.assertIn("another adapter", output.getvalue())
+
+    def test_reconcile_and_second_adapter_are_blocked_while_shutdown_drains(self):
+        harness = self._start()
+        dispatched = threading.Event()
+        finish_dispatch = threading.Event()
+        close_started = threading.Event()
+        result = []
+
+        def upstream(*args):
+            dispatched.set()
+            finish_dispatch.wait(5)
+            raise adapter.UpstreamFailure(504, "upstream timeout")
+
+        def chat():
+            result.append(harness.request("POST", "/chat", self._body(), token=harness.token()))
+
+        def close():
+            close_started.set()
+            harness.server.server_close()
+
+        with mock.patch.object(adapter, "call_upstream", side_effect=upstream):
+            client = threading.Thread(target=chat)
+            client.start()
+            closer = threading.Thread(target=close)
+            try:
+                self.assertTrue(dispatched.wait(3))
+                harness.server.shutdown()
+                closer.start()
+                self.assertTrue(close_started.wait(3))
+                self.assertTrue(self._await(lambda: harness.server.socket.fileno() == -1))
+                completed = subprocess.run(
+                    [sys.executable, str(HERE / "lobby_adapter.py"), "reconcile",
+                     "--state-dir", str(self.state_dir), "--confirm-upstream-inspected"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                self.assertEqual(completed.returncode, 2)
+                self.assertIn("another adapter", completed.stderr)
+                with self.assertRaises(adapter.StateError):
+                    adapter.LobbyHTTPServer(harness.config, adapter.make_handler(harness.config))
+                self.assertTrue(self._marker().exists())
+            finally:
+                finish_dispatch.set()
+                client.join(5)
+                if closer.ident is not None:
+                    closer.join(5)
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(result[0][0], 504)
+        self.assertTrue(self._marker().exists())
+
+    def test_malformed_marker_blocks_chats_and_does_not_echo_its_fields(self):
+        store = adapter.StateStore(self.state_dir)
+        store.prepare()
+        canary = secrets.token_hex(16)
+        write_private(self._marker(), json.dumps({"dispatch_id": canary}).encode())
+        harness = self._start()
+        self.assertEqual(harness.request("GET", "/health", token=harness.token())[0], 503)
+        self.assertEqual(harness.request("POST", "/chat", self._body(), token=harness.token())[0], 503)
+        self.assertEqual(harness.request("POST", "/reconcile", token=harness.token())[0], 404)
+        self.assertEqual(harness.upstream.calls, 0)
+        harness.close()
+        self.harness = None
+        completed = subprocess.run(
+            [sys.executable, str(HERE / "lobby_adapter.py"), "reconcile",
+             "--state-dir", str(self.state_dir)],
+            capture_output=True, text=True, timeout=3,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertTrue(self._marker().exists())
+        self.assertNotIn(canary, completed.stdout + completed.stderr)
+        self.assertIn("unreadable", completed.stdout)
 
     def test_competing_adapter_same_state_dir_is_refused(self):
         harness = self._start()

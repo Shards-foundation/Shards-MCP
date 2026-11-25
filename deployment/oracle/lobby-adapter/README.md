@@ -80,12 +80,14 @@ The value is stable for one UUID and sent as the OpenAI-compatible `user` field.
 
 A chat can time out after the request has already reached OpenClaw. The upstream run may then continue while the adapter is free to accept another chat, so two runs could overlap in different conversations. The adapter therefore keeps a durable local gate:
 
-1. Before connecting upstream, it records a marker at `~/.openclaw/lobby-adapter-state/pending-dispatch.json` (mode `0600`). The marker is written to a temporary file, `fsync`ed, published with an atomic create-if-absent `link`, and the directory is `fsync`ed. It contains a schema version, a dispatch ID, a UTC timestamp, and the derived conversation namespace. It never contains the prompt, the raw conversation UUID, the adapter secret, or the gateway token.
+1. Before accepting requests, the adapter syncs the parent directory entries that make the state directory reachable after a crash. Before connecting upstream, it writes a marker at `~/.openclaw/lobby-adapter-state/pending-dispatch.json` (mode `0600`) by syncing a temporary file, publishing it with an atomic create-if-absent `link`, and syncing the state directory. It contains a schema version, a dispatch ID, a UTC timestamp, and the derived conversation namespace. It never contains the prompt, the raw conversation UUID, the adapter secret, or the gateway token.
 2. The marker is cleared only after a validated completed response or a definitive `outcome: not_dispatched` result.
 3. It is retained after any `outcome: unknown`, upstream error, invalid response, unexpected exception, or crash. While it exists, every `POST /chat` for any conversation returns `503 {"error":"reconciliation required"}` and the adapter makes no upstream call. The block survives an adapter restart.
 4. There is no automatic time-based clearing, no automatic retry, and no remote or HTTP clear route.
 
 A client disconnect after dispatch does not change the outcome. If the adapter later validates a completed reply, the marker is cleared because completion is known; if the result stays ambiguous, the marker is retained.
+
+If syncing a marker removal fails after a known outcome, the running adapter keeps chat blocked. Resolve the filesystem error before restarting or reconciling. After a restart, any marker that remains on disk still blocks chat.
 
 `GET /health` returns `503` with a fixed sanitised body while the gate is closed:
 
@@ -97,7 +99,7 @@ It contains no conversation data or credentials. A healthy adapter still returns
 
 ### Manual recovery
 
-The adapter holds an exclusive `fcntl.flock` on `~/.openclaw/lobby-adapter-state/adapter.lock` for its whole lifetime. A second adapter for the same state directory is refused, and reconciliation refuses while an adapter is running. Stop the adapter first (`Ctrl-C`), then inspect the upstream run and its effects:
+The adapter holds an exclusive `fcntl.flock` on `~/.openclaw/lobby-adapter-state/adapter.lock` until all request handlers finish, including during shutdown. A second adapter or reconciliation process using the same state directory is refused while the lock is held. Stop the adapter first (`Ctrl-C`), wait for it to exit, then inspect the upstream run and its effects.
 
 ```sh
 python3 deployment/oracle/lobby-adapter/lobby_adapter.py reconcile
