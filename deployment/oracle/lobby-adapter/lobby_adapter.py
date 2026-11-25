@@ -12,7 +12,9 @@ import argparse
 import hashlib
 import hmac
 import http.client
+import io
 import json
+import math
 import os
 import re
 import secrets
@@ -22,7 +24,7 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -39,7 +41,8 @@ MAX_MESSAGE_CHARS = 8_000
 MAX_MESSAGE_BYTES = 12 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_JSON_DEPTH = 8
-MAX_CONCURRENCY = 4
+MAX_CONCURRENCY = 1
+MAX_CONNECTIONS = 8
 REQUEST_TIMEOUT = 10.0
 UPSTREAM_TIMEOUT = 30.0
 MAX_SECRET_BYTES = 512
@@ -52,6 +55,7 @@ _UUID_RE = re.compile(
 _BEARER_RE = re.compile(r"Bearer ([!-~]+)\Z", re.IGNORECASE)
 _CONTENT_TYPE_RE = re.compile(r"application/json(?:\s*;.*)?\Z", re.IGNORECASE)
 _CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,10}\Z")
+_HTTP_TOKEN_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 _GATEWAY_TOKEN_PATHS = (("gateway", "auth", "token"), ("gateway", "token"))
 
 
@@ -84,7 +88,7 @@ def default_openclaw_config() -> Path:
 
 def _read_private_file(path: Path, *, max_bytes: int, label: str) -> bytes:
     """Read a regular owner-only file without following symlinks."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
     try:
         fd = os.open(path, flags)
     except FileNotFoundError:
@@ -216,8 +220,8 @@ def load_gateway_token(path: Path | str) -> str:
 
 @dataclass(frozen=True)
 class AdapterConfig:
-    adapter_secret: bytes
-    gateway_token: str
+    adapter_secret: bytes = field(repr=False)
+    gateway_token: str = field(repr=False)
     bind_host: str = BIND_HOST
     bind_port: int = BIND_PORT
     upstream_host: str = UPSTREAM_HOST
@@ -245,8 +249,9 @@ class AdapterConfig:
         if (
             not isinstance(self.adapter_secret, bytes)
             or len(self.adapter_secret) < 32
+            or any(byte < 0x21 or byte > 0x7E for byte in self.adapter_secret)
         ):
-            raise ValueError("adapter secret must be at least 32 bytes")
+            raise ValueError("adapter secret must be at least 32 printable ASCII bytes")
         if (
             not isinstance(self.gateway_token, str)
             or len(self.gateway_token) < 16
@@ -256,13 +261,19 @@ class AdapterConfig:
             )
         ):
             raise ValueError("gateway token has an invalid format")
+        if _constant_time_equal(self.adapter_secret, self.gateway_token.encode("ascii")):
+            raise ValueError("adapter secret and gateway token must differ")
         for name in (
             "request_timeout",
             "upstream_timeout",
         ):
             value = getattr(self, name)
-            if not isinstance(value, (int, float)) or value <= 0:
-                raise ValueError(f"{name} must be positive")
+            if (
+                not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be finite and positive")
         for name in (
             "max_request_bytes",
             "max_message_chars",
@@ -278,6 +289,71 @@ class AdapterConfig:
 def _constant_time_equal(left: bytes, right: bytes) -> bool:
     return hmac.compare_digest(
         hashlib.sha256(left).digest(), hashlib.sha256(right).digest()
+    )
+
+
+def _time_left(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    return remaining
+
+
+class _DeadlineReader(io.RawIOBase):
+    """Apply an absolute deadline to each socket read behind HTTP buffering."""
+
+    def __init__(self, sock: socket.socket, deadline: float):
+        super().__init__()
+        self.sock = sock
+        self.deadline = deadline
+        # Keep the descriptor alive for responses with Connection: close.
+        self.stream = sock.makefile("rb", buffering=0)
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        self.sock.settimeout(_time_left(self.deadline))
+        return self.stream.readinto(buffer)
+
+    def close(self) -> None:
+        self.stream.close()
+        super().close()
+
+
+class _ResponseSocket:
+    """Supply the deadline-aware file that stdlib HTTPResponse reads."""
+
+    def __init__(self, sock: socket.socket, deadline: float):
+        self.sock = sock
+        self.deadline = deadline
+
+    def makefile(self, mode: str) -> io.BufferedReader:
+        return io.BufferedReader(_DeadlineReader(self.sock, self.deadline))
+
+
+class _DeadlineHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host: str, port: int, deadline: float):
+        self.deadline = deadline
+        super().__init__(host, port, timeout=_time_left(deadline))
+
+    def send(self, data) -> None:
+        if self.sock is not None:
+            self.sock.settimeout(_time_left(self.deadline))
+        super().send(data)
+
+    def response_class(self, sock, *args, **kwargs):
+        return http.client.HTTPResponse(
+            _ResponseSocket(sock, self.deadline), *args, **kwargs
+        )
+
+
+def _valid_headers(headers: http.client.HTTPMessage) -> bool:
+    return not headers.defects and all(
+        _HTTP_TOKEN_RE.fullmatch(name)
+        and isinstance(value, str)
+        and all(character == "\t" or 0x20 <= ord(character) < 0x7F for character in value)
+        for name, value in headers.items()
     )
 
 
@@ -424,16 +500,17 @@ def _extract_reply(payload: Any, max_chars: int, max_bytes: int) -> str:
 def call_upstream(config: AdapterConfig, namespace: str, message: str) -> str:
     """Make exactly one bounded upstream call. Ambiguous outcomes are not retried."""
     body = _upstream_body(namespace, message)
-    connection = http.client.HTTPConnection(
-        config.upstream_host, config.upstream_port, timeout=config.upstream_timeout
+    deadline = time.monotonic() + config.upstream_timeout
+    connection = _DeadlineHTTPConnection(
+        config.upstream_host, config.upstream_port, deadline
     )
     try:
         try:
             connection.connect()
-        except (TimeoutError, socket.timeout):
-            raise UpstreamFailure(504, "upstream timeout") from None
+        except TimeoutError:
+            raise UpstreamFailure(504, "upstream timeout", "not_dispatched") from None
         except OSError:
-            raise UpstreamFailure(502, "upstream unavailable") from None
+            raise UpstreamFailure(502, "upstream unavailable", "not_dispatched") from None
         try:
             connection.request(
                 "POST",
@@ -447,18 +524,30 @@ def call_upstream(config: AdapterConfig, namespace: str, message: str) -> str:
                     "Connection": "close",
                 },
             )
-            response = connection.getresponse()
-            if response.status != 200:
-                raise UpstreamFailure(502, "upstream rejected request")
-            raw = response.read(config.max_response_bytes + 1)
-        except (TimeoutError, socket.timeout):
+            with connection.getresponse() as response:
+                if response.status != 200:
+                    raise UpstreamFailure(502, "upstream rejected request")
+                lengths = response.headers.get_all("Content-Length", [])
+                encodings = response.headers.get_all("Transfer-Encoding", [])
+                if (
+                    not _valid_headers(response.headers)
+                    or len(lengths) > 1
+                    or (lengths and not _CONTENT_LENGTH_RE.fullmatch(lengths[0]))
+                    or (encodings and (lengths or [value.lower() for value in encodings] != ["chunked"]))
+                ):
+                    raise UpstreamFailure(502, "invalid upstream response")
+                raw = response.read(config.max_response_bytes + 1)
+                if len(raw) > config.max_response_bytes:
+                    raise UpstreamFailure(502, "upstream response too large")
+                if response.length not in (None, 0):
+                    raise UpstreamFailure(502, "invalid upstream response")
+                _time_left(deadline)
+        except TimeoutError:
             raise UpstreamFailure(504, "upstream timeout") from None
         except (http.client.HTTPException, OSError):
             raise UpstreamFailure(502, "upstream unavailable") from None
     finally:
         connection.close()
-    if len(raw) > config.max_response_bytes:
-        raise UpstreamFailure(502, "upstream response too large")
     try:
         payload = json.loads(
             raw.decode("utf-8"),
@@ -473,6 +562,8 @@ def call_upstream(config: AdapterConfig, namespace: str, message: str) -> str:
 
 
 def make_handler(config: AdapterConfig):
+    known_credentials = config.adapter_secret.decode("ascii"), config.gateway_token
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "LobbyAdapter/0.2"
@@ -480,12 +571,43 @@ def make_handler(config: AdapterConfig):
 
         def setup(self) -> None:
             super().setup()
-            self.connection.settimeout(config.request_timeout)
-            self._slot_held = False
+            self._request_deadline = time.monotonic() + config.request_timeout
+            self.rfile.close()
+            self.rfile = io.BufferedReader(
+                _DeadlineReader(self.connection, self._request_deadline)
+            )
             self._responded = False
 
         def log_message(self, format: str, *args: Any) -> None:
             return None
+
+        def parse_request(self) -> bool:
+            if not super().parse_request():
+                return False
+            _time_left(self._request_deadline)
+            parts = self.requestline.split(" ")
+            if (
+                self.request_version not in ("HTTP/1.0", "HTTP/1.1")
+                or not self.raw_requestline.endswith(b"\r\n")
+                or len(parts) != 3
+                or parts != self.requestline.split()
+                or not _HTTP_TOKEN_RE.fullmatch(self.command)
+                or not _valid_headers(self.headers)
+            ):
+                self.send_error(400)
+                return False
+            if "Expect" in self.headers:
+                return self.handle_expect_100()
+            return True
+
+        def handle_expect_100(self) -> bool:
+            self._error(417, "expectation not supported")
+            return False
+
+        def send_error(self, code: int, message=None, explain=None) -> None:
+            if self.request_version not in ("HTTP/1.0", "HTTP/1.1"):
+                self.request_version = "HTTP/1.0"
+            self._error(code, "invalid HTTP request")
 
         def _host_ok(self) -> bool:
             values = self.headers.get_all("Host", [])
@@ -531,6 +653,8 @@ def make_handler(config: AdapterConfig):
             ).encode("utf-8")
             self._responded = True
             try:
+                deadline = time.monotonic() + config.request_timeout
+                self.connection.settimeout(_time_left(deadline))
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Cache-Control", "no-store")
@@ -540,6 +664,7 @@ def make_handler(config: AdapterConfig):
                 for key, value in (headers or {}).items():
                     self.send_header(key, value)
                 self.end_headers()
+                self.connection.settimeout(_time_left(deadline))
                 self.wfile.write(raw)
             except OSError:
                 pass
@@ -592,9 +717,6 @@ def make_handler(config: AdapterConfig):
                 return self._reject(404, "not found")
             if not self._authorized():
                 return self._reject(401, "unauthorized")
-            if not self.server.slots.acquire(blocking=False):
-                return self._reject(503, "busy")
-            self._slot_held = True
             try:
                 self._handle_chat()
             except RequestRejected as exc:
@@ -604,42 +726,21 @@ def make_handler(config: AdapterConfig):
             except Exception:
                 if not self._responded:
                     self._error(500, "internal error")
-            finally:
-                if self._slot_held:
-                    self.server.slots.release()
-                    self._slot_held = False
 
         def _read_body(self, length: int) -> bytes:
-            deadline = time.monotonic() + config.request_timeout
-            chunks: list[bytes] = []
-            remaining = length
             try:
-                while remaining:
-                    remaining_time = deadline - time.monotonic()
-                    if remaining_time <= 0:
-                        raise RequestRejected(408, "request body timed out")
-                    self.connection.settimeout(
-                        min(config.request_timeout, remaining_time)
-                    )
-                    try:
-                        chunk = self.rfile.read(min(remaining, 8192))
-                    except (TimeoutError, socket.timeout):
-                        raise RequestRejected(408, "request body timed out") from None
-                    except OSError:
-                        raise RequestRejected(400, "invalid request body") from None
-                    if not chunk:
-                        raise RequestRejected(408, "request body timed out")
-                    chunks.append(chunk)
-                    remaining -= len(chunk)
-            finally:
-                try:
-                    self.connection.settimeout(config.request_timeout)
-                except OSError:
-                    pass
-            return b"".join(chunks)
+                body = self.rfile.read(length)
+                _time_left(self._request_deadline)
+            except TimeoutError:
+                raise RequestRejected(408, "request body timed out") from None
+            except OSError:
+                raise RequestRejected(400, "invalid request body") from None
+            if len(body) != length:
+                raise RequestRejected(400, "invalid request body")
+            return body
 
         def _handle_chat(self) -> None:
-            if self.headers.get("Transfer-Encoding"):
+            if "Transfer-Encoding" in self.headers:
                 raise RequestRejected(411, "Content-Length required")
             lengths = self.headers.get_all("Content-Length", [])
             if len(lengths) != 1 or not _CONTENT_LENGTH_RE.fullmatch(lengths[0]):
@@ -655,13 +756,27 @@ def make_handler(config: AdapterConfig):
                 or not _CONTENT_TYPE_RE.fullmatch(content_types[0].strip())
             ):
                 raise RequestRejected(415, "application/json required")
-            if self.headers.get("Content-Encoding"):
+            if "Content-Encoding" in self.headers:
                 raise RequestRejected(415, "content encoding not supported")
             raw = self._read_body(length)
             payload = parse_strict_json(raw)
             conversation_id, message = validate_chat_payload(payload, config)
             namespace = conversation_namespace(conversation_id)
-            reply = call_upstream(config, namespace, message)
+            if not self.server.slots.acquire(blocking=False):
+                raise RequestRejected(503, "busy")
+            try:
+                reply = call_upstream(config, namespace, message)
+            except UpstreamFailure:
+                raise
+            except Exception:
+                raise UpstreamFailure(502, "upstream unavailable") from None
+            finally:
+                self.server.slots.release()
+            if any(
+                credential in reply or credential in conversation_id
+                for credential in known_credentials
+            ):
+                raise UpstreamFailure(502, "invalid upstream response")
             self._respond(
                 200, {"conversation_id": conversation_id, "reply": reply}
             )
@@ -677,7 +792,28 @@ class LobbyHTTPServer(ThreadingHTTPServer):
     def __init__(self, config: AdapterConfig, handler_class):
         self.config = config
         self.slots = threading.BoundedSemaphore(config.max_concurrency)
+        self.connection_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         super().__init__((config.bind_host, config.bind_port), handler_class)
+
+    def process_request(self, request, client_address) -> None:
+        if not self.connection_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.connection_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.connection_slots.release()
+
+    def handle_error(self, request, client_address) -> None:
+        # The default traceback can include parser or peer data.
+        return None
 
 
 def _parser() -> argparse.ArgumentParser:

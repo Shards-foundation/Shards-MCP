@@ -28,6 +28,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import lobby_adapter as adapter  # noqa: E402
+import lobby_client  # noqa: E402
 
 
 def write_private(path: Path, data: bytes, mode: int = 0o600) -> None:
@@ -52,6 +53,17 @@ def raw_request(port: int, request: bytes, timeout: float = 5.0) -> tuple[int, b
     head, _, body = data.partition(b"\r\n\r\n")
     status = int(head.split(b"\r\n", 1)[0].split(b" ")[1])
     return status, head, body
+
+
+def write_in_parts(sock: socket.socket, parts: tuple[bytes, ...], delay: float) -> None:
+    """Emit a finite fixture over a single test-local connection."""
+    try:
+        for index, part in enumerate(parts):
+            if index:
+                time.sleep(delay)
+            sock.sendall(part)
+    except (BrokenPipeError, ConnectionResetError):
+        pass
 
 
 class FakeUpstreamServer(ThreadingHTTPServer):
@@ -94,13 +106,31 @@ class _FakeUpstreamHandler(BaseHTTPRequestHandler):
             payload = json.dumps(
                 {"choices": [{"message": {"role": "assistant", "content": server.reply}}]}
             ).encode()
-            self._send(200, payload)
+            headers = (
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\n"
+                + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+            )
+            if server.mode == "slow_headers":
+                write_in_parts(self.connection, (headers[:20], headers[20:43], headers[43:] + payload), 0.2)
+            elif server.mode == "slow_body":
+                write_in_parts(self.connection, (headers + payload[:1], payload[1:2], payload[2:]), 0.2)
+            elif server.mode == "truncated":
+                self._send(200, payload, {"Connection": "close"}, length=len(payload) + 1)
+                self.close_connection = True
+            elif server.mode == "chunked":
+                self.connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                    + f"{len(payload):x}\r\n".encode() + payload + b"\r\n0\r\n\r\n"
+                )
+                self.close_connection = True
+            else:
+                self._send(200, payload)
 
-    def _send(self, status: int, body: bytes, headers=None) -> None:
+    def _send(self, status: int, body: bytes, headers=None, length=None) -> None:
         try:
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", str(len(body) if length is None else length))
             for key, value in (headers or {}).items():
                 self.send_header(key, value)
             self.end_headers()
@@ -171,7 +201,6 @@ class Harness:
         upstream_delay: float = 0.0,
         upstream_timeout: float = 2.0,
         request_timeout: float = adapter.REQUEST_TIMEOUT,
-        max_concurrency: int = 4,
         max_request_bytes: int = adapter.MAX_REQUEST_BYTES,
         max_message_chars: int = adapter.MAX_MESSAGE_CHARS,
         max_message_bytes: int = adapter.MAX_MESSAGE_BYTES,
@@ -195,7 +224,6 @@ class Harness:
             upstream_port=self.upstream.port,
             request_timeout=request_timeout,
             upstream_timeout=upstream_timeout,
-            max_concurrency=max_concurrency,
             max_request_bytes=max_request_bytes,
             max_message_chars=max_message_chars,
             max_message_bytes=max_message_bytes,
@@ -429,6 +457,26 @@ class SecretAndConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             adapter.AdapterConfig(upstream_path="/v1/other", **base)
 
+    def test_private_file_loader_rejects_fifo_without_waiting_for_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "not-a-regular-file"
+            os.mkfifo(path, 0o600)
+            completed = subprocess.run(
+                [sys.executable, str(HERE / "lobby_adapter.py"), "serve", "--secret-file", str(path)],
+                capture_output=True, text=True, timeout=3,
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("must be a regular file", completed.stderr)
+
+    def test_config_credentials_are_distinct_and_absent_from_repr(self):
+        secret = secrets.token_urlsafe(48)
+        gateway = secrets.token_urlsafe(32)
+        config = adapter.AdapterConfig(adapter_secret=secret.encode(), gateway_token=gateway)
+        self.assertNotIn(secret, repr(config))
+        self.assertNotIn(gateway, repr(config))
+        with self.assertRaises(ValueError):
+            adapter.AdapterConfig(adapter_secret=secret.encode(), gateway_token=secret)
+
 
 class AdapterHttpTests(unittest.TestCase):
     def setUp(self):
@@ -525,6 +573,7 @@ class AdapterHttpTests(unittest.TestCase):
     def test_namespace_is_stable_and_differs_per_conversation(self):
         first = str(uuid.uuid4())
         second = str(uuid.uuid4())
+        seen = []
         for conversation_id in (first, first, second):
             status, _, _, _ = self.harness.request(
                 "POST",
@@ -533,10 +582,10 @@ class AdapterHttpTests(unittest.TestCase):
                 token=self.harness.token(),
             )
             self.assertEqual(status, 200)
+            seen.append(json.loads(self.harness.upstream.last_body)["user"])
         self.assertEqual(self.harness.upstream.calls, 3)
-        first_namespace = adapter.conversation_namespace(first)
-        second_namespace = adapter.conversation_namespace(second)
-        self.assertNotEqual(first_namespace, second_namespace)
+        self.assertEqual(seen[0], seen[1])
+        self.assertNotEqual(seen[0], seen[2])
 
     def test_uppercase_uuid_is_normalized(self):
         conversation_id = str(uuid.uuid4()).upper()
@@ -832,15 +881,14 @@ class AdapterHttpTests(unittest.TestCase):
 
     def test_busy_adapter_returns_503(self):
         self.harness.close()
-        self.harness = Harness(
-            upstream_delay=0.5, upstream_timeout=2.0, max_concurrency=1
-        )
+        self.harness = Harness(upstream_delay=0.5)
         result: list[tuple[int, dict | None, bytes, dict]] = []
+        chat = self._body()
 
         def first_request() -> None:
             result.append(
                 self.harness.request(
-                    "POST", "/chat", self._body(), token=self.harness.token()
+                    "POST", "/chat", chat, token=self.harness.token()
                 )
             )
 
@@ -851,7 +899,7 @@ class AdapterHttpTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(self.harness.upstream.calls, 1)
         status, body, _, _ = self.harness.request(
-            "POST", "/chat", self._body(), token=self.harness.token()
+            "POST", "/chat", chat, token=self.harness.token()
         )
         self.assertEqual(status, 503)
         self.assertEqual(body, {"error": "busy"})
@@ -873,6 +921,166 @@ class AdapterHttpTests(unittest.TestCase):
         self.assertNotIn("CANARY-REQUEST-BODY", logged)
         self.assertNotIn(self.harness.token(), logged)
         self.assertNotIn(self.harness.gateway_token, logged)
+
+    def test_successful_upstream_reply_cannot_echo_either_credential(self):
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), contextlib.redirect_stdout(output):
+            for credential in (self.harness.token(), self.harness.gateway_token):
+                self.harness.upstream.server.reply = f"prefix {credential} suffix"
+                status, body, raw, headers = self.harness.request(
+                    "POST", "/chat", self._body(), token=self.harness.token()
+                )
+                self.assertEqual(status, 502)
+                self.assertEqual(body, {"error": "invalid upstream response", "outcome": "unknown"})
+                self.assertNotIn(credential.encode(), raw)
+                self.assertNotIn(credential, repr(headers))
+        self.assertEqual(self.harness.upstream.calls, 2)
+        self.assertNotIn(self.harness.token(), output.getvalue())
+        self.assertNotIn(self.harness.gateway_token, output.getvalue())
+
+    def test_unexpected_post_dispatch_exception_is_sanitized_and_ambiguous(self):
+        output = io.StringIO()
+        failure = RuntimeError(self.harness.token() + self.harness.gateway_token)
+        with (
+            mock.patch.object(adapter, "_extract_reply", side_effect=failure),
+            contextlib.redirect_stderr(output),
+        ):
+            status, body, raw, _ = self.harness.request(
+                "POST", "/chat", self._body(), token=self.harness.token()
+            )
+        self.assertEqual(status, 502)
+        self.assertEqual(body, {"error": "upstream unavailable", "outcome": "unknown"})
+        self.assertEqual(self.harness.upstream.calls, 1)
+        self.assertNotIn(self.harness.token(), output.getvalue() + raw.decode())
+        self.assertNotIn(self.harness.gateway_token, output.getvalue() + raw.decode())
+
+    def test_failed_upstream_connect_is_known_not_dispatched(self):
+        body = json.dumps(self._body()).encode()
+        request = (
+            f"POST /chat HTTP/1.1\r\nHost: 127.0.0.1:{self.harness.port}\r\n"
+            f"Authorization: Bearer {self.harness.token()}\r\n"
+            f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n"
+        ).encode() + body
+        with mock.patch.object(http.client.HTTPConnection, "connect", side_effect=ConnectionRefusedError):
+            status, _, raw = raw_request(self.harness.port, request)
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(raw), {"error": "upstream unavailable", "outcome": "not_dispatched"})
+        self.assertEqual(self.harness.upstream.calls, 0)
+
+    def test_parser_errors_reject_without_reflecting_request_fields(self):
+        host = f"Host: 127.0.0.1:{self.harness.port}\r\n"
+        auth = f"Authorization: Bearer {self.harness.token()}\r\n"
+        cases = (
+            (f"{self.harness.token()} /health HTTP/1.1\r\n{host}\r\n", 501),
+            (f"GET /health HTTP/1.1\r\n{host}{auth}broken header\r\n\r\n", 400),
+            (f"GET /health HTTP/1.1\r\n{host}{auth}X-Local: one\r\n two\r\n\r\n", 400),
+            (f"GET /health HTTP/1.1\r\n{host}{auth}X@Local: one\r\n\r\n", 400),
+            (f"POST /chat HTTP/1.1\r\n{host}Expect: 100-continue\r\n\r\n", 417),
+        )
+        for request, expected in cases:
+            status, _, body = raw_request(self.harness.port, request.encode())
+            self.assertEqual(status, expected)
+            self.assertNotIn(self.harness.secret, body)
+        self.assertEqual(self.harness.upstream.calls, 0)
+
+    def test_slow_request_line_and_headers_are_closed_at_the_deadline(self):
+        self.harness.close()
+        self.harness = Harness(request_timeout=0.32)
+        host = f"Host: 127.0.0.1:{self.harness.port}\r\n".encode()
+        auth = f"Authorization: Bearer {self.harness.token()}\r\n\r\n".encode()
+        for parts in (
+            (b"GET ", b"/health ", b"HTTP/1.1\r\n" + host + auth),
+            (b"GET /health HTTP/1.1\r\n", host, auth),
+        ):
+            with socket.create_connection(("127.0.0.1", self.harness.port), timeout=2) as sock:
+                writer = threading.Thread(target=write_in_parts, args=(sock, parts, 0.2))
+                writer.start()
+                try:
+                    self.assertEqual(sock.recv(4096), b"")
+                finally:
+                    writer.join()
+
+    def test_request_body_deadline_includes_time_spent_on_headers(self):
+        self.harness.close()
+        self.harness = Harness(request_timeout=0.32)
+        body = json.dumps(self._body()).encode()
+        headers = (
+            f"POST /chat HTTP/1.1\r\nHost: 127.0.0.1:{self.harness.port}\r\n"
+            f"Authorization: Bearer {self.harness.token()}\r\n"
+            f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n"
+        ).encode()
+        for parts in (
+            (headers, b"\r\n" + body[:1], body[1:]),
+            (headers + b"\r\n" + body[:1], body[1:2], body[2:]),
+        ):
+            with socket.create_connection(("127.0.0.1", self.harness.port), timeout=2) as sock:
+                writer = threading.Thread(target=write_in_parts, args=(sock, parts, 0.2))
+                writer.start()
+                try:
+                    self.assertIn(b" 408 ", sock.recv(4096).split(b"\r\n", 1)[0])
+                finally:
+                    writer.join()
+        self.assertEqual(self.harness.upstream.calls, 0)
+
+    def test_connection_limit_is_enforced_before_authentication(self):
+        self.harness.close()
+        with mock.patch.object(adapter, "MAX_CONNECTIONS", 2):
+            self.harness = Harness(request_timeout=2)
+        with contextlib.ExitStack() as connections:
+            def connect():
+                return connections.enter_context(
+                    socket.create_connection(("127.0.0.1", self.harness.port), timeout=0.8)
+                )
+
+            for _ in range(2):
+                connect().sendall(b"GET /health HTTP/1.1\r\n")
+            self.assertEqual(connect().recv(1), b"")
+        self.assertEqual(self.harness.upstream.calls, 0)
+
+    def test_upstream_deadline_bounds_streamed_headers_and_body(self):
+        for mode in ("slow_headers", "slow_body"):
+            with self.subTest(mode=mode):
+                self.harness.close()
+                self.harness = Harness(upstream_mode=mode, upstream_timeout=0.32)
+                status, body, _, _ = self.harness.request(
+                    "POST", "/chat", self._body(), token=self.harness.token()
+                )
+                self.assertEqual(status, 504)
+                self.assertEqual(body, {"error": "upstream timeout", "outcome": "unknown"})
+                self.assertEqual(self.harness.upstream.calls, 1)
+
+    def test_upstream_accepts_chunked_response_and_rejects_truncated_length(self):
+        for mode, expected in (("chunked", 200), ("truncated", 502)):
+            with self.subTest(mode=mode):
+                self.harness.close()
+                self.harness = Harness(upstream_mode=mode)
+                status, body, _, _ = self.harness.request(
+                    "POST", "/chat", self._body(), token=self.harness.token()
+                )
+                self.assertEqual(status, expected)
+                if expected == 502:
+                    self.assertEqual(body["outcome"], "unknown")
+                self.assertEqual(self.harness.upstream.calls, 1)
+
+    def test_local_client_reads_only_the_private_adapter_secret(self):
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "secret"
+            write_private(path, self.harness.secret)
+            with (
+                mock.patch.object(adapter, "BIND_PORT", self.harness.port),
+                mock.patch("sys.stdin", io.TextIOWrapper(io.BytesIO(b"local message"))),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(output),
+            ):
+                self.assertEqual(lobby_client.main(["health", "--secret-file", str(path)]), 0)
+                self.assertEqual(lobby_client.main(["chat", "--secret-file", str(path)]), 0)
+        health, chat = map(json.loads, output.getvalue().splitlines())
+        self.assertEqual(health["status"], "ok")
+        self.assertEqual(chat["reply"], "fake upstream reply")
+        self.assertEqual(self.harness.upstream.calls, 1)
+        self.assertNotIn(self.harness.token(), output.getvalue())
+        self.assertNotIn(self.harness.gateway_token, output.getvalue())
 
 
 if __name__ == "__main__":

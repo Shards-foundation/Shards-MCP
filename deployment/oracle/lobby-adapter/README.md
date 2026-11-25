@@ -48,9 +48,10 @@ Errors are sanitised:
 ```json
 {"error":"fixed message"}
 {"error":"upstream timeout","outcome":"unknown"}
+{"error":"upstream unavailable","outcome":"not_dispatched"}
 ```
 
-No upstream response body, request body, adapter secret, or gateway token is returned to the caller or written to a log. Per-request `BaseHTTPRequestHandler` logging is disabled.
+The adapter returns the validated reply text and rejects a reply containing either exact configured credential. It suppresses raw upstream errors, malformed HTTP input, and handler tracebacks in responses and logs. This check covers literal credential values.
 
 ## Conversation namespace
 
@@ -60,7 +61,7 @@ The client never supplies a session key. For each valid conversation UUID the ad
 user = "lobby-" + sha256("shards-lobby-user-v1\0" + uuid).hexdigest()[:32]
 ```
 
-The value is stable for the same UUID, opaque to the client, and different for a different UUID. It is sent as the OpenAI-compatible `user` field. This implementation assumes the gateway treats that field as the per-conversation namespace; verify that assumption on the target OpenClaw revision before relying on conversation continuity.
+The value is stable for one UUID and sent as the OpenAI-compatible `user` field. Anyone with the shared adapter credential can submit a known UUID. Conversation separation depends on the target OpenClaw revision honoring `user` as the session namespace.
 
 ## Security model
 
@@ -68,8 +69,9 @@ The value is stable for the same UUID, opaque to the client, and different for a
 - The gateway token is read only from `gateway.auth.token` or `gateway.token` in the local OpenClaw config. Missing, conflicting, non-string, non-ASCII, or malformed tokens fail closed. The config and secret files must be regular, owner-owned, and not accessible by group or others.
 - The gateway token is placed only in the fixed upstream `Authorization` header. It is not forwarded from the caller, logged, returned, or used for the downstream adapter credential.
 - `http.client.HTTPConnection` connects directly to the fixed loopback address. It does not read proxy environment variables, and the adapter does not follow redirects.
-- Active chat handling is capped at four concurrent requests; excess valid requests receive `503 busy`. Request-body reads have a 10-second total deadline, upstream calls have a 30-second timeout, request bodies are capped at 16 KiB, and upstream responses are capped at 256 KiB.
-- A timeout or connection failure after dispatch is reported as `outcome: unknown`. The adapter makes exactly one upstream attempt and never retries an ambiguous inference outcome automatically.
+- Up to eight connections can enter request handling, including unauthenticated connections. The adapter closes excess connections. A 10-second wall-clock deadline covers the request line, headers, and body. The body limit is 16 KiB.
+- A single chat can be active, including requests for the same conversation. Excess authenticated chat requests receive `503 busy`. The upstream connect, send, headers, and body share a 30-second wall-clock deadline and a 256 KiB body cap.
+- An upstream connect failure returns `outcome: not_dispatched`. A failure after sending begins returns `outcome: unknown`. The adapter makes one attempt. A disconnect or timeout leaves OpenClaw free to finish work already started. Check the original conversation and any effects before submitting another request.
 
 ## Prompt-only "no tools" does not enforce policy
 
@@ -79,7 +81,7 @@ This adapter sends no `tools` or `tool_choice` fields and does not add a system 
 
 1. The existing OpenClaw 2026.11.8 revision `2d4ab29` is already running as the unprivileged `openclaw` user, with the gateway on `127.0.0.1:18789`, native `/v1/chat/completions` enabled, and model `openclaw/shards` authenticated. This change does not install, configure, restart, or modify OpenClaw.
 2. Run the adapter as the same unprivileged `openclaw` user so `HOME` resolves to that user's home and the credential files have the expected owner.
-3. `~/.openclaw/openclaw.json` must be owned by that user and mode `0600` because it contains the gateway token. If it is not, record the original mode, then `chmod 600 ~/.openclaw/openclaw.json`. This is reversible and does not change the token.
+3. `~/.openclaw/openclaw.json` must already be owned by that user with group and other access disabled because it contains the gateway token.
 4. No package installation, new runtime, systemd unit, firewall rule, tunnel, Cloudflare Access change, DNS change, public listener, or production deployment is part of this adapter.
 
 ## Local setup and smoke test
@@ -90,7 +92,7 @@ From the repository root, as the `openclaw` user:
 python3 deployment/oracle/lobby-adapter/lobby_adapter.py init-secret
 ```
 
-This creates `~/.openclaw/lobby-adapter.secret` with mode `0600`, refuses to overwrite an existing file, and prints only the path. The secret value is never printed. Read it locally into a client configuration; do not commit it, paste it into a ticket, or send it to a log.
+This creates `~/.openclaw/lobby-adapter.secret` with mode `0600`, refuses to overwrite an existing file, and prints only the path. The local client reads the value directly from that file.
 
 Start the adapter:
 
@@ -103,22 +105,18 @@ The startup line reports the fixed listener, upstream URL, and model, and contai
 Optional local smoke test, with the gateway already running:
 
 ```sh
-read -r LOBBY_TOKEN < ~/.openclaw/lobby-adapter.secret
-curl -sS -H "Authorization: Bearer $LOBBY_TOKEN" http://127.0.0.1:18790/health
-CONV=$(python3 -c 'import uuid; print(uuid.uuid4())')
-curl -sS -H "Authorization: Bearer $LOBBY_TOKEN" \
-  -H 'Content-Type: application/json' \
-  --data "{\"conversation_id\":\"$CONV\",\"message\":\"Reply with one short sentence.\"}" \
-  http://127.0.0.1:18790/chat
+python3 deployment/oracle/lobby-adapter/lobby_client.py health
+python3 deployment/oracle/lobby-adapter/lobby_client.py chat <<'MESSAGE'
+Reply with one short sentence.
+MESSAGE
 ```
 
-The second command performs real local inference if the gateway is live. It is an operator action, not part of the automated tests. Do not paste the token into shell history, CI logs, screenshots, or tickets.
+The chat command performs real local inference if the gateway is live. The client generates a UUID by default. Pass the same UUID with `--conversation-id` to continue an existing conversation. The adapter secret stays out of command arguments and environment variables.
 
 ### Reversible cleanup
 
 - Stop the process with `Ctrl-C`. No service manager, boot hook, or scheduled task is installed.
 - Remove the adapter credential with `rm ~/.openclaw/lobby-adapter.secret`. Existing clients then receive `401`.
-- If you changed the OpenClaw config mode, restore the recorded original mode.
 - No repository file, gateway configuration, tunnel, Access policy, DNS record, or production state is changed by setup or cleanup.
 
 ## Tests
@@ -135,11 +133,11 @@ The suite starts a fake upstream and a real loopback adapter, then covers:
 - missing, wrong, malformed, and duplicate authentication;
 - malformed JSON, duplicate keys, invalid UUIDs, control characters, oversize bodies, and oversize messages;
 - arbitrary routing attempts, unknown fields, wrong `Host`, and browser `Origin`;
-- busy/concurrency rejection and slow request-body timeout;
-- upstream error, timeout, redirect, invalid JSON, empty choices, and oversize response;
+- pre-authentication connection limits, same-conversation concurrency, and wall-clock request deadlines;
+- upstream error, redirect, malformed framing or JSON, oversize response, and wall-clock response deadlines;
 - proxy environment variables being ignored;
 - secret/config file permissions, symlinks, conflicts, and CLI output redaction;
-- request bodies and credentials not appearing in logs or responses.
+- handling of successful replies containing synthetic credentials, sanitized errors and private client credential loading.
 
 No test contacts the live gateway, a host service, Cloudflare, or an external provider. A green local suite is evidence for this adapter's code paths only; it is not hosted acceptance, OpenClaw compatibility certification, or a production claim.
 
@@ -149,8 +147,8 @@ No test contacts the live gateway, a host service, Cloudflare, or an external pr
 - The gateway revision, `/v1/chat/completions` behaviour, `user` namespace semantics, and model availability are assumed from the stated environment; the automated tests do not prove them.
 - Single-turn transport: the adapter sends one user message per request. Conversation continuity depends on the gateway's handling of the derived `user` value; the adapter stores no history.
 - Text only, no streaming, no files, images, audio, tools, or tool approval changes.
-- No automatic retry. `outcome: unknown` means the caller must reconcile or retry deliberately.
-- Concurrency is capped for active chat requests; this is not a general-purpose rate limiter or denial-of-service defence for the loopback host.
+- An ambiguous upstream result requires reconciliation before retry. The adapter cannot confirm cancellation or prevent a later manual request from overlapping with unfinished upstream work.
+- An unauthenticated local process can occupy all connection slots temporarily.
 - Browser clients are rejected by the `Origin` rule; use a local CLI or desktop client.
 - The adapter refuses group/other-accessible credential files. It does not repair host permissions.
 - No hot reload: restart the adapter after rotating the adapter secret or gateway token.
